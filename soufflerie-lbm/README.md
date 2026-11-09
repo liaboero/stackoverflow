@@ -106,12 +106,37 @@ limite, absentes d'un calcul 2D aussi grossier. La portance des profils est
 sensible à la résolution du bord de fuite (± 15 %) et reste en dessous de la
 référence fine (pente ≈ π par radian à Re = 1000).
 
+## Jusqu'à quel Reynolds ?
+
+Deux limites, la plus basse l'emporte.
+
+**Résolution.** Erreur sur la traînée du NACA 0012 à α = 0 (références :
+Di Ilio et al. 2018 et XFOIL, Cx = 0,119 / 0,084 / 0,053 à Re = 1000 / 2000
+/ 5000) :
+
+| L (mailles) | Re = 1000 | Re = 2000 | Re = 5000 |
+| --- | --- | --- | --- |
+| 12 (Rapide) | +54 % | +96 % | — |
+| 16 (Standard) | +22 % | +42 % | +99 % |
+| 24 (Fine) | +5 % | +14 % | +35 % |
+| 32 (hors application) | −4 % | −4 % | +1 % |
+
+Règle retenue : traînée à ± 10 % tant que Re ≲ 2,5 L², soit Re ≈ 350
+(Rapide), 650 (Standard) et 1450 (Fine). Au-delà, le calcul reste stable
+jusqu'à Re = 5000 grâce au modèle de sous-maille, mais la traînée est
+surestimée : l'application l'affiche.
+
+**Physique 2D.** Le sillage d'un cylindre devient tridimensionnel vers
+Re ≈ 190 (mode A, Williamson 1996 ; Barkley & Henderson 1996). Au-delà, un
+calcul 2D surestime Cx, St et les fluctuations de portance (cylindre à
+Re = 1000 : Cx ≈ 1,4 en 2D contre ≈ 1 mesuré). Pour les corps non profilés
+(cylindre, carré, triangle, plaque ou ellipse très inclinées), rester sous
+Re ≈ 200 pour des valeurs quantitatives. Un profil peu incliné reste
+laminaire et 2D bien plus loin : c'est alors la résolution qui limite.
+
 ## Limites
 
-- Calcul **2D** : pas de transition, pas de turbulence 3D. Au-delà de
-  Re ≈ 1000 le résultat est qualitatif.
-- Résolution modeste : au-delà de Re ≈ 300 la couche limite fait moins
-  d'une maille ; l'application l'indique.
+- Calcul **2D** et laminaire : pas de transition ni de turbulence 3D.
 - Écoulement faiblement compressible (Ma ≈ 0,17 par défaut, réglable).
 - Calcul sur un seul cœur du processeur : ≈ 20 à 30 millions de mailles mises
   à jour par seconde sur un téléphone récent, soit 1 à 3 temps convectifs

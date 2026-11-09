@@ -1,7 +1,7 @@
 /**
  * Soufflerie de poche — interface mobile.
  */
-import { WindTunnel, RESOLUTIONS, RAMP_T } from './sim.js';
+import { WindTunnel, RESOLUTIONS, RAMP_T, RE_WAKE_3D } from './sim.js';
 import { SHAPES, SHAPE_BY_ID, parseNaca, shapeIconPath } from './shapes.js';
 import { ForceHistory, analyze } from './stats.js';
 import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
@@ -346,15 +346,31 @@ function updateInfo() {
   const i = wt.info();
   $('numinfo').textContent =
     `Grille ${i.nx}×${i.ny} · L = ${i.L} mailles · τ = ${i.tau.toFixed(4)} · Ma = ${i.mach.toFixed(2)} · ` +
-    `confinement ${(i.blockage * 100).toFixed(1)} % · sous-maille ${i.les ? 'active' : 'inactive'}`;
+    `confinement ${(i.blockage * 100).toFixed(1)} % · sous-maille ${i.les ? 'active' : 'inactive'} · ` +
+    `Re fiable ≲ ${i.reLimit}`;
   const warn = $('warn');
   const msgs = [];
-  if (i.blCells < 1) {
+  if (state.re > i.reLimit) {
+    const next =
+      state.res === 'rapide'
+        ? 'passez en résolution Standard ou Fine'
+        : state.res === 'standard'
+          ? 'passez en résolution Fine'
+          : 'réduisez Re';
     msgs.push(
-      `Couche limite sous-résolue (≈ ${i.blCells.toFixed(1)} maille) : résultats qualitatifs. Réduisez Re ou affinez la grille.`,
+      `Au-delà de Re ≈ ${i.reLimit} avec ${i.L} mailles par longueur, la couche limite est trop peu résolue : ` +
+        `la traînée est surestimée (de +20 % à +100 %) et les résultats sont qualitatifs ; ${next}.`,
     );
   }
-  if (state.re >= 1000) msgs.push('Au-delà de Re ≈ 1000, l’écoulement réel devient 3D et turbulent : le calcul 2D en donne une image simplifiée.');
+  const s = shapeDef();
+  const a = Math.abs(alphaOf());
+  const bluff = ['cylinder', 'square', 'triangle'].includes(s.id) || (['plate', 'ellipse'].includes(s.id) && a >= 20);
+  if (bluff && state.re > RE_WAKE_3D) {
+    msgs.push(
+      `Au-delà de Re ≈ ${RE_WAKE_3D}, le sillage réel d’un corps non profilé devient tridimensionnel : ` +
+        'le calcul 2D surestime Cx, St et l’amplitude de Cz (cylindre vers Re = 1000 : Cx ≈ 1,4 en 2D, ≈ 1 mesuré).',
+    );
+  }
   if (!i.les && i.tau < 0.515) msgs.push('τ proche de 0,5 sans modèle de sous-maille : risque de divergence.');
   warn.hidden = msgs.length === 0;
   warn.textContent = msgs.join(' ');

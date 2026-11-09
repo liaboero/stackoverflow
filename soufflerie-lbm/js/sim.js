@@ -32,6 +32,18 @@ export function lesWallLength(L, re) {
   return Math.min(4, Math.max(1, (8 * L) / Math.sqrt(re)));
 }
 
+/**
+ * Reynolds au-delà duquel la traînée d'un profil est surestimée de plus de
+ * ~10 % faute de résolution : Re ≈ 2,5 L², calibré sur le NACA 0012 à α = 0
+ * (références Di Ilio et al. 2018 / XFOIL ; voir README). Arrondi à 50.
+ */
+export function reliableReynolds(L) {
+  return Math.round((2.5 * L * L) / 50) * 50;
+}
+
+/** Reynolds d'apparition du sillage tridimensionnel d'un cylindre (mode A). */
+export const RE_WAKE_3D = 190;
+
 export class WindTunnel {
   /**
    * @param {object} cfg
@@ -161,8 +173,7 @@ export class WindTunnel {
       mach: this.uIn * Math.sqrt(3),
       blockage: this.body.frontal / this.ny,
       les: lbm.lesActive,
-      // Mailles dans la couche limite laminaire au point d'arrêt ~ L / √Re.
-      blCells: this.L / Math.sqrt(this.re),
+      reLimit: reliableReynolds(this.L),
     };
   }
 }
