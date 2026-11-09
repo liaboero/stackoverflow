@@ -14,8 +14,8 @@ d'un téléphone (iOS ou Android) et fonctionne ensuite hors ligne.
 - **Maquettes** : cylindre (avec rotation, effet Magnus), carré, ellipse
   (épaisseur réglable), plaque plane, profil NACA à 4 chiffres, triangle.
   Incidence α réglable (positive = cabrée).
-- **Écoulement** : Reynolds de 10 à 5000, trois résolutions (12, 16 ou
-  24 mailles par longueur de référence).
+- **Écoulement** : Reynolds de 10 à 5000, quatre résolutions (12, 16, 24
+  ou 32 mailles par longueur de référence ; la dernière pour ordinateur).
 - **Visualisation** : vorticité, vitesse ou coefficient de pression Cp,
   traceurs (lignes d'émission), force résultante moyenne et ses composantes,
   trois cadrages (maquette, sillage, veine entière). Palettes adaptées au
@@ -119,12 +119,29 @@ Di Ilio et al. 2018 et XFOIL, Cx = 0,119 / 0,084 / 0,053 à Re = 1000 / 2000
 | 12 (Rapide) | +54 % | +96 % | — |
 | 16 (Standard) | +22 % | +42 % | +99 % |
 | 24 (Fine) | +5 % | +14 % | +35 % |
-| 32 (hors application) | −4 % | −4 % | +1 % |
+| 32 (Très fine) | −4 % | −4 % | +1 % |
+| 48 (hors application) | — | — | +2 % |
 
-Règle retenue : traînée à ± 10 % tant que Re ≲ 2,5 L², soit Re ≈ 350
-(Rapide), 650 (Standard) et 1450 (Fine). Au-delà, le calcul reste stable
-jusqu'à Re = 5000 grâce au modèle de sous-maille, mais la traînée est
-surestimée : l'application l'affiche.
+Règle retenue : traînée à ± 10 % jusqu'à Re ≈ 350 (Rapide), 650
+(Standard), 1450 (Fine) et 5000 (Très fine). Au-delà, le calcul reste
+stable grâce au modèle de sous-maille, mais la traînée est surestimée :
+l'application l'affiche.
+
+**Sur ordinateur.** Le coût par temps convectif croît comme L³ (L² mailles,
+L pas de temps par t*) : chaque palier de résolution coûte 2 à 4 fois plus.
+Mesuré dans Chromium sur un processeur de serveur (un seul cœur) : 2,7 /
+1,1 / 0,28 / 0,15 t*/s pour Rapide / Standard / Fine / Très fine à
+Re = 1000. Un portable récent va typiquement 2 à 3 fois plus vite. La
+résolution Très fine y rend Re = 5000 accessible pour les profils, à
+raison d'une à quelques minutes par point de polaire.
+
+Re = 10 000 n'est pas proposé : avec 32 mailles, la traînée est surestimée
+(Cx = 0,043 contre 0,037 – 0,040) et parasitée d'oscillations ; avec 48
+mailles, la moyenne est correcte (0,036) mais le sillage de bord de fuite
+reste instationnaire et il faut ~70 t*, soit 15 à 30 min de calcul dans un
+navigateur. Aller plus loin demande un solveur sur GPU et un opérateur de
+collision plus robuste que BGK près de τ = 0,5 (régularisé, MRT ou
+cumulants).
 
 **Physique 2D.** Le sillage d'un cylindre devient tridimensionnel vers
 Re ≈ 190 (mode A, Williamson 1996 ; Barkley & Henderson 1996). Au-delà, un

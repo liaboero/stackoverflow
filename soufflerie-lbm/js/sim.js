@@ -10,6 +10,8 @@ export const RESOLUTIONS = {
   rapide: { L: 12, label: 'Rapide' },
   standard: { L: 16, label: 'Standard' },
   fine: { L: 24, label: 'Fine' },
+  // ≈ 4 fois plus lente que Fine : destinée à un ordinateur.
+  tresfine: { L: 32, label: 'Très fine' },
 };
 
 /**
@@ -34,11 +36,15 @@ export function lesWallLength(L, re) {
 
 /**
  * Reynolds au-delà duquel la traînée d'un profil est surestimée de plus de
- * ~10 % faute de résolution : Re ≈ 2,5 L², calibré sur le NACA 0012 à α = 0
- * (références Di Ilio et al. 2018 / XFOIL ; voir README). Arrondi à 50.
+ * ~10 % faute de résolution. Mesuré sur le NACA 0012 à α = 0 (références
+ * Di Ilio et al. 2018 / XFOIL ; voir README) : ≈ 2,5 L² jusqu'à 24 mailles,
+ * 5000 à 32 mailles (−4 % à Re = 2000, +1 % à 5000). Au-delà, même à 48
+ * mailles, le bord de fuite devient instationnaire et la convergence lente.
  */
+const RELIABLE_RE = { 12: 350, 16: 650, 24: 1450, 32: 5000 };
+
 export function reliableReynolds(L) {
-  return Math.round((2.5 * L * L) / 50) * 50;
+  return RELIABLE_RE[L] ?? Math.round((2.5 * L * L) / 50) * 50;
 }
 
 /** Reynolds d'apparition du sillage tridimensionnel d'un cylindre (mode A). */

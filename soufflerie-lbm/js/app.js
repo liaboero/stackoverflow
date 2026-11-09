@@ -7,7 +7,7 @@ import { ForceHistory, analyze } from './stats.js';
 import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
 import { drawHistory, drawPolar } from './chart.js';
 
-const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 2000, 5000];
+const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000];
 const U_VALUES = [0.05, 0.08, 0.1, 0.12];
 const WINDOW_T = 20; // fenêtre glissante de moyenne (t*)
 const SETTLE_T = 6; // transitoire ignoré après un changement (t*)
@@ -356,7 +356,9 @@ function updateInfo() {
         ? 'passez en résolution Standard ou Fine'
         : state.res === 'standard'
           ? 'passez en résolution Fine'
-          : 'réduisez Re';
+          : state.res === 'fine'
+            ? 'passez en résolution Très fine (sur ordinateur) ou réduisez Re'
+            : 'réduisez Re';
     msgs.push(
       `Au-delà de Re ≈ ${i.reLimit} avec ${i.L} mailles par longueur, la couche limite est trop peu résolue : ` +
         `la traînée est surestimée (de +20 % à +100 %) et les résultats sont qualitatifs ; ${next}.`,
