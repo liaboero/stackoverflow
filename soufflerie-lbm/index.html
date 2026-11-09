@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<!-- HEAD START -->
+<title>Soufflerie de poche</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Soufflerie numérique 2D Lattice Boltzmann : Cx, Cz, Cm et Strouhal de formes simples, directement sur mobile.">
+<meta name="theme-color" content="#e6ebee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c1216" media="(prefers-color-scheme: dark)">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<!-- HEAD END -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Soufflerie">
+<link rel="stylesheet" href="css/app.css">
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<!-- BODY START -->
+<header class="appbar">
+  <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+    <path d="M3 10.5h9M3 16h6M3 21.5h9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+    <path d="M12.5 16c0-3 3.2-4.6 8-4.6 4.2 0 8.4 2.6 9.5 4.6-1.1 2-5.3 4.6-9.5 4.6-4.8 0-8-1.6-8-4.6z" fill="currentColor"/>
+  </svg>
+  <div>
+    <h1>Soufflerie de poche</h1>
+    <p class="sub">CFD 2D Lattice Boltzmann · D2Q9</p>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="viewer" aria-label="Veine d'essai">
+    <div class="stage">
+      <canvas id="flow" role="img" aria-label="Champ d'écoulement autour de la maquette"></canvas>
+      <div class="hud hud-tl"><span class="pill status" id="status" data-state="transient">Démarrage</span></div>
+      <div class="hud hud-tr"><span class="pill num" id="hud-time">t* 0.0</span></div>
+      <div class="hud hud-bl">
+        <div class="pill scale">
+          <span class="lbl" id="cb-label">Vorticité ω·L/U</span>
+          <span class="num" id="cb-min">−5</span>
+          <span class="cb-grad" id="cb-grad"></span>
+          <span class="num" id="cb-max">5</span>
+        </div>
+      </div>
+      <div class="hud hud-br">
+        <button id="btn-reset" class="icon-btn" type="button" aria-label="Relancer le calcul">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.3-5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3.5v4.4h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="btn-play" class="icon-btn primary" type="button" aria-label="Mettre en pause">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="ic-pause"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="ic-play" hidden><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="toast" id="toast" role="alert" hidden></div>
+    </div>
+    <dl class="readouts" aria-live="off">
+      <div class="ro ro-cx"><dt>Cx <small>traînée</small></dt><dd><span class="v num" id="ro-cx">—</span><span class="amp num" id="ro-cx-amp"></span></dd></div>
+      <div class="ro ro-cz"><dt>Cz <small>portance</small></dt><dd><span class="v num" id="ro-cz">—</span><span class="amp num" id="ro-cz-amp"></span></dd></div>
+      <div class="ro ro-cm"><dt>Cm <small>tangage</small></dt><dd><span class="v num" id="ro-cm">—</span><span class="amp num" id="ro-cm-sub"></span></dd></div>
+      <div class="ro ro-st"><dt>St <small>Strouhal</small></dt><dd><span class="v num" id="ro-st">—</span><span class="amp num" id="ro-st-sub"></span></dd></div>
+    </dl>
+  </section>
+
+  <div class="panels">
+    <section class="card" aria-labelledby="h-hist">
+      <div class="card-head">
+        <h2 id="h-hist">Efforts</h2>
+        <div class="legend"><span class="key key-cx">Cx</span><span class="key key-cz">Cz</span><span class="key key-win">moyenne</span></div>
+      </div>
+      <canvas id="chart" class="chart" role="img" aria-label="Historique des coefficients Cx et Cz"></canvas>
+    </section>
+
+    <section class="card" aria-labelledby="h-model">
+      <h2 id="h-model">Maquette</h2>
+      <div class="shape-grid" role="radiogroup" aria-labelledby="h-model" id="shape-list"></div>
+
+      <div class="field" id="row-alpha">
+        <label for="alpha">Incidence α <span class="hint">positive = cabrée</span></label>
+        <div class="slider-row">
+          <button class="step" type="button" data-target="alpha" data-delta="-1" aria-label="Diminuer l'incidence d'un degré">−</button>
+          <input type="range" id="alpha" min="-20" max="25" step="0.5" value="4">
+          <button class="step" type="button" data-target="alpha" data-delta="1" aria-label="Augmenter l'incidence d'un degré">+</button>
+          <output id="alpha-out" for="alpha">4.0°</output>
+        </div>
+      </div>
+
+      <div class="field" id="row-naca">
+        <label for="naca">Profil NACA à 4 chiffres</label>
+        <div class="naca-row">
+          <input type="text" id="naca" inputmode="numeric" maxlength="4" autocomplete="off" value="0012" aria-describedby="naca-hint">
+          <div class="chips" id="naca-presets">
+            <button class="chip-btn" type="button" data-naca="0012">0012</button>
+            <button class="chip-btn" type="button" data-naca="2412">2412</button>
+            <button class="chip-btn" type="button" data-naca="4412">4412</button>
+            <button class="chip-btn" type="button" data-naca="0018">0018</button>
+          </div>
+        </div>
+        <p class="hint" id="naca-hint">Symétrique, épaisseur 12 %</p>
+      </div>
+
+      <div class="field" id="row-thick">
+        <label for="thick">Épaisseur relative e/c</label>
+        <div class="slider-row">
+          <input type="range" id="thick" min="0.1" max="1" step="0.05" value="0.4">
+          <output id="thick-out" for="thick">0.40</output>
+        </div>
+      </div>
+
+      <div class="field" id="row-spin">
+        <label for="spin">Rotation ΩR/U <span class="hint">effet Magnus</span></label>
+        <div class="slider-row">
+          <input type="range" id="spin" min="-3" max="3" step="0.25" value="0">
+          <output id="spin-out" for="spin">0.00</output>
+        </div>
+      </div>
+
+      <p class="hint" id="ref-hint"></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-flow">
+      <h2 id="h-flow">Écoulement</h2>
+      <div class="field">
+        <label for="re">Nombre de Reynolds <span class="hint">U·L/ν</span></label>
+        <div class="slider-row">
+          <input type="range" id="re" min="0" max="10" step="1" value="4">
+          <output id="re-out" for="re">100</output>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-res">Résolution</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-res" id="res-seg"></div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-field">Affichage</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-field" id="field-seg"></div>
+        <div class="seg" role="radiogroup" aria-label="Cadrage" id="view-seg"></div>
+        <div class="switches">
+          <label class="switch"><input type="checkbox" id="tracers" checked> Traceurs</label>
+          <label class="switch"><input type="checkbox" id="arrow" checked> Force résultante</label>
+        </div>
+      </div>
+      <details class="advanced" id="advanced">
+        <summary>Réglages numériques</summary>
+        <div class="field">
+          <span class="label" id="lbl-wall">Condition de paroi</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lbl-wall" id="wall-seg"></div>
+        </div>
+        <div class="field">
+          <span class="label" id="lbl-les">Modèle de sous-maille (Smagorinsky)</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lbl-les" id="les-seg"></div>
+        </div>
+        <div class="field">
+          <span class="label" id="lbl-u">Vitesse réseau U (Mach)</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lbl-u" id="u-seg"></div>
+        </div>
+      </details>
+      <p class="numinfo num" id="numinfo"></p>
+      <p class="warn" id="warn" hidden></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-meas">
+      <div class="card-head">
+        <h2 id="h-meas">Mesures</h2>
+        <div class="seg small" role="radiogroup" aria-label="Type de graphique" id="polar-seg"></div>
+      </div>
+      <canvas id="polar" class="chart" role="img" aria-label="Polaire des points enregistrés"></canvas>
+      <p class="hint" id="polar-hint"></p>
+      <div class="actions">
+        <button id="btn-record" class="btn primary" type="button">Enregistrer le point</button>
+        <button id="btn-copy" class="btn" type="button">Copier le tableau</button>
+        <button id="btn-clear" class="btn ghost" type="button">Effacer</button>
+      </div>
+      <div class="sweep" id="sweep">
+        <h3>Polaire automatique en incidence</h3>
+        <div class="sweep-row">
+          <label>α de <input id="sw-from" type="number" value="-4" step="1"></label>
+          <label>à <input id="sw-to" type="number" value="12" step="1"></label>
+          <label>pas <input id="sw-step" type="number" value="2" step="0.5" min="0.5"></label>
+          <button id="btn-sweep" class="btn" type="button">Lancer</button>
+        </div>
+        <p class="hint" id="sweep-hint">Chaque point : stabilisation puis moyenne sur ~15 t*. L'écran reste allumé pendant le balayage si l'appareil le permet.</p>
+        <div class="progress" id="sweep-progress" hidden>
+          <div class="bar"><span id="sweep-bar"></span></div>
+          <p id="sweep-text"></p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="results">
+          <thead><tr><th>Maquette</th><th>α</th><th>Re</th><th>Cx</th><th>Cz</th><th>Cm</th><th>St</th><th>Cz/Cx</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <textarea id="csv-fallback" readonly hidden aria-label="Tableau à copier"></textarea>
+    </section>
+
+    <section class="card about" aria-labelledby="h-about">
+      <h2 id="h-about">Méthode</h2>
+      <ul>
+        <li>Lattice Boltzmann D2Q9, collision BGK ; modèle de sous-maille de Smagorinsky quand τ &lt; 0,51 (au-delà de Re ≈ 360, 480 ou 720 selon la résolution).</li>
+        <li>Mise en vitesse progressive sur 5 t* (rampe de la vitesse amont et accélération uniforme du fluide), sans choc de démarrage.</li>
+        <li>Paroi : rebond à mi-chemin interpolé de Bouzidi, qui suit la forme exacte plutôt que l'escalier des mailles.</li>
+        <li>Efforts par échange de quantité de mouvement. Cx = Fx / (½ρU²L), Cz = Fz / (½ρU²L), Cm = M / (½ρU²L²), positif cabreur.</li>
+        <li>Moyennes sur un nombre entier de périodes quand l'écoulement est périodique ; Strouhal St = f·L/U tiré de Cz.</li>
+        <li>Veine de 24 L × 12 L, maquette à 8 L de l'entrée, bandes absorbantes en haut et en bas.</li>
+      </ul>
+      <p class="hint">Calcul 2D par unité d'envergure, à nombre de Mach ≈ 0,17. Les valeurs restent indicatives : confinement de ~8 %, résolution limitée aux Reynolds élevés, pas de transition ni d'effets 3D.</p>
+    </section>
+  </div>
+</main>
+<!-- BODY END -->
+</body>
+</html>

@@ -1,0 +1,58 @@
+name: Soufflerie de poche
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'soufflerie-lbm/**'
+      - '.github/workflows/soufflerie-pages.yml'
+  pull_request:
+    paths:
+      - 'soufflerie-lbm/**'
+      - '.github/workflows/soufflerie-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: soufflerie-lbm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
+  deploy:
+    # Prérequis : Settings → Pages → Source : « GitHub Actions ».
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: soufflerie-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Version fichier unique
+        run: npm run build
+        working-directory: soufflerie-lbm
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: soufflerie-lbm
+      - id: deployment
+        uses: actions/deploy-pages@v4
