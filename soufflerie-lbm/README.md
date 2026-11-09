@@ -168,12 +168,14 @@ Di Ilio et al. 2018 et XFOIL, Cx = 0,119 / 0,084 / 0,053 / 0,037 – 0,040
 | 24 (Fine) | +5 % | +14 % | +35 % | — |
 | 32 (Très fine) | −4 % | −4 % | +1 % | +19 à +29 % |
 | 48 (Ultra, GPU) | — | — | +2 % | +5 à +13 % |
+| 64 (Max, GPU) | — | — | — | −6 à −13 % |
 
-Règle retenue : traînée à ± 10 % jusqu'à Re ≈ 350 (Rapide), 650
-(Standard), 1450 (Fine), 5000 (Très fine) et 10 000 (Ultra). Pour Max
-(64 mailles), 15 000 est une extrapolation en L², arrondie par défaut.
-Au-delà, le calcul reste stable, mais la traînée est surestimée :
-l'application l'affiche.
+Règle retenue : traînée à ± 10 % environ jusqu'à Re ≈ 350 (Rapide), 650
+(Standard), 1450 (Fine), 5000 (Très fine) et 10 000 (Ultra et Max). À
+Re = 10 000, les deux résolutions GPU encadrent les références, qui
+diffèrent elles-mêmes de 8 %. Re = 15 000 et 20 000 restent accessibles mais
+sans référence pour les valider ; l'application les signale comme hors du
+domaine fiable.
 
 **Coût.** Le coût par temps convectif croît comme L³ (L² mailles,
 L pas de temps par t*) : chaque palier de résolution coûte 2 à 4 fois plus.

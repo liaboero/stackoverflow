@@ -41,11 +41,11 @@ export function lesWallLength(L, re) {
  * Reynolds au-delà duquel la traînée d'un profil est surestimée de plus de
  * ~10 % faute de résolution. Mesuré sur le NACA 0012 à α = 0 (références
  * Di Ilio et al. 2018 / XFOIL ; voir README) : ≈ 2,5 L² jusqu'à 24 mailles,
- * 5000 à 32 mailles (−4 % à Re = 2000, +1 % à 5000), 10 000 à 48 mailles
- * (collision régularisée : Cx = 0,042 contre 0,037–0,040) ; 64 mailles :
- * extrapolation en L² arrondie par défaut.
+ * 5000 à 32 mailles (−4 % à Re = 2000, +1 % à 5000), 10 000 à 48 et 64
+ * mailles (collision régularisée : Cx = 0,042 et 0,035 contre 0,037–0,040).
+ * Faute de référence, rien n'est garanti au-delà.
  */
-const RELIABLE_RE = { 12: 350, 16: 650, 24: 1450, 32: 5000, 48: 10000, 64: 15000 };
+const RELIABLE_RE = { 12: 350, 16: 650, 24: 1450, 32: 5000, 48: 10000, 64: 10000 };
 
 export function reliableReynolds(L) {
   return RELIABLE_RE[L] ?? Math.round((2.5 * L * L) / 50) * 50;
