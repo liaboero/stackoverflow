@@ -58,6 +58,7 @@ export class LBM {
     nu = 0.02,
     les = 'auto',
     cs = 0.15,
+    lesWallA = 4,
     bouzidi = true,
     spongeFraction = 0.12,
     absorbWidth = Math.round(ny / 8),
@@ -75,6 +76,9 @@ export class LBM {
     // Bandes absorbantes haute et basse : relaxation vers l'écoulement amont,
     // pour évacuer les ondes acoustiques piégées entre les parois.
     this.sigmaRow = new Float64Array(ny);
+    // Amortissement pariétal de la viscosité de sous-maille (0 à la paroi → 1 au large).
+    this.lesDamp = new Float32Array(N).fill(1);
+    this.lesWallA = lesWallA;
     this.rho = new Float32Array(N);
     this.ux = new Float32Array(N);
     this.uy = new Float32Array(N);
@@ -213,27 +217,114 @@ export class LBM {
     }
     this.solidCount = solids;
 
+    // Zone où chercher les parois plus minces qu'une maille (bord de fuite,
+    // plaque) : boîte englobante du corps, élargie de 2 mailles.
+    const bb = o.bbox;
+    const bx0 = bb ? Math.floor(bb.x0) - 2 : 0;
+    const bx1 = bb ? Math.ceil(bb.x1) + 2 : -1;
+    const by0 = bb ? Math.floor(bb.y0) - 2 : 0;
+    const by1 = bb ? Math.ceil(bb.y1) + 2 : -1;
+
     wallQ.fill(0);
     let links = 0;
+    let thin = 0;
     for (let y = 0; y < ny; y++) {
       for (let x = 1; x < nx - 1; x++) {
         const idx = y * nx + x;
         if (type[idx] === SOLID) continue;
         let near = y === 0 || y === ny - 1;
+        const inBox = x >= bx0 && x <= bx1 && y >= by0 && y <= by1;
         for (let j = 1; j < 9; j++) {
           const sx = x - CX[j];
           const sy = y - CY[j];
           if (sy < 0 || sy >= ny) continue;
-          if (type[sy * nx + sx] !== SOLID) continue;
-          near = true;
           // Lien du nœud fluide vers la paroi : direction i = OPP[j].
-          wallQ[j * N + idx] = linkFraction(inside, x, y, -CX[j], -CY[j]);
-          links++;
+          let q = 0;
+          if (type[sy * nx + sx] === SOLID) {
+            q = linkFraction(inside, x, y, -CX[j], -CY[j]);
+          } else if (inBox) {
+            // Lien fluide–fluide qui traverse une paroi mince : sans ce
+            // traitement, l'écoulement passerait à travers.
+            q = crossingFraction(inside, x, y, -CX[j], -CY[j]);
+            if (q > 0) thin++;
+          }
+          if (q > 0) {
+            near = true;
+            wallQ[j * N + idx] = q;
+            links++;
+          }
         }
         if (near) type[idx] = NEAR_WALL;
       }
     }
     this.linkCount = links;
+    this.thinLinkCount = thin;
+    this._computeWallDistance();
+    this._updateLesDamping();
+  }
+
+  /** Longueur d'amortissement pariétal de la LES (mailles). */
+  setLesWallLength(A) {
+    this.lesWallA = A;
+    this._updateLesDamping();
+  }
+
+  /**
+   * Facteur d'amortissement de type Van Driest, (1 − e^(−d/A))², où d est la
+   * distance (en mailles) à la paroi du corps. Le modèle de Smagorinsky
+   * ajoute sinon de la viscosité dans la couche limite laminaire, où le
+   * cisaillement est fort mais l'écoulement résolu, et surestime la traînée
+   * de frottement.
+   */
+  _updateLesDamping() {
+    const { N, lesDamp } = this;
+    const d = this.wallDist;
+    const A = this.lesWallA;
+    if (!d || !(A > 0) || this.solidCount === 0) {
+      lesDamp.fill(1);
+      return;
+    }
+    for (let i = 0; i < N; i++) {
+      // Distance à la paroi ≈ distance au centre de la maille solide − ½.
+      const w = Math.max(0, d[i] - 0.5);
+      const f = 1 - Math.exp(-w / A);
+      lesDamp[i] = f * f;
+    }
+  }
+
+  /** Distance de chanfrein (1, √2) aux mailles solides, en deux passes. */
+  _computeWallDistance() {
+    const { nx, ny, N, type } = this;
+    const d = (this.wallDist ??= new Float32Array(N));
+    const BIG = 1e6;
+    for (let i = 0; i < N; i++) d[i] = type[i] === SOLID ? 0 : BIG;
+    const D = Math.SQRT2;
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++) {
+        const i = y * nx + x;
+        let v = d[i];
+        if (x > 0) v = Math.min(v, d[i - 1] + 1);
+        if (y > 0) {
+          v = Math.min(v, d[i - nx] + 1);
+          if (x > 0) v = Math.min(v, d[i - nx - 1] + D);
+          if (x < nx - 1) v = Math.min(v, d[i - nx + 1] + D);
+        }
+        d[i] = v;
+      }
+    }
+    for (let y = ny - 1; y >= 0; y--) {
+      for (let x = nx - 1; x >= 0; x--) {
+        const i = y * nx + x;
+        let v = d[i];
+        if (x < nx - 1) v = Math.min(v, d[i + 1] + 1);
+        if (y < ny - 1) {
+          v = Math.min(v, d[i + nx] + 1);
+          if (x < nx - 1) v = Math.min(v, d[i + nx + 1] + D);
+          if (x > 0) v = Math.min(v, d[i + nx - 1] + D);
+        }
+        d[i] = v;
+      }
+    }
   }
 
   /** Chemin lent : propagation (pull) pour une maille proche d'une paroi. */
@@ -308,6 +399,7 @@ export class LBM {
     const tmp = this._tmp;
     const les = this.lesActive;
     const c18 = 18 * this.cs * this.cs;
+    const lesDamp = this.lesDamp;
     const N2 = 2 * N, N3 = 3 * N, N4 = 4 * N, N5 = 5 * N, N6 = 6 * N, N7 = 7 * N, N8 = 8 * N;
     const w0 = 4 / 9, w1 = 1 / 9, w2 = 1 / 36;
 
@@ -376,7 +468,7 @@ export class LBM {
           const pxy = n5 - n6 + n7 - n8;
           const qn = Math.sqrt(2 * (pxx * pxx + pyy * pyy + 2 * pxy * pxy));
           const t0 = tauCol[x];
-          om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * qn * ir));
+          om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
         } else {
           om = omegaCol[x];
         }
@@ -507,6 +599,28 @@ function moments(f, idx, N) {
     ux: (f1 - f3 + f5 - f6 - f7 + f8) / rho,
     uy: (f2 - f4 + f5 + f6 - f7 - f8) / rho,
   };
+}
+
+/**
+ * Pour un lien entre deux nœuds fluides : fraction q de la première
+ * intersection avec le corps, ou 0 si le lien ne le traverse pas.
+ */
+function crossingFraction(inside, x, y, dx, dy) {
+  const n = 16;
+  for (let k = 1; k < n; k++) {
+    const t = k / n;
+    if (inside(x + t * dx, y + t * dy)) {
+      let lo = (k - 1) / n;
+      let hi = t;
+      for (let it = 0; it < 10; it++) {
+        const mid = 0.5 * (lo + hi);
+        if (inside(x + mid * dx, y + mid * dy)) hi = mid;
+        else lo = mid;
+      }
+      return Math.min(1, Math.max(0.02, 0.5 * (lo + hi)));
+    }
+  }
+  return 0;
 }
 
 /**

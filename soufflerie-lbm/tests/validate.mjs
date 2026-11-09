@@ -83,6 +83,14 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
   );
 }
 
+// 4 bis. Traînée de frottement : le modèle de sous-maille, amorti près de la
+//    paroi, ne doit pas épaissir la couche limite (Cx ≈ 0,144 sans LES ;
+//    référence fine 0,119, Di Ilio et al. 2018 et XFOIL).
+{
+  const a = run({ shape: 'naca', re: 1000, L: 16, tEnd: RAMP_T + 30, avgT: 10, params: { naca: '0012', alpha: 0 } });
+  check('NACA 0012, Re = 1000, LES amortie', a.finite && a.cx > 0.119 && a.cx < 0.155, `Cx = ${a.cx.toFixed(4)}`);
+}
+
 // 5. Cylindre tournant ΩR/U = 1, Re = 100 : effet Magnus (Cz ≈ 2,5 d'après Mittal & Kumar 2003).
 {
   const a = run({ re: 100, L: 12, tEnd: 70, avgT: 25, params: { spinRatio: 1 } });

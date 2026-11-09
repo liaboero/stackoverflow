@@ -22,6 +22,16 @@ export const DOMAIN = { length: 24, height: 12, x0: 8 };
 /** Durée de la mise en vitesse, en temps convectifs L/U. */
 export const RAMP_T = 5;
 
+/**
+ * Longueur d'amortissement pariétal de la LES, en mailles : ~1,6 fois
+ * l'épaisseur de couche limite laminaire 5 L/√Re, bornée à [1, 4]. Plus
+ * longue, la LES serait trop faible pour stabiliser les couches cisaillées
+ * décollées aux Reynolds élevés sur grille grossière.
+ */
+export function lesWallLength(L, re) {
+  return Math.min(4, Math.max(1, (8 * L) / Math.sqrt(re)));
+}
+
 export class WindTunnel {
   /**
    * @param {object} cfg
@@ -47,6 +57,7 @@ export class WindTunnel {
       uIn: this.uIn,
       nu: this.viscosityFor(cfg.re),
       les: cfg.les ?? 'auto',
+      lesWallA: lesWallLength(this.L, cfg.re),
       bouzidi: cfg.bouzidi ?? true,
     });
     this.setBody(cfg.shape, cfg.params ?? {});
@@ -69,6 +80,7 @@ export class WindTunnel {
   setReynolds(re) {
     this.re = re;
     this.lbm.setViscosity(this.viscosityFor(re));
+    this.lbm.setLesWallLength(lesWallLength(this.L, re));
   }
 
   setInletVelocity(u) {
@@ -82,10 +94,18 @@ export class WindTunnel {
     this.shapeId = shape;
     this.params = { ...params };
     this.body = makeBody(shape, { ...params, L: this.L, x0: this.x0, y0: this.y0, uIn: this.uIn });
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [x, y] of this.body.outline) {
+      x0 = Math.min(x0, x);
+      x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y);
+      y1 = Math.max(y1, y);
+    }
     this.lbm.setGeometry(this.body.inside, {
       refX: this.body.refX,
       refY: this.body.refY,
       spin: this.body.spin,
+      bbox: { x0, x1, y0, y1 },
     });
   }
 

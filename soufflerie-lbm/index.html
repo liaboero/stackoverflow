@@ -202,9 +202,10 @@
     <section class="card about" aria-labelledby="h-about">
       <h2 id="h-about">Méthode</h2>
       <ul>
-        <li>Lattice Boltzmann D2Q9, collision BGK ; modèle de sous-maille de Smagorinsky quand τ &lt; 0,51 (au-delà de Re ≈ 360, 480 ou 720 selon la résolution).</li>
+        <li>Lattice Boltzmann D2Q9, collision BGK ; modèle de sous-maille de Smagorinsky quand τ &lt; 0,51 (au-delà de Re ≈ 360, 480 ou 720 selon la résolution), amorti près de la paroi.</li>
         <li>Mise en vitesse progressive sur 5 t* (rampe de la vitesse amont et accélération uniforme du fluide), sans choc de démarrage.</li>
-        <li>Paroi : rebond à mi-chemin interpolé de Bouzidi, qui suit la forme exacte plutôt que l'escalier des mailles.</li>
+        <li>Paroi : rebond à mi-chemin interpolé de Bouzidi, qui suit la forme exacte plutôt que l'escalier des mailles, y compris pour un bord de fuite plus mince qu'une maille.</li>
+        <li>Décollement, lâcher tourbillonnaire et décrochage ne sont pas modélisés : ils sortent du calcul. Aux bas Reynolds simulés, le décrochage est progressif et la traînée de frottement élevée (Cx ≈ 0,12 pour un NACA 0012 à Re = 1000, contre ≈ 0,006 à Re = 10⁶).</li>
         <li>Efforts par échange de quantité de mouvement. Cx = Fx / (½ρU²L), Cz = Fz / (½ρU²L), Cm = M / (½ρU²L²), positif cabreur.</li>
         <li>Moyennes sur un nombre entier de périodes quand l'écoulement est périodique ; Strouhal St = f·L/U tiré de Cz.</li>
         <li>Veine de 24 L × 12 L, maquette à 8 L de l'entrée, bandes absorbantes en haut et en bas.</li>

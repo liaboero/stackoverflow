@@ -50,8 +50,8 @@ npm run serve        # http://localhost:8000
 | Élément | Choix |
 | --- | --- |
 | Réseau | D2Q9, Δx = Δt = 1, c_s² = 1/3 |
-| Collision | BGK ; viscosité de sous-maille de Smagorinsky (C_s = 0,15) quand τ < 0,51 |
-| Paroi | Rebond à mi-chemin interpolé de Bouzidi (forme exacte, pas l'escalier), correction de paroi mobile pour la rotation |
+| Collision | BGK ; viscosité de sous-maille de Smagorinsky (C_s = 0,15) quand τ < 0,51, amortie près de la paroi (type Van Driest) pour ne pas épaissir la couche limite |
+| Paroi | Rebond à mi-chemin interpolé de Bouzidi (forme exacte, pas l'escalier), y compris pour les parois plus minces qu'une maille (bord de fuite, plaque) ; correction de paroi mobile pour la rotation |
 | Efforts | Échange de quantité de mouvement (Ladd), forme de Wen et al. (2014) pour les parois mobiles |
 | Entrée | Vitesse imposée, partie hors équilibre extrapolée (Guo et al. 2002) |
 | Sortie | Pression imposée, précédée d'une zone éponge à viscosité croissante |
@@ -74,7 +74,9 @@ profils). Strouhal St = f·L/U, mesuré sur Cz.
 | Cylindre, Re = 20 | Cx = 2,38 | 2,05 – 2,09 |
 | Cylindre, Re = 100 | Cx = 1,49 ; St = 0,176 ; Cz' = 0,37 | 1,33 – 1,35 ; 0,164 – 0,166 ; 0,33 |
 | NACA 0012, α = 0° | Cz = 0,000 | 0 |
-| NACA 0012, α = ±4°, Re = 500 | Cz = ±0,172 (antisymétrie exacte) | — |
+| NACA 0012, α = ±4°, Re = 500 | Cz = ±0,183 (antisymétrie exacte) | — |
+| NACA 0012, α = 0°, Re = 1000 | Cx = 0,145 / 0,123 / 0,115 (corde de 16 / 24 / 32 mailles) | 0,119 (Di Ilio et al. 2018 ; XFOIL) |
+| NACA 0012, α = 0°, Re = 2000, corde de 24 mailles | Cx = 0,096 | 0,084 |
 | Cylindre tournant ΩR/U = 1, Re = 100 | Cz = 2,59 | ≈ 2,5 (Mittal & Kumar 2003) |
 | Cylindre, Re = 5000 | stable (LES) | — |
 
@@ -83,6 +85,26 @@ Les écarts sur le cylindre viennent surtout du **confinement** du domaine
 même solveur donne Cx = 1,43 et St = 0,167 à Re = 100. La convergence en
 maillage est bonne grâce à la paroi interpolée (Re = 20 : Cx = 2,750 / 2,728 /
 2,715 pour 16 / 24 / 32 mailles par diamètre dans l'ancien domaine 16 L × 8 L).
+
+## Traînée et décrochage
+
+**Traînée.** Aux Reynolds accessibles (10 à 5000), la traînée est dominée
+par le frottement d'une couche limite laminaire épaisse : Cx ≈ 0,12 pour un
+NACA 0012 à Re = 1000, contre ≈ 0,006 à Re = 10⁶. Ce n'est pas un défaut du
+calcul : à corde de 24 ou 32 mailles, l'écart à la référence fine est de
+quelques pourcents. En résolution rapide (12 mailles), la traînée d'un
+profil est surestimée d'environ 20 à 30 %.
+
+**Décrochage.** Rien n'est modélisé : le décollement, la recirculation et le
+lâcher tourbillonnaire sortent directement de la résolution des équations.
+À Re = 1000, le calcul retrouve le décollement de bord de fuite et le début
+du lâcher tourbillonnaire vers α ≈ 8° (7 à 8° dans la littérature), puis un
+plafonnement de Cz avec forte hausse de traînée. Il s'agit du décrochage
+progressif des bas Reynolds, pas du décrochage d'une aile réelle
+(Re ~ 10⁶ – 10⁷), qui dépend de la transition et de la turbulence de couche
+limite, absentes d'un calcul 2D aussi grossier. La portance des profils est
+sensible à la résolution du bord de fuite (± 15 %) et reste en dessous de la
+référence fine (pente ≈ π par radian à Re = 1000).
 
 ## Limites
 
