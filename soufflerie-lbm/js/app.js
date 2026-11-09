@@ -6,8 +6,10 @@ import { SHAPES, SHAPE_BY_ID, parseNaca, shapeIconPath } from './shapes.js';
 import { ForceHistory, analyze } from './stats.js';
 import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
 import { drawHistory, drawPolar } from './chart.js';
+import { GpuLBM, gpuSupported } from './lbm-gpu.js';
+import { GpuFlowView } from './render-gpu.js';
 
-const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000];
+const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000, 15000, 20000];
 const U_VALUES = [0.05, 0.08, 0.1, 0.12];
 const WINDOW_T = 20; // fenêtre glissante de moyenne (t*)
 const SETTLE_T = 6; // transitoire ignoré après un changement (t*)
@@ -15,6 +17,7 @@ const HISTORY_SPAN_T = 40; // largeur du graphique (t*)
 const SWEEP_SETTLE_T = 12;
 const SWEEP_MEASURE_T = 15;
 const FRAME_BUDGET_MS = 11;
+const GPU_FRAME_MS = 14; // temps de calcul GPU visé par image
 const PREFS_KEY = 'soufflerie.prefs.v1';
 const POINTS_KEY = 'soufflerie.points.v1';
 
@@ -38,6 +41,8 @@ const DEFAULTS = {
   u: 0.1,
   polarMode: 'var',
   view: 'near',
+  engine: 'auto',
+  collision: 'rr',
 };
 
 function storageGet(key) {
@@ -109,9 +114,45 @@ let stepsSinceRender = 0;
 let sweep = null;
 let wakeLock = null;
 
+// Moteur GPU (WebGL2) si disponible, sinon CPU.
+let gl = null;
+let gpuOk = false;
+let cpuView = null;
+let gpuView = null;
+let gpuSteps = 16;
+
+function initGpu() {
+  try {
+    gl = $('flow-gl').getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
+      powerPreference: 'high-performance',
+    });
+    gpuOk = gpuSupported(gl);
+    if (gpuOk) gpuView = new GpuFlowView($('flow-gl'), $('flow'), gl);
+  } catch {
+    gpuOk = false;
+    gpuView = null;
+  }
+}
+
+function engine() {
+  return gpuOk && state.engine !== 'cpu' ? 'gpu' : 'cpu';
+}
+
+function resAllowed(key) {
+  return !!RESOLUTIONS[key] && (engine() === 'gpu' || !RESOLUTIONS[key].gpuOnly);
+}
+
 function buildSim() {
+  if (wt) wt.dispose();
+  if (!resAllowed(state.res)) state.res = 'tresfine';
+  const eng = engine();
   const L = RESOLUTIONS[state.res].L;
-  wt = new WindTunnel({
+  const cfg = {
     L,
     re: state.re,
     uIn: state.u,
@@ -119,7 +160,23 @@ function buildSim() {
     params: bodyParams(),
     les: state.les,
     bouzidi: state.wall === 'bouzidi',
-  });
+    collision: state.collision,
+  };
+  try {
+    wt = new WindTunnel(eng === 'gpu' ? { ...cfg, gpu: { Solver: GpuLBM, gl } } : cfg);
+  } catch (e) {
+    if (eng !== 'gpu') throw e;
+    // GPU refusé (mémoire, taille de texture…) : repli sur le CPU.
+    gpuOk = false;
+    wt = null;
+    buildResSeg();
+    buildSim();
+    showToast(`Calcul GPU impossible (${e.message}) : passage au CPU.`, 5000);
+    return;
+  }
+  view = wt.engine === 'gpu' ? gpuView : cpuView;
+  $('flow-gl').hidden = wt.engine !== 'gpu';
+  gpuSteps = 16;
   hist = new ForceHistory(16384);
   sampleEvery = Math.max(1, Math.round(wt.stepsPerTStar / 40));
   tChange = 0;
@@ -196,7 +253,8 @@ function applyTheme() {
     tracer: v('--tracer'),
     font: v('--font-num') || 'monospace',
   };
-  view.setTheme(themeName(), themeColors);
+  cpuView.setTheme(themeName(), themeColors);
+  if (gpuView) gpuView.setTheme(themeName(), themeColors);
   updateColorbar();
   drawCharts();
 }
@@ -345,6 +403,7 @@ function updateInfo() {
   if (!wt) return;
   const i = wt.info();
   $('numinfo').textContent =
+    `${wt.engine === 'gpu' ? 'GPU' : 'CPU'} · collision ${state.collision === 'rr' ? 'régularisée' : 'BGK'} · ` +
     `Grille ${i.nx}×${i.ny} · L = ${i.L} mailles · τ = ${i.tau.toFixed(4)} · Ma = ${i.mach.toFixed(2)} · ` +
     `confinement ${(i.blockage * 100).toFixed(1)} % · sous-maille ${i.les ? 'active' : 'inactive'} · ` +
     `Re fiable ≲ ${i.reLimit}`;
@@ -366,6 +425,12 @@ function updateInfo() {
   }
   const s = shapeDef();
   const a = Math.abs(alphaOf());
+  if (state.re >= 10000 && !['cylinder', 'square', 'triangle'].includes(s.id)) {
+    msgs.push(
+      'Vers Re ≈ 10⁴ apparaissent sur un profil réel des bulbes de décollement laminaire et la transition, ' +
+        'phénomènes tridimensionnels que ce calcul 2D ne représente pas : résultats indicatifs, surtout en incidence.',
+    );
+  }
   const bluff = ['cylinder', 'square', 'triangle'].includes(s.id) || (['plate', 'ellipse'].includes(s.id) && a >= 20);
   if (bluff && state.re > RE_WAKE_3D) {
     msgs.push(
@@ -639,7 +704,9 @@ function lockControls(locked) {
   const ids = ['alpha', 'naca', 'thick', 'spin', 're'];
   for (const id of ids) $(id).disabled = locked;
   document
-    .querySelectorAll('.shape-btn, .step, .chip-btn, #res-seg button, #u-seg button, #wall-seg button, #les-seg button, #btn-reset')
+    .querySelectorAll(
+      '.shape-btn, .step, .chip-btn, #res-seg button, #u-seg button, #wall-seg button, #les-seg button, #engine-seg button, #coll-seg button, #btn-reset',
+    )
     .forEach((b) => (b.disabled = locked));
 }
 
@@ -746,11 +813,27 @@ function frame() {
     const t0 = performance.now();
     let n = 0;
     const lbm = wt.lbm;
-    do {
-      wt.step();
-      n++;
-      if (lbm.time % sampleEvery === 0) sample();
-    } while (performance.now() - t0 < FRAME_BUDGET_MS);
+    if (wt.engine === 'gpu') {
+      for (; n < gpuSteps; n++) {
+        wt.step();
+        if (lbm.time % sampleEvery === 0) lbm.sampleForces();
+      }
+      // Relecture des efforts : synchronise avec le GPU une fois par image.
+      for (const smp of lbm.readSamples()) {
+        const c = wt.coefficientsFrom(smp.fx, smp.fy, smp.mz);
+        lastCoeffs = c;
+        hist.push(smp.time, c.cx, c.cz, c.cm);
+      }
+      const dt = Math.max(1, performance.now() - t0);
+      const k = Math.min(1.25, Math.max(0.6, GPU_FRAME_MS / dt));
+      gpuSteps = Math.max(1, Math.min(4000, Math.round(gpuSteps * k + (k > 1 ? 1 : 0))));
+    } else {
+      do {
+        wt.step();
+        n++;
+        if (lbm.time % sampleEvery === 0) sample();
+      } while (performance.now() - t0 < FRAME_BUDGET_MS);
+    }
     stepsSinceRender += n;
     perfSteps += n;
     if (!lbm.isFinite()) onDiverged();
@@ -856,14 +939,40 @@ function bind() {
     savePrefs();
   });
 
+  buildResSeg();
   segmented(
-    $('res-seg'),
-    Object.entries(RESOLUTIONS).map(([k, r]) => ({ value: k, label: `${r.label} · ${r.L}` })),
-    state.res,
+    $('engine-seg'),
+    [
+      { value: 'gpu', label: 'GPU (WebGL2)' },
+      { value: 'cpu', label: 'CPU' },
+    ],
+    engine(),
     (v) => {
-      state.res = v;
+      state.engine = v;
+      buildResSeg();
       buildSim();
       syncShapeControls();
+      savePrefs();
+    },
+  );
+  if (!gpuOk) {
+    const b = $('engine-seg').querySelector('[data-value="gpu"]');
+    b.disabled = true;
+    b.title = 'WebGL2 avec rendu flottant indisponible sur cet appareil';
+    $('engine-hint').textContent = 'Ce navigateur n\u2019offre pas WebGL2 avec rendu flottant : calcul sur le processeur.';
+  }
+  segmented(
+    $('coll-seg'),
+    [
+      { value: 'rr', label: 'Régularisée' },
+      { value: 'bgk', label: 'BGK' },
+    ],
+    state.collision,
+    (v) => {
+      state.collision = v;
+      wt.lbm.collision = v;
+      markChange();
+      updateInfo();
       savePrefs();
     },
   );
@@ -887,7 +996,8 @@ function bind() {
     state.view,
     (v) => {
       state.view = v;
-      view.setView(v);
+      cpuView.setView(v);
+      if (gpuView) gpuView.setView(v);
       savePrefs();
     },
   );
@@ -989,9 +1099,38 @@ function bind() {
 
 // ---------------------------------------------------------------- démarrage
 
+/** Résolutions proposées selon le moteur (48 et 64 mailles : GPU seulement). */
+function buildResSeg() {
+  const opts = Object.entries(RESOLUTIONS)
+    .filter(([k]) => resAllowed(k))
+    .map(([k, r]) => ({ value: k, label: `${r.label} · ${r.L}` }));
+  if (!resAllowed(state.res)) state.res = 'tresfine';
+  segmented($('res-seg'), opts, state.res, (v) => {
+    state.res = v;
+    buildSim();
+    syncShapeControls();
+    savePrefs();
+  });
+  setSegValue($('engine-seg'), engine());
+}
+
 function start() {
-  view = new FlowView($('flow'));
-  view.setView(state.view);
+  cpuView = new FlowView($('flow'));
+  cpuView.setView(state.view);
+  initGpu();
+  if (gpuView) gpuView.setView(state.view);
+  // Première visite avec GPU : résolution plus fine par défaut.
+  if (!storageGet(PREFS_KEY) && gpuOk) state.res = 'tresfine';
+  view = cpuView;
+  $('flow-gl').addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    gpuOk = false;
+    wt = null;
+    buildResSeg();
+    buildSim();
+    syncShapeControls();
+    showToast('Le GPU a été réinitialisé par le navigateur : le calcul continue sur le processeur.', 5000);
+  });
   // Ligne de performance sous les coefficients (créée ici pour rester hors du HTML statique).
   const perf = document.createElement('p');
   perf.className = 'numinfo num';

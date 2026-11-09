@@ -17,7 +17,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
 
 // Ordre de dépendance.
-const MODULES = ['lbm', 'shapes', 'stats', 'sim', 'render', 'chart', 'app'];
+const MODULES = ['geometry', 'lbm', 'shapes', 'stats', 'sim', 'lbm-gpu', 'render', 'render-gpu', 'chart', 'app'];
+const ident = (name) => name.replace(/-/g, '_');
 
 function bundle() {
   const parts = ['window.__SOUFFLERIE_INLINE__ = true;'];
@@ -28,12 +29,17 @@ function bundle() {
       exportsList.push(id);
       return `${kind} ${id}`;
     });
+    // Réexportations : export { a, b };
+    src = src.replace(/^export \{([^}]+)\};$/gm, (_, names) => {
+      exportsList.push(...names.split(',').map((n) => n.trim()).filter(Boolean));
+      return '';
+    });
     src = src.replace(/^import \{([^}]+)\} from '\.\/([\w-]+)\.js';$/gm, (_, names, mod) => {
       if (!MODULES.includes(mod)) throw new Error(`Module inconnu : ${mod}`);
-      return `const {${names}} = __mod_${mod};`;
+      return `const {${names}} = __mod_${ident(mod)};`;
     });
     if (/^\s*(import|export)\s/m.test(src)) throw new Error(`Import/export non pris en charge dans ${name}.js`);
-    parts.push(`const __mod_${name} = (() => {\n${src}\nreturn { ${exportsList.join(', ')} };\n})();`);
+    parts.push(`const __mod_${ident(name)} = (() => {\n${src}\nreturn { ${exportsList.join(', ')} };\n})();`);
   }
   return parts.join('\n');
 }

@@ -12,6 +12,9 @@ export const RESOLUTIONS = {
   fine: { L: 24, label: 'Fine' },
   // ≈ 4 fois plus lente que Fine : destinée à un ordinateur.
   tresfine: { L: 32, label: 'Très fine' },
+  // Moteur GPU seulement.
+  ultra: { L: 48, label: 'Ultra', gpuOnly: true },
+  max: { L: 64, label: 'Max', gpuOnly: true },
 };
 
 /**
@@ -38,10 +41,11 @@ export function lesWallLength(L, re) {
  * Reynolds au-delà duquel la traînée d'un profil est surestimée de plus de
  * ~10 % faute de résolution. Mesuré sur le NACA 0012 à α = 0 (références
  * Di Ilio et al. 2018 / XFOIL ; voir README) : ≈ 2,5 L² jusqu'à 24 mailles,
- * 5000 à 32 mailles (−4 % à Re = 2000, +1 % à 5000). Au-delà, même à 48
- * mailles, le bord de fuite devient instationnaire et la convergence lente.
+ * 5000 à 32 mailles (−4 % à Re = 2000, +1 % à 5000), 10 000 à 48 mailles
+ * (collision régularisée : Cx = 0,042 contre 0,037–0,040) ; 64 mailles :
+ * extrapolation en L² arrondie par défaut.
  */
-const RELIABLE_RE = { 12: 350, 16: 650, 24: 1450, 32: 5000 };
+const RELIABLE_RE = { 12: 350, 16: 650, 24: 1450, 32: 5000, 48: 10000, 64: 15000 };
 
 export function reliableReynolds(L) {
   return RELIABLE_RE[L] ?? Math.round((2.5 * L * L) / 50) * 50;
@@ -69,7 +73,7 @@ export class WindTunnel {
     this.x0 = DOMAIN.x0 * this.L;
     this.y0 = (this.ny - 1) / 2;
     this.re = cfg.re;
-    this.lbm = new LBM({
+    const opts = {
       nx: this.nx,
       ny: this.ny,
       uIn: this.uIn,
@@ -77,7 +81,11 @@ export class WindTunnel {
       les: cfg.les ?? 'auto',
       lesWallA: lesWallLength(this.L, cfg.re),
       bouzidi: cfg.bouzidi ?? true,
-    });
+      collision: cfg.collision ?? 'rr',
+    };
+    // Moteur : solveur CPU, ou classe GPU fournie avec son contexte WebGL2.
+    this.engine = cfg.gpu ? 'gpu' : 'cpu';
+    this.lbm = cfg.gpu ? new cfg.gpu.Solver(cfg.gpu.gl, opts) : new LBM(opts);
     this.setBody(cfg.shape, cfg.params ?? {});
     // Démarrage progressif : fluide au repos, vitesse d'entrée et accélération
     // uniforme du fluide en rampe (1 − cos) sur RAMP_T temps convectifs. Évite
@@ -89,6 +97,11 @@ export class WindTunnel {
     } else {
       this.lbm.reset();
     }
+  }
+
+  /** Libère les ressources GPU éventuelles. */
+  dispose() {
+    this.lbm.dispose?.();
   }
 
   viscosityFor(re) {
@@ -159,8 +172,12 @@ export class WindTunnel {
 
   /** Coefficients instantanés (ρ∞ = 1). Cm positif cabreur. */
   coefficients() {
-    const q = 0.5 * this.uIn * this.uIn;
     const { fx, fy, mz } = this.lbm;
+    return this.coefficientsFrom(fx, fy, mz);
+  }
+
+  coefficientsFrom(fx, fy, mz) {
+    const q = 0.5 * this.uIn * this.uIn;
     return {
       cx: fx / (q * this.L),
       cz: fy / (q * this.L),

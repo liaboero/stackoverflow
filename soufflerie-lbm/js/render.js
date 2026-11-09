@@ -5,7 +5,7 @@
 import { SOLID } from './lbm.js';
 
 /** Palettes : arrêts [position, '#rrggbb']. Diverging centrée sur 0.5. */
-const PALETTES = {
+export const PALETTES = {
   light: {
     diverging: [
       [0, '#123f66'],
@@ -46,12 +46,12 @@ export const FIELDS = {
   cp: { label: 'Pression Cp', min: -1.5, max: 1.5, map: 'diverging' },
 };
 
-function hexToRgb(h) {
+export function hexToRgb(h) {
   const n = parseInt(h.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-function buildLut(stops, n = 256) {
+export function buildLut(stops, n = 256) {
   const lut = new Uint32Array(n);
   const rgb = stops.map(([p, c]) => [p, hexToRgb(c)]);
   for (let k = 0; k < n; k++) {
@@ -113,20 +113,7 @@ export class FlowView {
   /** Fenêtre affichée (mailles) : x ∈ [wx, wx + ww[, y ∈ [wy, wy + wh[. */
   setView(mode) {
     this.viewMode = VIEWS[mode] ? mode : 'near';
-    const wt = this.wt;
-    if (!wt) return;
-    const box = VIEWS[this.viewMode].box;
-    if (!box) {
-      this.win = { wx: 0, wy: 0, ww: wt.nx, wh: wt.ny };
-      return;
-    }
-    const [up, down, half] = box;
-    const L = wt.L;
-    const ww = Math.min(wt.nx, Math.round((up + down) * L));
-    const wh = Math.min(wt.ny, Math.round(2 * half * L));
-    const wx = Math.max(0, Math.min(wt.nx - ww, Math.round(wt.x0 - up * L)));
-    const wy = Math.max(0, Math.min(wt.ny - wh, Math.round(wt.y0 + 0.5 - half * L)));
-    this.win = { wx, wy, ww, wh };
+    if (this.wt) this.win = computeWindow(this.wt, this.viewMode);
   }
 
   attach(wt) {
@@ -168,7 +155,7 @@ export class FlowView {
     const seeds = 17;
     const span = 5 * wt.L;
     this.emitAcc += steps * U;
-    const spacing = 2.5;
+    const spacing = Math.max(2.5, wt.L / 6.4);
     while (this.emitAcc >= spacing) {
       this.emitAcc -= spacing;
       for (let s = 0; s < seeds; s++) {
@@ -299,23 +286,53 @@ export class FlowView {
       ctx.fill();
     }
 
-    // Maquette (contour lisse par-dessus la représentation en marches)
+    drawOverlay(ctx, wt, this.win, W, H, this.dpr, this.colors, o.force);
+  }
+}
+
+/** Fenêtre affichée (mailles) pour un cadrage : x ∈ [wx, wx + ww[, y ∈ [wy, wy + wh[. */
+export function computeWindow(wt, mode) {
+  const box = (VIEWS[mode] ?? VIEWS.near).box;
+  if (!box) return { wx: 0, wy: 0, ww: wt.nx, wh: wt.ny };
+  const [up, down, half] = box;
+  const L = wt.L;
+  const ww = Math.min(wt.nx, Math.round((up + down) * L));
+  const wh = Math.min(wt.ny, Math.round(2 * half * L));
+  const wx = Math.max(0, Math.min(wt.nx - ww, Math.round(wt.x0 - up * L)));
+  const wy = Math.max(0, Math.min(wt.ny - wh, Math.round(wt.y0 + 0.5 - half * L)));
+  return { wx, wy, ww, wh };
+}
+
+/**
+ * Maquette (contour lisse), point de réduction des moments et force moyenne,
+ * dessinés en 2D par-dessus le champ (rendu CPU ou GPU).
+ */
+export function drawOverlay(ctx, wt, win, W, H, dpr, colors, force) {
+  const { wx, wy, ww, wh } = win;
+  const { ny, L } = wt;
+  const sx = W / ww;
+  const sy = H / wh;
+  const srcY = ny - wy - wh;
+  const toX = (x) => (x + 0.5 - wx) * sx;
+  const toY = (y) => (ny - 0.5 - y - srcY) * sy;
+  {
+    const o = { force };
     const body2 = wt.body;
     ctx.beginPath();
     body2.outline.forEach(([x, y], i) => (i ? ctx.lineTo(toX(x), toY(y)) : ctx.moveTo(toX(x), toY(y))));
     ctx.closePath();
-    ctx.fillStyle = this.colors.body;
+    ctx.fillStyle = colors.body;
     ctx.fill();
-    ctx.lineWidth = Math.max(1, this.dpr);
-    ctx.strokeStyle = this.colors.bodyEdge;
+    ctx.lineWidth = Math.max(1, dpr);
+    ctx.strokeStyle = colors.bodyEdge;
     ctx.stroke();
 
     // Point de réduction des moments
     const rx = toX(body2.refX);
     const ry = toY(body2.refY);
-    ctx.fillStyle = this.colors.bodyEdge;
+    ctx.fillStyle = colors.bodyEdge;
     ctx.beginPath();
-    ctx.arc(rx, ry, 2 * this.dpr, 0, Math.PI * 2);
+    ctx.arc(rx, ry, 2 * dpr, 0, Math.PI * 2);
     ctx.fill();
 
     // Force aérodynamique moyenne : 1 unité de coefficient ↔ 1,2 L
@@ -323,22 +340,22 @@ export class FlowView {
       const scale = 1.2 * L;
       const ex = toX(body2.refX + o.force.cx * scale);
       const ey = toY(body2.refY + o.force.cz * scale);
-      const lw = Math.max(1.5, 2 * this.dpr);
+      const lw = Math.max(1.5, 2 * dpr);
       // Composantes
-      ctx.setLineDash([4 * this.dpr, 3 * this.dpr]);
-      ctx.lineWidth = Math.max(1, this.dpr);
-      ctx.strokeStyle = this.colors.accent;
+      ctx.setLineDash([4 * dpr, 3 * dpr]);
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.strokeStyle = colors.accent;
       ctx.beginPath();
       ctx.moveTo(rx, ry);
       ctx.lineTo(ex, ry);
       ctx.stroke();
-      ctx.strokeStyle = this.colors.lift;
+      ctx.strokeStyle = colors.lift;
       ctx.beginPath();
       ctx.moveTo(rx, ry);
       ctx.lineTo(rx, ey);
       ctx.stroke();
       ctx.setLineDash([]);
-      arrow(ctx, rx, ry, ex, ey, lw, this.colors.ink, 7 * this.dpr);
+      arrow(ctx, rx, ry, ex, ey, lw, colors.ink, 7 * dpr);
     }
   }
 }

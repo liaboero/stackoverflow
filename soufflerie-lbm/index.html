@@ -37,6 +37,7 @@
 <main class="layout">
   <section class="viewer" aria-label="Veine d'essai">
     <div class="stage">
+      <canvas id="flow-gl" aria-hidden="true" hidden></canvas>
       <canvas id="flow" role="img" aria-label="Champ d'écoulement autour de la maquette"></canvas>
       <div class="hud hud-tl"><span class="pill status" id="status" data-state="transient">Démarrage</span></div>
       <div class="hud hud-tr"><span class="pill num" id="hud-time">t* 0.0</span></div>
@@ -149,6 +150,16 @@
       <details class="advanced" id="advanced">
         <summary>Réglages numériques</summary>
         <div class="field">
+          <span class="label" id="lbl-engine">Moteur de calcul</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lbl-engine" id="engine-seg"></div>
+          <p class="hint" id="engine-hint">Le GPU calcule 10 à 100 fois plus vite et ouvre les résolutions Ultra et Max.</p>
+        </div>
+        <div class="field">
+          <span class="label" id="lbl-coll">Collision</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lbl-coll" id="coll-seg"></div>
+          <p class="hint">Régularisée : plus stable aux Reynolds élevés. BGK : schéma de base, pour comparer.</p>
+        </div>
+        <div class="field">
           <span class="label" id="lbl-wall">Condition de paroi</span>
           <div class="seg" role="radiogroup" aria-labelledby="lbl-wall" id="wall-seg"></div>
         </div>
@@ -203,7 +214,8 @@
     <section class="card about" aria-labelledby="h-about">
       <h2 id="h-about">Méthode</h2>
       <ul>
-        <li>Lattice Boltzmann D2Q9, collision BGK ; modèle de sous-maille de Smagorinsky quand τ &lt; 0,51 (au-delà de Re ≈ 360, 480 ou 720 selon la résolution), amorti près de la paroi.</li>
+        <li>Lattice Boltzmann D2Q9, collision régularisée récursive (BGK en option) ; modèle de sous-maille de Smagorinsky quand τ &lt; 0,51, amorti près de la paroi.</li>
+        <li>Calcul sur le GPU (WebGL2) quand le navigateur le permet, sinon sur le processeur ; les deux moteurs résolvent les mêmes équations.</li>
         <li>Mise en vitesse progressive sur 5 t* (rampe de la vitesse amont et accélération uniforme du fluide), sans choc de démarrage.</li>
         <li>Paroi : rebond à mi-chemin interpolé de Bouzidi, qui suit la forme exacte plutôt que l'escalier des mailles, y compris pour un bord de fuite plus mince qu'une maille.</li>
         <li>Décollement, lâcher tourbillonnaire et décrochage ne sont pas modélisés : ils sortent du calcul. Aux bas Reynolds simulés, le décrochage est progressif et la traînée de frottement élevée (Cx ≈ 0,12 pour un NACA 0012 à Re = 1000, contre ≈ 0,006 à Re = 10⁶).</li>

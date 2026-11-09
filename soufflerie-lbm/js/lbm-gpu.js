@@ -1,0 +1,758 @@
+/**
+ * Solveur Lattice Boltzmann D2Q9 sur GPU (WebGL2), même modèle que lbm.js :
+ * collision régularisée récursive ou BGK, Smagorinsky amorti à la paroi,
+ * parois de Bouzidi (y compris minces) avec rotation, entrée/sortie de Guo,
+ * bandes absorbantes, zone éponge, accélération de démarrage.
+ *
+ * Stockage : trois textures RGBA32F par tampon (ping-pong) :
+ *   A = (f0, f1, f2, f3), B = (f4, f5, f6, f7), C = (f8, ρ, ux, uy).
+ * Un pas = un tracé plein écran avec trois cibles de rendu.
+ *
+ * Efforts : calculés à la demande (pas d'échantillonnage) par une passe sur
+ * les seules mailles de paroi, réduite dans un accumulateur relu une fois par
+ * image (readSamples). Différence avec le CPU : les colonnes d'entrée et de
+ * sortie sont extrapolées depuis l'état du pas précédent (décalage d'un pas).
+ */
+import { Geometry } from './geometry.js';
+
+const LIST_W = 256;
+const MAX_SAMPLES = 512;
+
+const VS = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const COMMON = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uA;
+uniform sampler2D uB;
+uniform sampler2D uC;
+uniform sampler2D uGeo;
+uniform sampler2D uQ0;
+uniform sampler2D uQ1;
+uniform ivec2 uSize;
+uniform int uBouzidi;
+uniform float uSpin;
+uniform vec2 uRot;
+
+const ivec2 CV[9] = ivec2[9](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1),
+                             ivec2(1, 1), ivec2(-1, 1), ivec2(-1, -1), ivec2(1, -1));
+const float WT[9] = float[9](4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
+                             1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0);
+const int OPP[9] = int[9](0, 3, 4, 1, 2, 7, 8, 5, 6);
+const int REFY[9] = int[9](0, 1, 4, 3, 2, 8, 7, 6, 5);
+
+float getF(ivec2 q, int i) {
+  if (i < 4) return texelFetch(uA, q, 0)[i];
+  if (i < 8) return texelFetch(uB, q, 0)[i - 4];
+  return texelFetch(uC, q, 0).x;
+}
+
+int cellType(ivec2 q) {
+  return int(texelFetch(uGeo, q, 0).r * 255.0 + 0.5);
+}
+
+float linkQ(ivec2 p, int j) {
+  if (j < 5) return texelFetch(uQ0, p, 0)[j - 1];
+  return texelFetch(uQ1, p, 0)[j - 5];
+}
+
+// Population j tirée en p à travers une paroi située à la fraction q du lien
+// (Bouzidi linéaire, correction de paroi mobile). fi : population incidente.
+float bounce(ivec2 p, int j, float q, out float fi, out vec2 uw, out vec2 wp) {
+  ivec2 c = CV[j];
+  int i = OPP[j];
+  fi = getF(p, i);
+  wp = vec2(p) - q * vec2(c);
+  uw = uSpin * vec2(-(wp.y - uRot.y), wp.x - uRot.x);
+  float corr = 6.0 * WT[j] * dot(vec2(c), uw);
+  if (uBouzidi == 0) return fi + corr;
+  if (q < 0.5) {
+    ivec2 b = p + c;
+    if (b.y >= 0 && b.y < uSize.y && b.x >= 0 && b.x < uSize.x && cellType(b) != 1) {
+      return 2.0 * q * fi + (1.0 - 2.0 * q) * getF(b, i) + corr;
+    }
+    return fi + corr;
+  }
+  return (fi + (2.0 * q - 1.0) * getF(p, j) + corr) / (2.0 * q);
+}
+
+void equilibrium(float rho, vec2 u, out float e[9]) {
+  float usq = 1.5 * dot(u, u);
+  for (int i = 0; i < 9; i++) {
+    float cu = dot(vec2(CV[i]), u);
+    e[i] = WT[i] * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq);
+  }
+}
+`;
+
+const FS_STEP = `${COMMON}
+uniform float uU;
+uniform float uTau0;
+uniform float uTauSponge;
+uniform int uSpongeStart;
+uniform float uAbsW;
+uniform float uAbsS;
+uniform int uLes;
+uniform float uC18;
+uniform float uAccel;
+uniform int uRR;
+layout(location = 0) out vec4 o0;
+layout(location = 1) out vec4 o1;
+layout(location = 2) out vec4 o2;
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = p.x;
+  int y = p.y;
+  vec4 geo = texelFetch(uGeo, p, 0);
+  int t = int(geo.r * 255.0 + 0.5);
+  if (t == 1) {
+    // Solide : repos (prêt si la maille redevient fluide).
+    o0 = vec4(4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0);
+    o1 = vec4(1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0);
+    o2 = vec4(1.0 / 36.0, 1.0, 0.0, 0.0);
+    return;
+  }
+  float f[9];
+
+  if (x == 0 || x == uSize.x - 1) {
+    // Entrée (vitesse imposée) / sortie (ρ = 1) : extrapolation hors équilibre.
+    ivec2 n = ivec2(x == 0 ? 1 : uSize.x - 2, y);
+    vec4 a = texelFetch(uA, n, 0);
+    vec4 b = texelFetch(uB, n, 0);
+    vec4 c = texelFetch(uC, n, 0);
+    f = float[9](a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x);
+    float rho = 0.0;
+    for (int i = 0; i < 9; i++) rho += f[i];
+    vec2 u = vec2(f[1] - f[3] + f[5] - f[6] - f[7] + f[8], f[2] - f[4] + f[5] + f[6] - f[7] - f[8]) / rho;
+    float en[9];
+    float eb[9];
+    equilibrium(rho, u, en);
+    float rb = x == 0 ? rho : 1.0;
+    vec2 ub = x == 0 ? vec2(uU, 0.0) : u;
+    equilibrium(rb, ub, eb);
+    for (int i = 0; i < 9; i++) f[i] = eb[i] + f[i] - en[i];
+    o0 = vec4(f[0], f[1], f[2], f[3]);
+    o1 = vec4(f[4], f[5], f[6], f[7]);
+    o2 = vec4(f[8], rb, ub);
+    return;
+  }
+
+  if (t == 0) {
+    f[0] = texelFetch(uA, p, 0).x;
+    f[1] = texelFetch(uA, p + ivec2(-1, 0), 0).y;
+    f[2] = texelFetch(uA, p + ivec2(0, -1), 0).z;
+    f[3] = texelFetch(uA, p + ivec2(1, 0), 0).w;
+    f[4] = texelFetch(uB, p + ivec2(0, 1), 0).x;
+    f[5] = texelFetch(uB, p + ivec2(-1, -1), 0).y;
+    f[6] = texelFetch(uB, p + ivec2(1, -1), 0).z;
+    f[7] = texelFetch(uB, p + ivec2(1, 1), 0).w;
+    f[8] = texelFetch(uC, p + ivec2(-1, 1), 0).x;
+  } else {
+    f[0] = texelFetch(uA, p, 0).x;
+    for (int j = 1; j < 9; j++) {
+      ivec2 c = CV[j];
+      ivec2 s = p - c;
+      if (s.y < 0 || s.y >= uSize.y) {
+        // Parois haute et basse : glissement (réflexion spéculaire).
+        f[j] = getF(ivec2(x - c.x, y), REFY[j]);
+        continue;
+      }
+      float q = linkQ(p, j);
+      if (q <= 0.0) {
+        f[j] = getF(s, j);
+        continue;
+      }
+      float fi;
+      vec2 uw;
+      vec2 wp;
+      f[j] = bounce(p, j, q, fi, uw, wp);
+    }
+  }
+
+  float rho = f[0] + f[1] + f[2] + f[3] + f[4] + f[5] + f[6] + f[7] + f[8];
+  float ir = 1.0 / rho;
+  float ux = (f[1] - f[3] + f[5] - f[6] - f[7] + f[8]) * ir;
+  float uy = (f[2] - f[4] + f[5] + f[6] - f[7] - f[8]) * ir;
+
+  // τ local : zone éponge près de la sortie.
+  float tau = uTau0;
+  if (x > uSpongeStart) {
+    float sp = float(x - uSpongeStart) / float(max(1, uSize.x - 1 - uSpongeStart));
+    tau += (uTauSponge - uTau0) * sp * sp;
+  }
+
+  float d4 = f[5] + f[6] + f[7] + f[8];
+  float rux = rho * ux;
+  float ruy = rho * uy;
+  float a1xx = f[1] + f[3] + d4 - rho / 3.0 - rux * ux;
+  float a1yy = f[2] + f[4] + d4 - rho / 3.0 - ruy * uy;
+  float a1xy = f[5] - f[6] + f[7] - f[8] - rux * uy;
+  float om = 1.0 / tau;
+  if (uLes == 1) {
+    float qn = sqrt(2.0 * (a1xx * a1xx + a1yy * a1yy + 2.0 * a1xy * a1xy));
+    om = 2.0 / (tau + sqrt(tau * tau + uC18 * geo.g * qn * ir));
+  }
+
+  float pp[9];
+  if (uRR == 1) {
+    // Collision régularisée récursive, Hermite d'ordre 3 (Malaspinas 2015).
+    float k = 1.0 - om;
+    float bxx = k * a1xx;
+    float byy = k * a1yy;
+    float bxy = k * a1xy;
+    float Pxx = rux * ux + bxx;
+    float Pyy = ruy * uy + byy;
+    float Pxy = rux * uy + bxy;
+    float Qxxy = rux * ux * uy + 2.0 * ux * bxy + uy * bxx;
+    float Qxyy = rux * uy * uy + 2.0 * uy * bxy + ux * byy;
+    float sP = Pxx + Pyy;
+    float ax = 3.0 * rux;
+    float ay = 3.0 * ruy;
+    float tx = rho + 3.0 * Pxx - 1.5 * Pyy;
+    float ty = rho + 3.0 * Pyy - 1.5 * Pxx;
+    float td = rho + 3.0 * sP;
+    float qs = 9.0 * (Qxxy + Qxyy);
+    float qd = 9.0 * (Qxxy - Qxyy);
+    float pxy9 = 9.0 * Pxy;
+    pp[0] = (4.0 / 9.0) * (rho - 1.5 * sP);
+    pp[1] = (1.0 / 9.0) * (tx + ax - 4.5 * Qxyy);
+    pp[3] = (1.0 / 9.0) * (tx - ax + 4.5 * Qxyy);
+    pp[2] = (1.0 / 9.0) * (ty + ay - 4.5 * Qxxy);
+    pp[4] = (1.0 / 9.0) * (ty - ay + 4.5 * Qxxy);
+    pp[5] = (1.0 / 36.0) * (td + ax + ay + pxy9 + qs);
+    pp[7] = (1.0 / 36.0) * (td - ax - ay + pxy9 - qs);
+    pp[6] = (1.0 / 36.0) * (td - ax + ay - pxy9 + qd);
+    pp[8] = (1.0 / 36.0) * (td + ax - ay - pxy9 - qd);
+  } else {
+    float e[9];
+    equilibrium(rho, vec2(ux, uy), e);
+    for (int i = 0; i < 9; i++) pp[i] = f[i] + om * (e[i] - f[i]);
+  }
+
+  if (uAccel != 0.0) {
+    float g1 = uAccel / 3.0;
+    float g2 = uAccel / 12.0;
+    pp[1] += g1;
+    pp[3] -= g1;
+    pp[5] += g2;
+    pp[8] += g2;
+    pp[6] -= g2;
+    pp[7] -= g2;
+  }
+
+  // Bandes absorbantes haute et basse : relaxation vers l'écoulement amont.
+  float dw = float(min(y, uSize.y - 1 - y));
+  float sb = uAbsW > 0.0 ? 1.0 - dw / uAbsW : 0.0;
+  if (sb > 0.0) {
+    float sg = uAbsS * sb * sb;
+    float ff[9];
+    equilibrium(1.0, vec2(uU, 0.0), ff);
+    for (int i = 0; i < 9; i++) pp[i] -= sg * (pp[i] - ff[i]);
+  }
+
+  o0 = vec4(pp[0], pp[1], pp[2], pp[3]);
+  o1 = vec4(pp[4], pp[5], pp[6], pp[7]);
+  o2 = vec4(pp[8], rho, ux, uy);
+}
+`;
+
+const FS_INIT = `${COMMON}
+uniform float uU0;
+uniform float uKick;
+uniform vec2 uKickPos;
+uniform float uKickR2;
+layout(location = 0) out vec4 o0;
+layout(location = 1) out vec4 o1;
+layout(location = 2) out vec4 o2;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float e[9];
+  float rho = 1.0;
+  vec2 u = vec2(0.0);
+  if (cellType(p) != 1) {
+    vec2 d = vec2(p) - uKickPos;
+    u = vec2(uU0, uKick * exp(-dot(d, d) / uKickR2));
+  }
+  equilibrium(rho, u, e);
+  o0 = vec4(e[0], e[1], e[2], e[3]);
+  o1 = vec4(e[4], e[5], e[6], e[7]);
+  o2 = vec4(e[8], rho, u);
+}
+`;
+
+// Contribution de chaque maille de paroi à la force et au moment.
+const FS_FORCE = `${COMMON}
+uniform sampler2D uList;
+uniform int uCount;
+uniform vec2 uRef;
+out vec4 o;
+void main() {
+  ivec2 fp = ivec2(gl_FragCoord.xy);
+  int k = fp.y * ${LIST_W} + fp.x;
+  if (k >= uCount) {
+    o = vec4(0.0);
+    return;
+  }
+  ivec2 p = ivec2(texelFetch(uList, fp, 0).xy + 0.5);
+  vec3 acc = vec3(0.0);
+  for (int j = 1; j < 9; j++) {
+    ivec2 s = p - CV[j];
+    if (s.y < 0 || s.y >= uSize.y) continue;
+    float q = linkQ(p, j);
+    if (q <= 0.0) continue;
+    float fi;
+    vec2 uw;
+    vec2 wp;
+    float val = bounce(p, j, q, fi, uw, wp);
+    vec2 cc = vec2(CV[j]);
+    float sum = fi + val;
+    float dif = fi - val;
+    vec2 fl = -cc * sum - uw * dif;
+    acc.xy += fl;
+    acc.z += (wp.x - uRef.x) * fl.y - (wp.y - uRef.y) * fl.x;
+  }
+  o = vec4(acc, 0.0);
+}
+`;
+
+// Somme des contributions + indicateur de santé (somme de ρ sur 16 mailles).
+const FS_REDUCE = `${COMMON}
+uniform sampler2D uPart;
+uniform int uCount;
+out vec4 o;
+void main() {
+  vec3 s = vec3(0.0);
+  for (int k = 0; k < uCount; k++) s += texelFetch(uPart, ivec2(k % ${LIST_W}, k / ${LIST_W}), 0).xyz;
+  float h = 0.0;
+  for (int k = 0; k < 16; k++) {
+    ivec2 q = ivec2((2 * k + 1) * uSize.x / 32, ((k * 7) % 16 * 2 + 1) * uSize.y / 32);
+    h += texelFetch(uC, q, 0).y;
+  }
+  o = vec4(s, h);
+}
+`;
+
+function compile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw new Error(`Shader : ${log}`);
+  }
+  return sh;
+}
+
+export function createProgram(gl, vsSrc, fsSrc) {
+  const p = gl.createProgram();
+  const vs = compile(gl, gl.VERTEX_SHADER, vsSrc);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
+  gl.attachShader(p, vs);
+  gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`Programme : ${gl.getProgramInfoLog(p)}`);
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  const loc = {};
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    loc[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, info.name);
+  }
+  return { p, loc };
+}
+
+export function createTexture(gl, w, h, internal, filter = gl.NEAREST) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+export function createFramebuffer(gl, textures) {
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  textures.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  gl.drawBuffers(textures.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`Framebuffer incomplet (${status})`);
+  return fb;
+}
+
+/** WebGL2 avec rendu dans des textures flottantes 32 bits ? */
+export function gpuSupported(gl) {
+  return !!(gl && gl.getExtension('EXT_color_buffer_float'));
+}
+
+export class GpuLBM {
+  /**
+   * @param {WebGL2RenderingContext} gl
+   * @param {object} o mêmes options que LBM
+   */
+  constructor(
+    gl,
+    {
+      nx,
+      ny,
+      uIn = 0.1,
+      nu = 0.02,
+      les = 'auto',
+      cs = 0.15,
+      lesWallA = 4,
+      collision = 'rr',
+      bouzidi = true,
+      spongeFraction = 0.12,
+      absorbWidth = Math.round(ny / 8),
+      absorbStrength = 0.05,
+    },
+  ) {
+    if (!gpuSupported(gl)) throw new Error('WebGL2 sans rendu flottant');
+    this.gl = gl;
+    this.isGpu = true;
+    this.nx = nx;
+    this.ny = ny;
+    this.N = nx * ny;
+    const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (nx > maxTex || ny > maxTex) throw new Error(`Grille ${nx}×${ny} trop grande pour ce GPU`);
+
+    this.geo = new Geometry(nx, ny, lesWallA);
+    this.type = this.geo.type;
+    this.uIn = uIn;
+    this.cs = cs;
+    this.lesMode = les;
+    this.collision = collision;
+    this.bouzidi = bouzidi;
+    this.spongeStart = Math.round(nx * (1 - spongeFraction));
+    this.absorbWidth = absorbWidth;
+    this.absorbStrength = absorbStrength;
+    this.refX = nx / 4;
+    this.refY = (ny - 1) / 2;
+    this.spin = 0;
+    this.rotX = this.refX;
+    this.rotY = this.refY;
+    this.fx = 0;
+    this.fy = 0;
+    this.mz = 0;
+    this.health = 16;
+    this.time = 0;
+    this.accelX = 0;
+    this.wallCount = 0;
+
+    this.vao = gl.createVertexArray();
+    this.progStep = createProgram(gl, VS, FS_STEP);
+    this.progInit = createProgram(gl, VS, FS_INIT);
+    this.progForce = createProgram(gl, VS, FS_FORCE);
+    this.progReduce = createProgram(gl, VS, FS_REDUCE);
+
+    this.tex = [0, 1].map(() => [0, 1, 2].map(() => createTexture(gl, nx, ny, gl.RGBA32F)));
+    this.fbo = this.tex.map((set) => createFramebuffer(gl, set));
+    this.cur = 0;
+    this.geoTex = createTexture(gl, nx, ny, gl.RGBA8);
+    this.qTex = [createTexture(gl, nx, ny, gl.RGBA8), createTexture(gl, nx, ny, gl.RGBA8)];
+    this.accTex = createTexture(gl, MAX_SAMPLES, 1, gl.RGBA32F);
+    this.accFbo = createFramebuffer(gl, [this.accTex]);
+    this.sampleTimes = [];
+    this.sampleBuf = new Float32Array(4 * MAX_SAMPLES);
+    this.listTex = null;
+    this.partTex = null;
+    this.partFbo = null;
+    this.listRows = 0;
+
+    this.setViscosity(nu);
+    this._uploadGeometry();
+    this.reset();
+  }
+
+  // ---------------------------------------------------------------- paramètres
+
+  setViscosity(nu) {
+    this.nu = nu;
+    this.tau0 = 3 * nu + 0.5;
+    this.tauSponge = Math.max(this.tau0, 0.9);
+    this._updateLes();
+  }
+
+  setLes(mode) {
+    this.lesMode = mode;
+    this._updateLes();
+  }
+
+  _updateLes() {
+    this.lesActive = this.lesMode === 'on' || (this.lesMode === 'auto' && this.tau0 < 0.51);
+  }
+
+  setInletVelocity(u) {
+    this.uIn = u;
+  }
+
+  get solidCount() {
+    return this.geo.solidCount;
+  }
+
+  get linkCount() {
+    return this.geo.linkCount;
+  }
+
+  get lesWallA() {
+    return this.geo.lesWallA;
+  }
+
+  setLesWallLength(A) {
+    this.geo.setLesWallLength(A);
+    this._uploadGeometry(false);
+  }
+
+  /** Textures A, B, C de l'état courant (lecture par le rendu). */
+  get state() {
+    return this.tex[this.cur];
+  }
+
+  // ---------------------------------------------------------------- géométrie
+
+  setGeometry(inside, o = {}) {
+    this.refX = o.refX ?? this.refX;
+    this.refY = o.refY ?? this.refY;
+    this.spin = o.spin ?? 0;
+    this.rotX = o.rotX ?? this.refX;
+    this.rotY = o.rotY ?? this.refY;
+    // Les mailles solides portent déjà l'équilibre au repos (écrit à chaque pas).
+    this.geo.build(inside, o.bbox);
+    this._uploadGeometry(true);
+  }
+
+  _uploadGeometry(withLinks = true) {
+    const gl = this.gl;
+    const { nx, ny, N } = this;
+    const { type, lesDamp, wallQ } = this.geo;
+    const g = new Uint8Array(4 * N);
+    for (let i = 0; i < N; i++) {
+      g[4 * i] = type[i];
+      g[4 * i + 1] = Math.round(lesDamp[i] * 255);
+      g[4 * i + 3] = 255;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.geoTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, nx, ny, gl.RGBA, gl.UNSIGNED_BYTE, g);
+    if (!withLinks) return;
+
+    for (let t = 0; t < 2; t++) {
+      const q = new Uint8Array(4 * N);
+      for (let c = 0; c < 4; c++) {
+        const base = (1 + 4 * t + c) * N;
+        for (let i = 0; i < N; i++) {
+          const v = wallQ[base + i];
+          if (v > 0) q[4 * i + c] = Math.max(1, Math.round(v * 255));
+        }
+      }
+      gl.bindTexture(gl.TEXTURE_2D, this.qTex[t]);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, nx, ny, gl.RGBA, gl.UNSIGNED_BYTE, q);
+    }
+
+    // Liste des mailles de paroi pour le calcul des efforts.
+    const cells = this.geo.wallCells();
+    this.wallCount = cells.length;
+    const rows = Math.max(1, Math.ceil(cells.length / LIST_W));
+    if (rows !== this.listRows) {
+      if (this.listTex) {
+        gl.deleteTexture(this.listTex);
+        gl.deleteTexture(this.partTex);
+        gl.deleteFramebuffer(this.partFbo);
+      }
+      this.listTex = createTexture(gl, LIST_W, rows, gl.RGBA32F);
+      this.partTex = createTexture(gl, LIST_W, rows, gl.RGBA32F);
+      this.partFbo = createFramebuffer(gl, [this.partTex]);
+      this.listRows = rows;
+    }
+    const list = new Float32Array(4 * LIST_W * rows);
+    cells.forEach((idx, k) => {
+      list[4 * k] = idx % nx;
+      list[4 * k + 1] = Math.floor(idx / nx);
+    });
+    gl.bindTexture(gl.TEXTURE_2D, this.listTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, LIST_W, rows, gl.RGBA, gl.FLOAT, list);
+  }
+
+  // ---------------------------------------------------------------- calcul
+
+  _bindCommon(prog, set) {
+    const gl = this.gl;
+    const L = prog.loc;
+    const units = [
+      ['uA', set[0]],
+      ['uB', set[1]],
+      ['uC', set[2]],
+      ['uGeo', this.geoTex],
+      ['uQ0', this.qTex[0]],
+      ['uQ1', this.qTex[1]],
+    ];
+    units.forEach(([name, tex], u) => {
+      gl.activeTexture(gl.TEXTURE0 + u);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      if (L[name]) gl.uniform1i(L[name], u);
+    });
+    if (L.uSize) gl.uniform2i(L.uSize, this.nx, this.ny);
+    if (L.uBouzidi) gl.uniform1i(L.uBouzidi, this.bouzidi ? 1 : 0);
+    if (L.uSpin) gl.uniform1f(L.uSpin, this.spin);
+    if (L.uRot) gl.uniform2f(L.uRot, this.rotX, this.rotY);
+  }
+
+  /** Initialise l'écoulement (même état initial que le solveur CPU). */
+  reset(u0 = this.uIn) {
+    const gl = this.gl;
+    const P = this.progInit;
+    gl.bindVertexArray(this.vao);
+    gl.useProgram(P.p);
+    this._bindCommon(P, this.tex[this.cur]);
+    const s = this.ny / 8;
+    gl.uniform1f(P.loc.uU0, u0);
+    gl.uniform1f(P.loc.uKick, 0.15 * Math.max(u0, this.uIn, 0.05));
+    gl.uniform2f(P.loc.uKickPos, this.refX + 1.5 * s, this.refY + 0.5 * s);
+    gl.uniform1f(P.loc.uKickR2, s * s);
+    gl.viewport(0, 0, this.nx, this.ny);
+    for (const fb of this.fbo) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.time = 0;
+    this.fx = this.fy = this.mz = 0;
+    this.health = 16;
+    this.sampleTimes = [];
+  }
+
+  step() {
+    const gl = this.gl;
+    const P = this.progStep;
+    const L = P.loc;
+    gl.bindVertexArray(this.vao);
+    gl.useProgram(P.p);
+    this._bindCommon(P, this.tex[this.cur]);
+    gl.uniform1f(L.uU, this.uIn);
+    gl.uniform1f(L.uTau0, this.tau0);
+    gl.uniform1f(L.uTauSponge, this.tauSponge);
+    gl.uniform1i(L.uSpongeStart, this.spongeStart);
+    gl.uniform1f(L.uAbsW, this.absorbWidth);
+    gl.uniform1f(L.uAbsS, this.absorbStrength);
+    gl.uniform1i(L.uLes, this.lesActive ? 1 : 0);
+    gl.uniform1f(L.uC18, 18 * this.cs * this.cs);
+    gl.uniform1f(L.uAccel, this.accelX);
+    gl.uniform1i(L.uRR, this.collision === 'rr' ? 1 : 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[1 - this.cur]);
+    gl.viewport(0, 0, this.nx, this.ny);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.cur = 1 - this.cur;
+    this.time++;
+  }
+
+  /** Programme le calcul des efforts sur l'état courant (relu par readSamples). */
+  sampleForces() {
+    if (this.sampleTimes.length >= MAX_SAMPLES) return;
+    const gl = this.gl;
+    const set = this.tex[this.cur];
+    gl.bindVertexArray(this.vao);
+    // Contributions par maille de paroi
+    let P = this.progForce;
+    gl.useProgram(P.p);
+    this._bindCommon(P, set);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.listTex);
+    gl.uniform1i(P.loc.uList, 6);
+    gl.uniform1i(P.loc.uCount, this.wallCount);
+    gl.uniform2f(P.loc.uRef, this.refX, this.refY);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.partFbo);
+    gl.viewport(0, 0, LIST_W, this.listRows);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // Réduction dans l'accumulateur
+    P = this.progReduce;
+    gl.useProgram(P.p);
+    this._bindCommon(P, set);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.partTex);
+    gl.uniform1i(P.loc.uPart, 6);
+    gl.uniform1i(P.loc.uCount, this.wallCount);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.accFbo);
+    gl.viewport(this.sampleTimes.length, 0, 1, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.sampleTimes.push(this.time);
+  }
+
+  /**
+   * Relit les échantillons d'efforts programmés depuis le dernier appel
+   * (point de synchronisation avec le GPU).
+   * @returns {Array<{time:number, fx:number, fy:number, mz:number}>}
+   */
+  readSamples() {
+    const n = this.sampleTimes.length;
+    if (!n) return [];
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.accFbo);
+    gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, this.sampleBuf);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const out = [];
+    const b = this.sampleBuf;
+    for (let k = 0; k < n; k++) {
+      out.push({ time: this.sampleTimes[k], fx: b[4 * k], fy: b[4 * k + 1], mz: b[4 * k + 2] });
+    }
+    const last = out[n - 1];
+    this.fx = last.fx;
+    this.fy = last.fy;
+    this.mz = last.mz;
+    this.health = b[4 * (n - 1) + 3];
+    this.sampleTimes = [];
+    return out;
+  }
+
+  /** Relit ρ, ux, uy de tout le domaine (tests ; lent). */
+  readMacros() {
+    const gl = this.gl;
+    const { nx, ny, N } = this;
+    const buf = new Float32Array(4 * N);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[this.cur]);
+    gl.readBuffer(gl.COLOR_ATTACHMENT2);
+    gl.readPixels(0, 0, nx, ny, gl.RGBA, gl.FLOAT, buf);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const rho = new Float32Array(N);
+    const ux = new Float32Array(N);
+    const uy = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      rho[i] = buf[4 * i + 1];
+      ux[i] = buf[4 * i + 2];
+      uy[i] = buf[4 * i + 3];
+    }
+    return { rho, ux, uy };
+  }
+
+  isFinite() {
+    return Number.isFinite(this.fx) && Number.isFinite(this.fy) && this.health > 8 && this.health < 32;
+  }
+
+  /** Pas de lecture des champs côté CPU : le rendu GPU lit les textures. */
+  computeMacros() {
+    return this.isFinite();
+  }
+
+  dispose() {
+    const gl = this.gl;
+    for (const set of this.tex) for (const t of set) gl.deleteTexture(t);
+    for (const fb of this.fbo) gl.deleteFramebuffer(fb);
+    [this.geoTex, ...this.qTex, this.accTex, this.listTex, this.partTex].forEach((t) => t && gl.deleteTexture(t));
+    [this.accFbo, this.partFbo].forEach((f) => f && gl.deleteFramebuffer(f));
+    [this.progStep, this.progInit, this.progForce, this.progReduce].forEach((p) => gl.deleteProgram(p.p));
+    gl.deleteVertexArray(this.vao);
+  }
+}
+

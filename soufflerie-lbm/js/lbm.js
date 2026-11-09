@@ -17,17 +17,13 @@
  * Aucune dépendance au DOM : le module tourne aussi sous Node (tests).
  */
 
-export const CX = [0, 1, 0, -1, 0, 1, -1, -1, 1];
-export const CY = [0, 0, 1, 0, -1, 1, 1, -1, -1];
+import { Geometry, CX, CY, FLUID, SOLID, NEAR_WALL } from './geometry.js';
+
+export { CX, CY, FLUID, SOLID, NEAR_WALL };
 export const W = [4 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 36, 1 / 36, 1 / 36, 1 / 36];
 export const OPP = [0, 3, 4, 1, 2, 7, 8, 5, 6];
 /** Direction réfléchie par un plan horizontal (cy → −cy). */
 const REFY = [0, 1, 4, 3, 2, 8, 7, 6, 5];
-
-export const FLUID = 0;
-export const SOLID = 1;
-/** Fluide traité par le chemin lent : voisin d'un solide ou ligne haute/basse. */
-export const NEAR_WALL = 2;
 
 /** Équilibre D2Q9 écrit dans `out` (longueur 9). */
 export function equilibrium(rho, ux, uy, out) {
@@ -59,6 +55,7 @@ export class LBM {
     les = 'auto',
     cs = 0.15,
     lesWallA = 4,
+    collision = 'rr',
     bouzidi = true,
     spongeFraction = 0.12,
     absorbWidth = Math.round(ny / 8),
@@ -69,16 +66,18 @@ export class LBM {
     const N = (this.N = nx * ny);
     this.f = new Float32Array(9 * N);
     this.g = new Float32Array(9 * N);
-    this.type = new Uint8Array(N);
-    this.wallQ = new Float32Array(9 * N); // 0 : pas de lien paroi
+    this.geo = new Geometry(nx, ny, lesWallA);
+    this.type = this.geo.type;
+    this.wallQ = this.geo.wallQ; // 0 : pas de lien paroi
     this.tauCol = new Float64Array(nx);
     this.omegaCol = new Float64Array(nx);
     // Bandes absorbantes haute et basse : relaxation vers l'écoulement amont,
     // pour évacuer les ondes acoustiques piégées entre les parois.
     this.sigmaRow = new Float64Array(ny);
     // Amortissement pariétal de la viscosité de sous-maille (0 à la paroi → 1 au large).
-    this.lesDamp = new Float32Array(N).fill(1);
-    this.lesWallA = lesWallA;
+    this.lesDamp = this.geo.lesDamp;
+    /** 'rr' : régularisée récursive (défaut) ; 'bgk' : BGK simple. */
+    this.collision = collision;
     this.rho = new Float32Array(N);
     this.ux = new Float32Array(N);
     this.uy = new Float32Array(N);
@@ -103,9 +102,6 @@ export class LBM {
     this.spin = 0;
     this.rotX = this.refX;
     this.rotY = this.refY;
-    this.solidCount = 0;
-    this.linkCount = 0;
-
     this.fx = 0;
     this.fy = 0;
     this.mz = 0;
@@ -192,139 +188,33 @@ export class LBM {
    * @param {number} [o.rotY]
    */
   setGeometry(inside, o = {}) {
-    const { nx, ny, N, type, wallQ, f } = this;
+    const { N, f } = this;
     this.refX = o.refX ?? this.refX;
     this.refY = o.refY ?? this.refY;
     this.spin = o.spin ?? 0;
     this.rotX = o.rotX ?? this.refX;
     this.rotY = o.rotY ?? this.refY;
-
+    const revived = this.geo.build(inside, o.bbox);
+    // Maille qui redevient fluide : on la remet au repos.
     const eq = equilibrium(1, 0, 0, this._eqA);
-    let solids = 0;
-    for (let y = 0; y < ny; y++) {
-      for (let x = 0; x < nx; x++) {
-        const idx = y * nx + x;
-        const solid = x >= 2 && x <= nx - 3 && y >= 2 && y <= ny - 3 && inside(x, y);
-        if (solid) {
-          type[idx] = SOLID;
-          solids++;
-        } else {
-          // Maille qui redevient fluide : on la remet au repos.
-          if (type[idx] === SOLID) for (let i = 0; i < 9; i++) f[i * N + idx] = eq[i];
-          type[idx] = FLUID;
-        }
-      }
-    }
-    this.solidCount = solids;
+    for (const idx of revived) for (let i = 0; i < 9; i++) f[i * N + idx] = eq[i];
+  }
 
-    // Zone où chercher les parois plus minces qu'une maille (bord de fuite,
-    // plaque) : boîte englobante du corps, élargie de 2 mailles.
-    const bb = o.bbox;
-    const bx0 = bb ? Math.floor(bb.x0) - 2 : 0;
-    const bx1 = bb ? Math.ceil(bb.x1) + 2 : -1;
-    const by0 = bb ? Math.floor(bb.y0) - 2 : 0;
-    const by1 = bb ? Math.ceil(bb.y1) + 2 : -1;
+  get solidCount() {
+    return this.geo.solidCount;
+  }
 
-    wallQ.fill(0);
-    let links = 0;
-    let thin = 0;
-    for (let y = 0; y < ny; y++) {
-      for (let x = 1; x < nx - 1; x++) {
-        const idx = y * nx + x;
-        if (type[idx] === SOLID) continue;
-        let near = y === 0 || y === ny - 1;
-        const inBox = x >= bx0 && x <= bx1 && y >= by0 && y <= by1;
-        for (let j = 1; j < 9; j++) {
-          const sx = x - CX[j];
-          const sy = y - CY[j];
-          if (sy < 0 || sy >= ny) continue;
-          // Lien du nœud fluide vers la paroi : direction i = OPP[j].
-          let q = 0;
-          if (type[sy * nx + sx] === SOLID) {
-            q = linkFraction(inside, x, y, -CX[j], -CY[j]);
-          } else if (inBox) {
-            // Lien fluide–fluide qui traverse une paroi mince : sans ce
-            // traitement, l'écoulement passerait à travers.
-            q = crossingFraction(inside, x, y, -CX[j], -CY[j]);
-            if (q > 0) thin++;
-          }
-          if (q > 0) {
-            near = true;
-            wallQ[j * N + idx] = q;
-            links++;
-          }
-        }
-        if (near) type[idx] = NEAR_WALL;
-      }
-    }
-    this.linkCount = links;
-    this.thinLinkCount = thin;
-    this._computeWallDistance();
-    this._updateLesDamping();
+  get linkCount() {
+    return this.geo.linkCount;
+  }
+
+  get lesWallA() {
+    return this.geo.lesWallA;
   }
 
   /** Longueur d'amortissement pariétal de la LES (mailles). */
   setLesWallLength(A) {
-    this.lesWallA = A;
-    this._updateLesDamping();
-  }
-
-  /**
-   * Facteur d'amortissement de type Van Driest, (1 − e^(−d/A))², où d est la
-   * distance (en mailles) à la paroi du corps. Le modèle de Smagorinsky
-   * ajoute sinon de la viscosité dans la couche limite laminaire, où le
-   * cisaillement est fort mais l'écoulement résolu, et surestime la traînée
-   * de frottement.
-   */
-  _updateLesDamping() {
-    const { N, lesDamp } = this;
-    const d = this.wallDist;
-    const A = this.lesWallA;
-    if (!d || !(A > 0) || this.solidCount === 0) {
-      lesDamp.fill(1);
-      return;
-    }
-    for (let i = 0; i < N; i++) {
-      // Distance à la paroi ≈ distance au centre de la maille solide − ½.
-      const w = Math.max(0, d[i] - 0.5);
-      const f = 1 - Math.exp(-w / A);
-      lesDamp[i] = f * f;
-    }
-  }
-
-  /** Distance de chanfrein (1, √2) aux mailles solides, en deux passes. */
-  _computeWallDistance() {
-    const { nx, ny, N, type } = this;
-    const d = (this.wallDist ??= new Float32Array(N));
-    const BIG = 1e6;
-    for (let i = 0; i < N; i++) d[i] = type[i] === SOLID ? 0 : BIG;
-    const D = Math.SQRT2;
-    for (let y = 0; y < ny; y++) {
-      for (let x = 0; x < nx; x++) {
-        const i = y * nx + x;
-        let v = d[i];
-        if (x > 0) v = Math.min(v, d[i - 1] + 1);
-        if (y > 0) {
-          v = Math.min(v, d[i - nx] + 1);
-          if (x > 0) v = Math.min(v, d[i - nx - 1] + D);
-          if (x < nx - 1) v = Math.min(v, d[i - nx + 1] + D);
-        }
-        d[i] = v;
-      }
-    }
-    for (let y = ny - 1; y >= 0; y--) {
-      for (let x = nx - 1; x >= 0; x--) {
-        const i = y * nx + x;
-        let v = d[i];
-        if (x < nx - 1) v = Math.min(v, d[i + 1] + 1);
-        if (y < ny - 1) {
-          v = Math.min(v, d[i + nx] + 1);
-          if (x < nx - 1) v = Math.min(v, d[i + nx + 1] + D);
-          if (x > 0) v = Math.min(v, d[i + nx - 1] + D);
-        }
-        d[i] = v;
-      }
-    }
+    this.geo.setLesWallLength(A);
   }
 
   /** Chemin lent : propagation (pull) pour une maille proche d'une paroi. */
@@ -398,6 +288,7 @@ export class LBM {
     const omegaCol = this.omegaCol;
     const tmp = this._tmp;
     const les = this.lesActive;
+    const rr = this.collision === 'rr';
     const c18 = 18 * this.cs * this.cs;
     const lesDamp = this.lesDamp;
     const N2 = 2 * N, N3 = 3 * N, N4 = 4 * N, N5 = 5 * N, N6 = 6 * N, N7 = 7 * N, N8 = 8 * N;
@@ -441,47 +332,98 @@ export class LBM {
         const ir = 1 / rho;
         const ux = (f1 - f3 + f5 - f6 - f7 + f8) * ir;
         const uy = (f2 - f4 + f5 + f6 - f7 - f8) * ir;
-        const usq = 1.5 * (ux * ux + uy * uy);
-        const r0 = w0 * rho, r1 = w1 * rho, r2 = w2 * rho;
-        const ux3 = 3 * ux, uy3 = 3 * uy;
-        const uxx = 4.5 * ux * ux - usq;
-        const uyy = 4.5 * uy * uy - usq;
-        const s = ux + uy, s3 = 3 * s, ss = 4.5 * s * s - usq;
-        const d = uy - ux, d3 = 3 * d, dd = 4.5 * d * d - usq;
-        const e0 = r0 * (1 - usq);
-        const e1 = r1 * (1 + ux3 + uxx);
-        const e3 = r1 * (1 - ux3 + uxx);
-        const e2 = r1 * (1 + uy3 + uyy);
-        const e4 = r1 * (1 - uy3 + uyy);
-        const e5 = r2 * (1 + s3 + ss);
-        const e7 = r2 * (1 - s3 + ss);
-        const e6 = r2 * (1 + d3 + dd);
-        const e8 = r2 * (1 - d3 + dd);
+        let p0, p1, p2, p3, p4, p5, p6, p7, p8;
 
-        let om;
-        if (les) {
-          const n1 = f1 - e1, n2 = f2 - e2, n3 = f3 - e3, n4 = f4 - e4;
-          const n5 = f5 - e5, n6 = f6 - e6, n7 = f7 - e7, n8 = f8 - e8;
-          const pd = n5 + n6 + n7 + n8;
-          const pxx = n1 + n3 + pd;
-          const pyy = n2 + n4 + pd;
-          const pxy = n5 - n6 + n7 - n8;
-          const qn = Math.sqrt(2 * (pxx * pxx + pyy * pyy + 2 * pxy * pxy));
-          const t0 = tauCol[x];
-          om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
+        if (rr) {
+          // Collision régularisée récursive (Malaspinas 2015), Hermite d'ordre 3 :
+          // seuls ρ, u et le tenseur hors équilibre a1 = Π − ρc_s²I − ρuu sont
+          // conservés ; les modes non hydrodynamiques sont filtrés.
+          const d4 = f5 + f6 + f7 + f8;
+          const rux = rho * ux;
+          const ruy = rho * uy;
+          const a1xx = f1 + f3 + d4 - rho / 3 - rux * ux;
+          const a1yy = f2 + f4 + d4 - rho / 3 - ruy * uy;
+          const a1xy = f5 - f6 + f7 - f8 - rux * uy;
+          let om;
+          if (les) {
+            const qn = Math.sqrt(2 * (a1xx * a1xx + a1yy * a1yy + 2 * a1xy * a1xy));
+            const t0 = tauCol[x];
+            om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
+          } else {
+            om = omegaCol[x];
+          }
+          const k = 1 - om;
+          const bxx = k * a1xx;
+          const byy = k * a1yy;
+          const bxy = k * a1xy;
+          // Moments post-collision d'ordres 2 et 3 (a1 d'ordre 3 par récurrence).
+          const Pxx = rux * ux + bxx;
+          const Pyy = ruy * uy + byy;
+          const Pxy = rux * uy + bxy;
+          const Qxxy = rux * ux * uy + 2 * ux * bxy + uy * bxx;
+          const Qxyy = rux * uy * uy + 2 * uy * bxy + ux * byy;
+          const sP = Pxx + Pyy;
+          const ax = 3 * rux;
+          const ay = 3 * ruy;
+          const tx = rho + 3 * Pxx - 1.5 * Pyy;
+          const ty = rho + 3 * Pyy - 1.5 * Pxx;
+          const td = rho + 3 * sP;
+          const qs = 9 * (Qxxy + Qxyy);
+          const qd = 9 * (Qxxy - Qxyy);
+          const pxy9 = 9 * Pxy;
+          p0 = w0 * (rho - 1.5 * sP);
+          p1 = w1 * (tx + ax - 4.5 * Qxyy);
+          p3 = w1 * (tx - ax + 4.5 * Qxyy);
+          p2 = w1 * (ty + ay - 4.5 * Qxxy);
+          p4 = w1 * (ty - ay + 4.5 * Qxxy);
+          p5 = w2 * (td + ax + ay + pxy9 + qs);
+          p7 = w2 * (td - ax - ay + pxy9 - qs);
+          p6 = w2 * (td - ax + ay - pxy9 + qd);
+          p8 = w2 * (td + ax - ay - pxy9 - qd);
         } else {
-          om = omegaCol[x];
-        }
+          // BGK
+          const usq = 1.5 * (ux * ux + uy * uy);
+          const r0 = w0 * rho, r1 = w1 * rho, r2 = w2 * rho;
+          const ux3 = 3 * ux, uy3 = 3 * uy;
+          const uxx = 4.5 * ux * ux - usq;
+          const uyy = 4.5 * uy * uy - usq;
+          const s = ux + uy, s3 = 3 * s, ss = 4.5 * s * s - usq;
+          const d = uy - ux, d3 = 3 * d, dd = 4.5 * d * d - usq;
+          const e0 = r0 * (1 - usq);
+          const e1 = r1 * (1 + ux3 + uxx);
+          const e3 = r1 * (1 - ux3 + uxx);
+          const e2 = r1 * (1 + uy3 + uyy);
+          const e4 = r1 * (1 - uy3 + uyy);
+          const e5 = r2 * (1 + s3 + ss);
+          const e7 = r2 * (1 - s3 + ss);
+          const e6 = r2 * (1 + d3 + dd);
+          const e8 = r2 * (1 - d3 + dd);
 
-        let p0 = f0 + om * (e0 - f0);
-        let p1 = f1 + om * (e1 - f1);
-        let p2 = f2 + om * (e2 - f2);
-        let p3 = f3 + om * (e3 - f3);
-        let p4 = f4 + om * (e4 - f4);
-        let p5 = f5 + om * (e5 - f5);
-        let p6 = f6 + om * (e6 - f6);
-        let p7 = f7 + om * (e7 - f7);
-        let p8 = f8 + om * (e8 - f8);
+          let om;
+          if (les) {
+            const n1 = f1 - e1, n2 = f2 - e2, n3 = f3 - e3, n4 = f4 - e4;
+            const n5 = f5 - e5, n6 = f6 - e6, n7 = f7 - e7, n8 = f8 - e8;
+            const pd = n5 + n6 + n7 + n8;
+            const pxx = n1 + n3 + pd;
+            const pyy = n2 + n4 + pd;
+            const pxy = n5 - n6 + n7 - n8;
+            const qn = Math.sqrt(2 * (pxx * pxx + pyy * pyy + 2 * pxy * pxy));
+            const t0 = tauCol[x];
+            om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
+          } else {
+            om = omegaCol[x];
+          }
+
+          p0 = f0 + om * (e0 - f0);
+          p1 = f1 + om * (e1 - f1);
+          p2 = f2 + om * (e2 - f2);
+          p3 = f3 + om * (e3 - f3);
+          p4 = f4 + om * (e4 - f4);
+          p5 = f5 + om * (e5 - f5);
+          p6 = f6 + om * (e6 - f6);
+          p7 = f7 + om * (e7 - f7);
+          p8 = f8 + om * (e8 - f8);
+        }
         if (gx !== 0) {
           p1 += g1;
           p3 -= g1;
@@ -599,41 +541,4 @@ function moments(f, idx, N) {
     ux: (f1 - f3 + f5 - f6 - f7 + f8) / rho,
     uy: (f2 - f4 + f5 + f6 - f7 - f8) / rho,
   };
-}
-
-/**
- * Pour un lien entre deux nœuds fluides : fraction q de la première
- * intersection avec le corps, ou 0 si le lien ne le traverse pas.
- */
-function crossingFraction(inside, x, y, dx, dy) {
-  const n = 16;
-  for (let k = 1; k < n; k++) {
-    const t = k / n;
-    if (inside(x + t * dx, y + t * dy)) {
-      let lo = (k - 1) / n;
-      let hi = t;
-      for (let it = 0; it < 10; it++) {
-        const mid = 0.5 * (lo + hi);
-        if (inside(x + mid * dx, y + mid * dy)) hi = mid;
-        else lo = mid;
-      }
-      return Math.min(1, Math.max(0.02, 0.5 * (lo + hi)));
-    }
-  }
-  return 0;
-}
-
-/**
- * Fraction q ∈ ]0, 1] du lien (x, y) → (x + dx, y + dy) située côté fluide,
- * obtenue par dichotomie sur le test d'appartenance.
- */
-function linkFraction(inside, x, y, dx, dy) {
-  let lo = 0;
-  let hi = 1;
-  for (let k = 0; k < 14; k++) {
-    const mid = 0.5 * (lo + hi);
-    if (inside(x + mid * dx, y + mid * dy)) hi = mid;
-    else lo = mid;
-  }
-  return Math.min(1, Math.max(0.02, 0.5 * (lo + hi)));
 }

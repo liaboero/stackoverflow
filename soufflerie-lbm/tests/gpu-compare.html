@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Comparaison GPU / CPU</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:24px;max-width:760px}pre{background:#eef2f4;padding:12px;overflow:auto}</style>
+</head>
+<body>
+<h1>Comparaison des moteurs GPU (WebGL2) et CPU</h1>
+<p>Même configuration sur les deux moteurs ; les écarts attendus viennent du décalage d'un pas des conditions d'entrée et de sortie sur GPU.</p>
+<pre id="out">Calcul en cours…</pre>
+<script type="module">
+import { WindTunnel } from '../js/sim.js';
+import { GpuLBM, gpuSupported } from '../js/lbm-gpu.js';
+
+const out = document.getElementById('out');
+const log = (s) => (out.textContent += '\n' + s);
+const params = new URLSearchParams(location.search);
+const shape = params.get('shape') || 'cylinder';
+const re = Number(params.get('re') || 100);
+const L = Number(params.get('L') || 12);
+const steps = Number(params.get('steps') || 2400);
+const alpha = Number(params.get('alpha') || 0);
+const spin = Number(params.get('spin') || 0);
+const coll = params.get('coll') || 'rr';
+const every = 10;
+
+async function main() {
+  out.textContent = `${shape} Re=${re} L=${L} α=${alpha} spin=${spin} ${coll}, ${steps} pas`;
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl2');
+  if (!gpuSupported(gl)) throw new Error('WebGL2 + EXT_color_buffer_float indisponible');
+  const cfg = { L, re, shape, collision: coll, params: { alpha, naca: '0012', spinRatio: spin } };
+  const cpu = new WindTunnel(cfg);
+  const gpu = new WindTunnel({ ...cfg, gpu: { Solver: GpuLBM, gl } });
+
+  const cpuSeries = new Map();
+  let t0 = performance.now();
+  for (let s = 1; s <= steps + 1; s++) {
+    cpu.step();
+    if ((s - 1) % every === 0) cpuSeries.set(s - 1, cpu.coefficients());
+  }
+  const tCpu = performance.now() - t0;
+
+  t0 = performance.now();
+  const gpuSamples = [];
+  for (let s = 1; s <= steps; s++) {
+    gpu.step();
+    if (s % every === 0) gpu.lbm.sampleForces();
+    if (s % 400 === 0) gpuSamples.push(...gpu.lbm.readSamples());
+  }
+  gpuSamples.push(...gpu.lbm.readSamples());
+  const tGpu = performance.now() - t0;
+
+  let maxD = 0;
+  let maxRef = 0;
+  let last;
+  for (const smp of gpuSamples) {
+    const c = gpu.coefficientsFrom(smp.fx, smp.fy, smp.mz);
+    // Force GPU après le pas n ↔ force CPU calculée pendant le pas n + 1.
+    const r = cpuSeries.get(smp.time);
+    if (!r || smp.time < 200) continue;
+    maxD = Math.max(maxD, Math.abs(c.cx - r.cx), Math.abs(c.cz - r.cz));
+    maxRef = Math.max(maxRef, Math.abs(r.cx), Math.abs(r.cz));
+    last = { gpu: c, cpu: r, t: smp.time };
+  }
+  cpu.lbm.computeMacros();
+  const m = gpu.lbm.readMacros();
+  let du = 0;
+  let dr = 0;
+  for (let i = 0; i < cpu.lbm.N; i++) {
+    if (cpu.lbm.type[i] === 1) continue;
+    du = Math.max(du, Math.abs(m.ux[i] - cpu.lbm.ux[i]), Math.abs(m.uy[i] - cpu.lbm.uy[i]));
+    dr = Math.max(dr, Math.abs(m.rho[i] - cpu.lbm.rho[i]));
+  }
+  const res = {
+    shape, re, L, steps,
+    finite: gpu.lbm.isFinite(),
+    lastStep: last && last.t,
+    cpu: last && { cx: +last.cpu.cx.toFixed(5), cz: +last.cpu.cz.toFixed(5), cm: +last.cpu.cm.toFixed(5) },
+    gpu: last && { cx: +last.gpu.cx.toFixed(5), cz: +last.gpu.cz.toFixed(5), cm: +last.gpu.cm.toFixed(5) },
+    maxCoeffDiff: +maxD.toExponential(2),
+    relCoeffDiff: +(maxD / maxRef).toExponential(2),
+    maxVelocityDiffOverU: +(du / cpu.uIn).toExponential(2),
+    maxRhoDiff: +dr.toExponential(2),
+    cpuMs: Math.round(tCpu),
+    gpuMs: Math.round(tGpu),
+  };
+  log(JSON.stringify(res, null, 2));
+  window.__result = res;
+}
+main().catch((e) => {
+  log('Erreur : ' + e.message);
+  window.__result = { error: e.message };
+});
+</script>
+</body>
+</html>
