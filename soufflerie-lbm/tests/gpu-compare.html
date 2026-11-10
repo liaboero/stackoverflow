@@ -45,11 +45,12 @@ async function main() {
   t0 = performance.now();
   const gpuSamples = [];
   for (let s = 1; s <= steps; s++) {
+    if (s % 400 === 1) gpu.lbm.beginFrame?.();
     gpu.step();
     if (s % every === 0) gpu.lbm.sampleForces();
     if (s % 400 === 0) gpuSamples.push(...gpu.lbm.readSamples());
   }
-  gpuSamples.push(...gpu.lbm.readSamples());
+  gpuSamples.push(...(gpu.lbm.finish ? gpu.lbm.finish() : gpu.lbm.readSamples()));
   const tGpu = performance.now() - t0;
 
   let maxD = 0;

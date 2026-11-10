@@ -73,6 +73,7 @@ export class WindTunnel {
     this.x0 = DOMAIN.x0 * this.L;
     this.y0 = (this.ny - 1) / 2;
     this.re = cfg.re;
+    this._acc = { fx: 0, fy: 0, mz: 0, n: 0 };
     const opts = {
       nx: this.nx,
       ny: this.ny,
@@ -157,7 +158,29 @@ export class WindTunnel {
         lbm.accelX = 0;
       }
       lbm.step();
+      if (!lbm.isGpu) {
+        const a = this._acc;
+        a.fx += lbm.fx;
+        a.fy += lbm.fy;
+        a.mz += lbm.mz;
+        a.n++;
+      }
     }
+  }
+
+  /**
+   * Coefficients moyennés sur les pas écoulés depuis l'appel précédent (moteur
+   * CPU). Un effort lu sur un seul pas peut porter une alternance d'un pas à
+   * l'autre (mode pair/impair près d'une paroi mince) qu'un échantillonnage
+   * régulier replierait en un biais ; la moyenne l'annule.
+   */
+  averagedCoefficients() {
+    const a = this._acc;
+    if (!a.n) return this.coefficients();
+    const c = this.coefficientsFrom(a.fx / a.n, a.fy / a.n, a.mz / a.n);
+    a.fx = a.fy = a.mz = 0;
+    a.n = 0;
+    return c;
   }
 
   /** Temps convectif t* = t U / L. */

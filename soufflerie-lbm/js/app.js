@@ -14,10 +14,11 @@ const U_VALUES = [0.05, 0.08, 0.1, 0.12];
 const WINDOW_T = 20; // fenêtre glissante de moyenne (t*)
 const SETTLE_T = 6; // transitoire ignoré après un changement (t*)
 const HISTORY_SPAN_T = 40; // largeur du graphique (t*)
-const SWEEP_SETTLE_T = 12;
+const SWEEP_SETTLE_T = 12; // durées maximales (t*)
 const SWEEP_MEASURE_T = 15;
+const SWEEP_SETTLE_MIN_T = 5; // durées minimales si l'écoulement a convergé
+const SWEEP_MEASURE_MIN_T = 6;
 const FRAME_BUDGET_MS = 11;
-const GPU_FRAME_MS = 14; // temps de calcul GPU visé par image
 const PREFS_KEY = 'soufflerie.prefs.v1';
 const POINTS_KEY = 'soufflerie.points.v1';
 
@@ -178,7 +179,11 @@ function buildSim() {
   $('flow-gl').hidden = wt.engine !== 'gpu';
   gpuSteps = 16;
   hist = new ForceHistory(16384);
-  sampleEvery = Math.max(1, Math.round(wt.stepsPerTStar / 40));
+  // 40 échantillons par t* sur CPU (moyenne de tous les pas, gratuite) ; 16 sur
+  // GPU, chacun moyenné sur deux pas (quatre tracés) : assez pour un Strouhal
+  // jusqu'à ~3.
+  sampleEvery = Math.max(2, Math.round(wt.stepsPerTStar / (wt.engine === 'gpu' ? 16 : 40)));
+  halfSample = null;
   tChange = 0;
   markers = [];
   analysis = null;
@@ -202,9 +207,26 @@ function applyBody() {
 }
 
 function sample() {
-  const c = wt.coefficients();
+  const c = wt.averagedCoefficients();
   lastCoeffs = c;
   hist.push(wt.lbm.time, c.cx, c.cz, c.cm);
+}
+
+let halfSample = null;
+/** Moyenne des efforts GPU relus aux pas n et n + 1. */
+function pushGpuSample(smp) {
+  if (halfSample && smp.time === halfSample.time + 1) {
+    const c = wt.coefficientsFrom(
+      0.5 * (smp.fx + halfSample.fx),
+      0.5 * (smp.fy + halfSample.fy),
+      0.5 * (smp.mz + halfSample.mz),
+    );
+    halfSample = null;
+    lastCoeffs = c;
+    hist.push(smp.time, c.cx, c.cz, c.cm);
+  } else {
+    halfSample = smp;
+  }
 }
 
 function currentAnalysis() {
@@ -453,7 +475,11 @@ function statusOf(a) {
   if (!running) return ['paused', 'En pause'];
   if (wt.ramping) return ['transient', 'Mise en vitesse'];
   if (!a || !a.ready) return ['transient', 'Transitoire'];
-  if (a.periodic) return ['periodic', 'Périodique'];
+  if (a.periodic) {
+    // Oscillation d'amplitude négligeable (bruit de bord de fuite, reste du transitoire).
+    if (a.czAmp < 0.01 && a.cxAmp < 0.005) return ['steady', 'Quasi stationnaire'];
+    return ['periodic', 'Périodique'];
+  }
   const tol = 0.004 + 0.004 * Math.abs(a.cx);
   if (a.drift < tol) return ['steady', 'Stationnaire'];
   return ['transient', 'En convergence'];
@@ -767,14 +793,21 @@ function sweepTick() {
   if (!sweep || !running) return;
   const spt = wt.stepsPerTStar;
   const el = (wt.lbm.time - sweep.t0) / spt;
+  // Critère adaptatif : un point stationnaire convergé n'attend pas la durée maximale.
+  const converged = (a) => !a.periodic && a.drift < 0.003 + 0.003 * Math.abs(a.cx);
   if (sweep.phase === 'settle') {
-    if (el >= SWEEP_SETTLE_T) {
+    const recent = el >= SWEEP_SETTLE_MIN_T ? analyze(hist.since(wt.lbm.time - 4 * spt), wt.uIn, wt.L) : null;
+    if (el >= SWEEP_SETTLE_T || (recent && converged(recent))) {
       sweep.phase = 'measure';
       sweep.t0 = wt.lbm.time;
     }
   } else {
     const a = analyze(hist.since(sweep.t0), wt.uIn, wt.L);
-    const enough = (el >= SWEEP_MEASURE_T && (!a.periodic || a.periods >= 3)) || el >= 2.5 * SWEEP_MEASURE_T;
+    const enough =
+      (el >= SWEEP_MEASURE_MIN_T && converged(a)) ||
+      (el >= SWEEP_MEASURE_MIN_T && a.periodic && a.periods >= 3) ||
+      (el >= SWEEP_MEASURE_T && (!a.periodic || a.periods >= 3)) ||
+      el >= 2.5 * SWEEP_MEASURE_T;
     if (enough && Number.isFinite(a.cx)) {
       recordPoint(a, 'polaire');
       sweep.i++;
@@ -804,7 +837,12 @@ function updateSweepUi() {
 
 // ---------------------------------------------------------------- boucle principale
 
-function frame() {
+let lastFrameTs = 0;
+let frameMs = 16;
+
+function frame(ts) {
+  if (lastFrameTs) frameMs = 0.8 * frameMs + 0.2 * Math.min(200, ts - lastFrameTs);
+  lastFrameTs = ts;
   if (pendingBody && !diverged) {
     pendingBody = false;
     applyBody();
@@ -814,19 +852,24 @@ function frame() {
     let n = 0;
     const lbm = wt.lbm;
     if (wt.engine === 'gpu') {
+      lbm.beginFrame();
       for (; n < gpuSteps; n++) {
         wt.step();
-        if (lbm.time % sampleEvery === 0) lbm.sampleForces();
+        // Deux pas consécutifs par échantillon : la moyenne annule une
+        // éventuelle alternance pair/impair des efforts.
+        const r = lbm.time % sampleEvery;
+        if (r === 0 || r === 1) lbm.sampleForces();
       }
-      // Relecture des efforts : synchronise avec le GPU une fois par image.
-      for (const smp of lbm.readSamples()) {
-        const c = wt.coefficientsFrom(smp.fx, smp.fy, smp.mz);
-        lastCoeffs = c;
-        hist.push(smp.time, c.cx, c.cz, c.cm);
-      }
-      const dt = Math.max(1, performance.now() - t0);
-      const k = Math.min(1.25, Math.max(0.6, GPU_FRAME_MS / dt));
-      gpuSteps = Math.max(1, Math.min(4000, Math.round(gpuSteps * k + (k > 1 ? 1 : 0))));
+      for (const smp of lbm.readSamples()) pushGpuSample(smp);
+      // Réglage du nombre de pas par image : le GPU doit rester occupé (une
+      // relecture en attente au plus) sans faire chuter l'affichage sous
+      // ~30 images/s. Relecture asynchrone : gpuLag = relectures en vol.
+      // Une image lente alors que le GPU a fini (lag ≤ 1) vient du rendu ou
+      // de la page, pas du calcul : on n'y réduit pas le nombre de pas.
+      const lag = lbm.gpuLag;
+      if (lag >= 3) gpuSteps = Math.max(1, Math.floor(gpuSteps * 0.75));
+      else if (lag === 2 && frameMs > 40) gpuSteps = Math.max(1, Math.floor(gpuSteps * 0.85));
+      else if (lag <= 1 && frameMs < 60) gpuSteps = Math.min(4000, Math.ceil(gpuSteps * 1.15) + 1);
     } else {
       do {
         wt.step();

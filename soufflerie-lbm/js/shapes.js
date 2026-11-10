@@ -29,6 +29,16 @@ function nacaCamber(m, p, x) {
   return x < p ? (m / (p * p)) * (2 * p * x - x * x) : (m / ((1 - p) ** 2)) * (1 - 2 * p + 2 * p * x - x * x);
 }
 
+/**
+ * Position de la pointe du bord de fuite par rapport au réseau (parties
+ * fractionnaires x, y) : abscisse d'un nœud, à mi-hauteur entre deux nœuds,
+ * comme à α = 0 (symétrie haut/bas). Parmi les positions essayées, c'est
+ * celle qui donne la portance la plus régulière en fonction de α. Elle peut
+ * exciter près de la pointe un mode alterné pair/impair : les efforts sont
+ * donc toujours moyennés sur plusieurs pas (voir WindTunnel).
+ */
+const TE_ANCHOR = [0, 0.5];
+
 /** Triangle isocèle, pointe vers l'amont, hauteur frontale 1, centré sur son centre de gravité. */
 const TRI_LEN = Math.sqrt(3) / 2;
 const TRI = (() => {
@@ -110,6 +120,7 @@ export const SHAPES = [
   {
     id: 'plate',
     name: 'Plaque plane',
+    trailingEdge: [0.5, 0],
     short: 'Plaque',
     ref: 'corde c',
     momentRef: 'au centre',
@@ -130,6 +141,7 @@ export const SHAPES = [
     momentRef: 'au quart de corde',
     alpha: [-20, 25, 4],
     naca: true,
+    trailingEdge: [0.75, 0],
     inside: (x, y, p) => {
       const xc = x + 0.25;
       if (xc < 0 || xc > 1) return false;
@@ -189,8 +201,22 @@ export function makeBody(id, o) {
     plateHalf: Math.max(0.03, 1.25 / L),
     nacaParams: parseNaca(o.naca) ?? parseNaca('0012'),
   };
-  const x0 = o.x0;
-  const y0 = o.y0;
+  let x0 = o.x0;
+  let y0 = o.y0;
+  // Bord de fuite aigu : décalage de moins d'une demi-maille pour que sa pointe
+  // occupe toujours la même position par rapport au réseau, quelle que soit
+  // l'incidence (x entier, y demi-entier, comme à α = 0). Sans cela, la
+  // position effective du bord de fuite saute d'une maille à l'autre et la
+  // portance varie de façon erratique avec α (≈ ±1° d'incidence effective à
+  // 16 mailles). Les efforts ne dépendent pas de cette translation.
+  if (shape.trailingEdge && o.anchorTrailingEdge !== false) {
+    const [bx, by] = shape.trailingEdge;
+    const [ax, ay] = o.teAnchor ?? TE_ANCHOR;
+    const tx = x0 + L * (ca * bx + sa * by);
+    const ty = y0 + L * (-sa * bx + ca * by);
+    x0 += Math.floor(tx - ax + 0.5) + ax - tx;
+    y0 += Math.floor(ty - ay + 0.5) + ay - ty;
+  }
   const test = shape.inside;
   const inside = (x, y) => {
     const dx = (x - x0) / L;

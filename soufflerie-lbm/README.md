@@ -114,12 +114,30 @@ BGK : l'équilibre n'a pas à être évalué population par population.
 Le solveur WebGL2 (`js/lbm-gpu.js`) reprend exactement le modèle du CPU :
 même collision, mêmes parois de Bouzidi (géométrie construite sur le CPU par
 `js/geometry.js`, puis envoyée en textures), mêmes conditions aux limites.
-Les 9 populations sont stockées dans trois textures RGBA32F en ping-pong ; un
-pas de temps est un seul tracé avec trois cibles de rendu. Les efforts sont
-calculés à la demande par une passe sur les mailles de paroi, réduite sur le
-GPU puis relue une fois par image. Le champ affiché et les traceurs sont
-calculés et dessinés sur le GPU (`js/render-gpu.js`). La maquette et la
-force sont dessinées sur un calque 2D superposé.
+Les 9 populations sont stockées en ping-pong dans deux textures RGBA32F et
+une R32F (36 octets par maille) ; un pas de temps est un seul tracé avec
+trois cibles de rendu. Les efforts sont calculés à la demande par une passe
+sur les mailles de paroi, réduite sur le GPU puis relue de façon asynchrone
+(tampon de pixels et barrière), sans jamais attendre le GPU. Le champ
+affiché et les traceurs sont calculés et dessinés sur le GPU
+(`js/render-gpu.js`). La maquette et la force sont dessinées sur un calque
+2D superposé.
+
+Optimisations du moteur :
+
+- 36 au lieu de 48 octets par maille : ρ et u ne sont plus écrits à chaque
+  pas mais recalculés une fois par image pour l'affichage ;
+- textures liées une fois pour toutes à des unités réservées, une copie du
+  programme par sens du ping-pong et uniformes mis en cache : 3 à 4 appels
+  WebGL par pas au lieu d'environ 36, ce qui compte sur téléphone ;
+- relecture asynchrone des efforts et réglage du nombre de pas par image
+  sur le retard du GPU (au plus une image de retard) ;
+- 16 échantillons d'efforts par t* au lieu de 40.
+
+`tests/gpu-bench.html` mesure la vitesse du moteur sur l'appareil qui
+l'ouvre. Avec le moteur logiciel SwiftShader, seul disponible dans mon
+environnement de test : +31 % à 16 mailles, +18 % à 32 mailles. Je n'ai
+pas pu mesurer de GPU matériel.
 
 Seule différence : les colonnes d'entrée et de sortie sont extrapolées
 depuis le pas précédent. `tests/gpu-compare.html` compare les deux moteurs
@@ -131,6 +149,52 @@ Le moteur exige WebGL2 et l'extension `EXT_color_buffer_float` (navigateurs
 récents, iOS ≥ 15, la plupart des Android). Sinon, ou si le GPU refuse la
 grille, l'application repasse sur le CPU. Le choix se fait dans « Réglages
 numériques ». Mémoire GPU : ≈ 115 Mo pour la résolution Max (1536 × 768).
+
+## Profils : portance, oscillations et bord de fuite
+
+**Bord de fuite recalé.** La pointe d'un bord de fuite aigu est plus fine
+qu'une maille ; c'est pourtant elle qui fixe la circulation (condition de
+Kutta). Sur un réseau cartésien, sa position effective change d'une maille
+à l'autre quand l'incidence varie, ce qui revient à une erreur d'incidence
+de ±1 à 2° à 16 mailles. Sans correction, Cz(α) variait en dents de scie
+(NACA 0012, Re = 1000, 16 mailles : Cz = 0,003 / 0,050 / 0,170 à 1 / 2 /
+3°). Le profil est donc décalé de moins d'une demi-maille pour que sa pointe
+garde toujours la même position par rapport au réseau : à l'abscisse d'un
+nœud, à mi-hauteur entre deux nœuds, comme à α = 0. Parmi les positions
+essayées, c'est celle qui donne la portance la plus régulière. Les efforts ne dépendent pas de
+cette translation. Résultat : Cz = 0,047 / 0,083 / 0,101 à 16 mailles, et
+une pente constante de 0,046 ± 0,003 par degré à 32 mailles
+(référence ≈ 0,055).
+
+**Efforts moyennés sur plusieurs pas.** Avec la collision régularisée,
+certaines configurations de bord de fuite excitent un mode parasite qui
+alterne d'un pas de temps au suivant. Il reste local et ne perturbe pas
+l'écoulement moyen, mais il s'ajoute aux efforts instantanés (Cx alternant
+entre 0,24 et 0,06, par exemple). Un échantillonnage régulier le replie en
+un biais : jusqu'à Cx = −0,28 au lieu de 0,135 sur un cas. Les efforts sont
+désormais moyennés sur tous les pas (CPU) ou sur deux pas consécutifs (GPU),
+ce qui annule exactement cette alternance.
+
+**Oscillations physiques.** Au-delà d'une incidence critique, le sillage
+d'un profil à bas Reynolds devient instationnaire. Des tourbillons se
+détachent du bord de fuite, avec un Strouhal (rapporté à la corde) de
+l'ordre de 1. Calculé pour le NACA 0012 :
+
+| Re | stationnaire jusqu'à | périodique dès |
+| --- | --- | --- |
+| 1000 (24 mailles) | 6° | ≈ 8 à 10° (Cz′ = 0,002 à 8° ; littérature : 7 à 8°) |
+| 2000 (24 mailles) | 6° (Cz′ = 0,005) | ≈ 8° (Cz′ = 0,035, St ≈ 0,9) |
+| 5000 (32 mailles) | 4° | ≈ 6° (Cz′ = 0,016, St ≈ 1,3) |
+
+L'angle critique baisse quand Re augmente, comme l'observe Kurtulus (2022)
+entre Re = 1000 et 4000. Avec le moteur GPU, qui rend accessibles les
+Reynolds de quelques milliers, les profils sont donc souvent oscillants dès
+5 à 6° : c'est la physique 2D de ces régimes. Les oscillations d'amplitude
+négligeable (Cz′ < 0,01) sont affichées « quasi stationnaire ».
+
+**Paroi en marches.** Sur un profil mince (2 mailles d'épaisseur à
+16 mailles de corde), le rebond simple perd la symétrie, même à α = 0. Ce
+mode ne sert qu'à comparer, sur des corps épais.
 
 ## Traînée et décrochage
 
@@ -231,6 +295,7 @@ soufflerie-lbm/
 ├── sw.js, manifest.webmanifest, icons/   PWA
 ├── tests/validate.mjs    validation physique (moteur CPU)
 ├── tests/gpu-compare.html  comparaison GPU / CPU dans le navigateur
+├── tests/gpu-bench.html    vitesse du moteur GPU sur l'appareil
 └── tools/build.mjs       version « fichier unique »
 ```
 
@@ -248,9 +313,8 @@ Pages…) ; le service worker exige HTTPS, sauf sur `localhost`.
 
 ## Pistes
 
-- Relecture asynchrone des efforts (tampons de pixels et barrières) pour ne
-  plus attendre le GPU à chaque image.
-- Raffinement local de maillage près de la maquette.
+- Raffinement local de maillage près de la maquette, qui résoudrait mieux
+  le bord de fuite sans payer une grille fine partout.
 - Correction de blocage, mode dimensionnel (corde en m, vitesse en m/s,
   air ou eau → efforts en N/m).
 - Dessin libre de la maquette au doigt.

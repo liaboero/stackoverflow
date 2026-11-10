@@ -27,7 +27,7 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
   for (let s = 1; s <= total; s++) {
     wt.step();
     if (s % every === 0) {
-      const c = wt.coefficients();
+      const c = wt.averagedCoefficients();
       hist.push(wt.lbm.time, c.cx, c.cz, c.cm);
     }
   }
@@ -80,6 +80,18 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
     'NACA 0012, α = ±4°',
     ap.cz > 0.08 && Math.abs(ap.cz + am.cz) < 0.02 * ap.cz + 0.003 && Math.abs(ap.cx - am.cx) < 0.01,
     `Cz(+4°) = ${ap.cz.toFixed(4)}, Cz(−4°) = ${am.cz.toFixed(4)}`,
+  );
+}
+
+// 4 ter. Linéarité de la portance aux petites incidences : la pointe du bord
+//    de fuite est recalée sur le réseau, sinon Cz(α) varie en dents de scie.
+{
+  const cz = [1, 2, 3].map((alpha) => run({ shape: 'naca', re: 1000, L: 16, tEnd: RAMP_T + 25, avgT: 8, params: { naca: '0012', alpha } }).cz);
+  const slopes = cz.map((c, k) => c / (k + 1));
+  check(
+    'NACA 0012, Cz(α) régulier',
+    cz[0] < cz[1] && cz[1] < cz[2] && slopes.every((v) => v > 0.025 && v < 0.065),
+    `Cz(1°, 2°, 3°) = ${cz.map((c) => c.toFixed(3)).join(', ')}`,
   );
 }
 

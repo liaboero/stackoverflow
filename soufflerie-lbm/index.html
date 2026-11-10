@@ -162,6 +162,7 @@
         <div class="field">
           <span class="label" id="lbl-wall">Condition de paroi</span>
           <div class="seg" role="radiogroup" aria-labelledby="lbl-wall" id="wall-seg"></div>
+          <p class="hint">Marches : rebond simple, pour comparaison seulement. Sur un profil mince, la paroi en escalier fausse complètement la portance.</p>
         </div>
         <div class="field">
           <span class="label" id="lbl-les">Modèle de sous-maille (Smagorinsky)</span>
@@ -196,7 +197,7 @@
           <label>pas <input id="sw-step" type="number" value="2" step="0.5" min="0.5"></label>
           <button id="btn-sweep" class="btn" type="button">Lancer</button>
         </div>
-        <p class="hint" id="sweep-hint">Chaque point : stabilisation puis moyenne sur ~15 t*. L'écran reste allumé pendant le balayage si l'appareil le permet.</p>
+        <p class="hint" id="sweep-hint">Chaque point : stabilisation puis moyenne, de 11 t* (point stationnaire convergé) à 27 t* ou plus (point instationnaire, au moins 3 périodes). L'écran reste allumé pendant le balayage si l'appareil le permet.</p>
         <div class="progress" id="sweep-progress" hidden>
           <div class="bar"><span id="sweep-bar"></span></div>
           <p id="sweep-text"></p>

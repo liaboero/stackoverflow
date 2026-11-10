@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Banc d'essai GPU</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 16px; max-width: 760px; }
+  pre { background: #eef2f4; padding: 12px; overflow: auto; }
+  button { font: inherit; padding: 8px 14px; }
+</style>
+</head>
+<body>
+<h1>Banc d'essai du moteur GPU</h1>
+<p>Mesure la vitesse du solveur WebGL2 de la Soufflerie de poche sur cet appareil (cylindre, Re = 1000, efforts relus comme dans l'application). La grille « 4 mailles » est minuscule : elle mesure le surcoût par pas côté processeur.</p>
+<button id="go" type="button">Lancer</button>
+<pre id="out"></pre>
+<script type="module">
+import { WindTunnel } from '../js/sim.js';
+import { GpuLBM, gpuSupported } from '../js/lbm-gpu.js';
+
+const out = document.getElementById('out');
+const log = (s) => (out.textContent += s + '\n');
+const params = new URLSearchParams(location.search);
+const sizes = (params.get('L') || '4,16,32,64').split(',').map(Number);
+const seconds = Number(params.get('s') || 3);
+
+async function bench() {
+  out.textContent = '';
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+  if (!gpuSupported(gl)) {
+    log('WebGL2 avec rendu flottant indisponible.');
+    return null;
+  }
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  log(`GPU : ${dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'inconnu'}`);
+  const results = [];
+  for (const L of sizes) {
+    const wt = new WindTunnel({ L, re: 1000, shape: 'cylinder', gpu: { Solver: GpuLBM, gl } });
+    const lbm = wt.lbm;
+    const every = Math.max(1, Math.round(wt.stepsPerTStar / 40));
+    let n = 8;
+    let steps = 0;
+    let t0 = 0;
+    const frame = () => {
+      lbm.beginFrame?.();
+      for (let k = 0; k < n; k++) {
+        wt.step();
+        if (lbm.time % every === 0) lbm.sampleForces();
+      }
+      lbm.readSamples();
+      return n;
+    };
+    // Mise en régime : ~0,5 s, puis ajustement de n à ~15 ms par lot.
+    let tw = performance.now();
+    while (performance.now() - tw < 500) {
+      const a = performance.now();
+      frame();
+      await new Promise(requestAnimationFrame);
+      const dt = performance.now() - a;
+      n = Math.max(1, Math.min(4000, Math.round(n * Math.min(1.5, Math.max(0.5, 15 / dt)))));
+    }
+    lbm.finish?.();
+    t0 = performance.now();
+    while (performance.now() - t0 < seconds * 1000) {
+      steps += frame();
+      await new Promise(requestAnimationFrame);
+    }
+    lbm.finish?.();
+    const s = (performance.now() - t0) / 1000;
+    const r = {
+      L,
+      grid: `${wt.nx}×${wt.ny}`,
+      stepsPerSec: Math.round(steps / s),
+      mlups: +((steps * wt.nx * wt.ny) / s / 1e6).toFixed(1),
+      tStarPerSec: +((steps / s) / wt.stepsPerTStar).toFixed(2),
+      finite: lbm.isFinite(),
+    };
+    results.push(r);
+    log(`L = ${String(L).padStart(2)}  ${r.grid.padEnd(10)} ${String(r.stepsPerSec).padStart(6)} pas/s  ${String(r.mlups).padStart(7)} MLUPS  ${r.tStarPerSec} t*/s`);
+    wt.dispose();
+  }
+  return results;
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  window.__result = await bench();
+});
+if (params.has('auto')) bench().then((r) => (window.__result = r || { error: 'unsupported' }));
+</script>
+</body>
+</html>

@@ -29,6 +29,27 @@ int cellType(ivec2 q) {
 }
 `;
 
+// Grandeurs macroscopiques (0, ρ, ux, uy) à partir des populations, une fois par image.
+const FS_MACRO = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uA;
+uniform sampler2D uB;
+uniform sampler2D uF8;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 a = texelFetch(uA, p, 0);
+  vec4 b = texelFetch(uB, p, 0);
+  float f8 = texelFetch(uF8, p, 0).r;
+  float rho = a.x + a.y + a.z + a.w + b.x + b.y + b.z + b.w + f8;
+  float ux = (a.y - a.w + b.y - b.z - b.w + f8) / rho;
+  float uy = (a.z - b.x + b.y + b.z - b.w - f8) / rho;
+  o = vec4(0.0, rho, ux, uy);
+}
+`;
+
 // Grandeur affichée, à la résolution du réseau (sentinelle −1e30 : solide).
 const FS_SCALAR = `${HEAD}
 uniform int uField;
@@ -194,6 +215,7 @@ export class GpuFlowView {
     this.ctx = overlay.getContext('2d');
     this.gl = gl;
     this.vao = gl.createVertexArray();
+    this.progMacro = createProgram(gl, VS_QUAD, FS_MACRO);
     this.progScalar = createProgram(gl, VS_QUAD, FS_SCALAR);
     this.progDisplay = createProgram(gl, VS_QUAD, FS_DISPLAY);
     this.progUpdate = createProgram(gl, VS_QUAD, FS_PUPDATE);
@@ -209,6 +231,9 @@ export class GpuFlowView {
     this.emitAcc = 0;
     this.scalarTex = null;
     this.scalarFbo = null;
+    this.macroTex = null;
+    this.macroFbo = null;
+    this._macroTime = -1;
     this.size = [0, 0];
     this.viewMode = 'near';
     this.dpr = 1;
@@ -221,6 +246,7 @@ export class GpuFlowView {
     const gl = this.gl;
     this.theme = theme;
     this.colors = { ...this.colors, ...colors };
+    gl.activeTexture(gl.TEXTURE0);
     for (const map of ['diverging', 'sequential']) {
       const lut = buildLut(PALETTES[theme][map]);
       gl.bindTexture(gl.TEXTURE_2D, this.lut[map]);
@@ -243,19 +269,45 @@ export class GpuFlowView {
       if (this.scalarTex) {
         gl.deleteTexture(this.scalarTex);
         gl.deleteFramebuffer(this.scalarFbo);
+        gl.deleteTexture(this.macroTex);
+        gl.deleteFramebuffer(this.macroFbo);
       }
       this.scalarTex = createTexture(gl, wt.nx, wt.ny, gl.R32F);
       this.scalarFbo = createFramebuffer(gl, [this.scalarTex]);
+      this.macroTex = createTexture(gl, wt.nx, wt.ny, gl.RGBA32F);
+      this.macroFbo = createFramebuffer(gl, [this.macroTex]);
       this.size = [wt.nx, wt.ny];
     }
+    this._macroTime = -1;
     this.setView(this.viewMode);
     this.clearParticles();
     this.resize();
   }
 
+  /** ρ, u sur tout le domaine, recalculés si le calcul a avancé. */
+  _macros() {
+    const sim = this.wt.lbm;
+    if (this._macroTime === sim.time) return;
+    this._macroTime = sim.time;
+    const gl = this.gl;
+    const P = this.progMacro;
+    const st = sim.state;
+    gl.bindVertexArray(this.vao);
+    gl.useProgram(P.p);
+    ['uA', 'uB', 'uF8'].forEach((name, k) => {
+      gl.activeTexture(gl.TEXTURE0 + k);
+      gl.bindTexture(gl.TEXTURE_2D, st[k]);
+      gl.uniform1i(P.loc[name], k);
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.macroFbo);
+    gl.viewport(0, 0, this.wt.nx, this.wt.ny);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
   clearParticles() {
     const gl = this.gl;
     const zero = new Float32Array(4 * NP);
+    gl.activeTexture(gl.TEXTURE0);
     for (const t of this.pTex) {
       gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, PW, PH, gl.RGBA, gl.FLOAT, zero);
@@ -302,6 +354,7 @@ export class GpuFlowView {
         data[4 * k + 1] = fresh[2 * k + 1];
         data[4 * k + 2] = 1;
       }
+      gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.pTex[this.pCur]);
       let k = 0;
       while (k < n) {
@@ -315,6 +368,7 @@ export class GpuFlowView {
       this.pHead = (this.pHead + n) % NP;
     }
 
+    this._macros();
     const nsub = Math.min(64, Math.max(1, Math.ceil((steps * U * 2) / 0.8)));
     const P = this.progUpdate;
     gl.bindVertexArray(this.vao);
@@ -336,7 +390,7 @@ export class GpuFlowView {
     const gl = this.gl;
     const sim = this.wt.lbm;
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, sim.state[2]);
+    gl.bindTexture(gl.TEXTURE_2D, this.macroTex);
     gl.uniform1i(P.loc.uC, 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, sim.geoTex);
@@ -356,6 +410,7 @@ export class GpuFlowView {
     const gl = this.gl;
     const field = FIELDS[o.field] ?? FIELDS.vort;
     const { wx, wy, ww, wh } = this.win;
+    this._macros();
     gl.bindVertexArray(this.vao);
 
     // 1. Grandeur à la résolution du réseau
@@ -415,9 +470,9 @@ export class GpuFlowView {
 
   dispose() {
     const gl = this.gl;
-    [this.scalarTex, this.lut.diverging, this.lut.sequential, ...this.pTex].forEach((t) => t && gl.deleteTexture(t));
-    [this.scalarFbo, ...this.pFbo].forEach((f) => f && gl.deleteFramebuffer(f));
-    [this.progScalar, this.progDisplay, this.progUpdate, this.progPoints].forEach((p) => gl.deleteProgram(p.p));
+    [this.scalarTex, this.macroTex, this.lut.diverging, this.lut.sequential, ...this.pTex].forEach((t) => t && gl.deleteTexture(t));
+    [this.scalarFbo, this.macroFbo, ...this.pFbo].forEach((f) => f && gl.deleteFramebuffer(f));
+    [this.progMacro, this.progScalar, this.progDisplay, this.progUpdate, this.progPoints].forEach((p) => gl.deleteProgram(p.p));
     gl.deleteVertexArray(this.vao);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }

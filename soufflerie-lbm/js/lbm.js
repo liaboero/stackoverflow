@@ -78,6 +78,7 @@ export class LBM {
     this.lesDamp = this.geo.lesDamp;
     /** 'rr' : régularisée récursive (défaut) ; 'bgk' : BGK simple. */
     this.collision = collision;
+
     this.rho = new Float32Array(N);
     this.ux = new Float32Array(N);
     this.uy = new Float32Array(N);
