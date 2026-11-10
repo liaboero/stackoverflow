@@ -652,6 +652,24 @@ body::before {
   accent-color: var(--accent);
 }
 
+.phys-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+#chord {
+  width: 5.5em;
+}
+
 .naca-row {
   display: flex;
   gap: 8px;

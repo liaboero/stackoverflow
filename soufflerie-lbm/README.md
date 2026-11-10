@@ -27,6 +27,10 @@ Deux moteurs de calcul partagent le même modèle : un solveur **GPU**
 - **Mesures** : moyennes glissantes calculées sur un nombre entier de
   périodes quand l'écoulement est périodique, amplitude des oscillations,
   Strouhal, état de convergence (transitoire, stationnaire, périodique).
+- **Échelle physique et vitesse** : longueur de référence en mètres et
+  fluide (air, eau) → vitesse amont V = Re·ν/L, durée réelle simulée et
+  efforts en N/m d'envergure ; vitesse de simulation imposée (temps réel,
+  ×0,1, ×0,5, ×2, ×10) ou maximale.
 - **Polaires** : enregistrement de points, balayage automatique en incidence
   (ou en vitesse de rotation pour le cylindre), tracé Cx, Cz = f(α) ou
   polaire d'Eiffel Cz(Cx), copie du tableau vers un tableur.
@@ -266,6 +270,42 @@ Re = 1000 : Cx ≈ 1,4 en 2D contre ≈ 1 mesuré). Pour les corps non profilés
 (cylindre, carré, triangle, plaque ou ellipse très inclinées), rester sous
 Re ≈ 200 pour des valeurs quantitatives. Un profil peu incliné reste
 laminaire et 2D bien plus loin : c'est alors la résolution qui limite.
+
+## Vers Re = 10⁷ : feuille de route
+
+**Pourquoi c'est un changement de nature.** À Re = 10⁷, la couche limite
+d'un profil est turbulente et mince : δ ≈ 0,37 c·Re^(−1/5) ≈ 0,015 c au bord
+de fuite, et la sous-couche visqueuse (y⁺ = 1) est à y ≈ 2·10⁻⁶ c. La
+résoudre directement demanderait de l'ordre d'un million de mailles par
+corde. En outre, la turbulence est tridimensionnelle et un calcul 2D ne peut
+pas la résoudre. Comme les codes industriels pour les polaires de profils,
+il faut modéliser la turbulence en moyenne (RANS) et ne pas résoudre la
+sous-couche (loi de paroi). Côté LBM, τ − ½ = 3ν ≈ 3·10⁻⁵ en unités réseau :
+seule la viscosité turbulente du modèle rend alors le calcul stable et
+physique.
+
+| Étape | Contenu | Reynolds visé |
+| --- | --- | --- |
+| A | Modèle de Spalart–Allmaras résolu par différences finies sur le réseau (une passe GPU de plus par pas), ν_t injecté dans τ comme la LES actuelle ; loi de paroi de Spalding (u_τ tiré de la vitesse au premier nœud, imposé par un rebond modifié) | 10⁵ – 10⁶, qualitatif sur grille uniforme |
+| B | Raffinement local emboîté, facteur 2 par niveau, 5 à 6 niveaux | 10⁶ – 10⁷, quantitatif |
+| C | Transition (déclenchement imposé à x/c donné, puis modèle de transition), passage à WebGPU (calcul, réductions, grilles multiniveaux plus simples) | polaires de profils lisses, ×1,5 à 3 en vitesse |
+
+Ordres de grandeur à Re = 10⁷ (u_τ/U ≈ 0,04) : un premier nœud à y⁺ ≈ 500,
+encore dans la zone logarithmique (δ⁺ ≈ 6000), demande ≈ 800 mailles par
+corde près de la paroi, soit une douzaine de mailles dans l'épaisseur de
+couche limite. En grille uniforme sur 24 c × 12 c, cela ferait 180 millions
+de mailles (13 Go). En grille emboîtée, avec une boîte fine de 1,2 c × 0,4 c
+et 5 niveaux plus grossiers, on tombe à ≈ 2 millions de mailles (≈ 130 Mo).
+Un point de polaire, soit 30 t* et 240 000 pas du niveau fin, coûterait
+≈ 1,5·10¹¹ mises à jour : quelques minutes sur un GPU de portable à
+1 GLUPS, plutôt une demi-heure sur téléphone.
+
+Références : modèle SA dans une LBM multidomaine (Pellerin, Leclaire et
+Reggio, *Computers & Mathematics with Applications*, 2015) ; loi de paroi
+analytique couplée au SA sur grilles cartésiennes adaptatives (Ponsin et
+Lozano, 2026). Cas de validation visé : NACA 0012 à Re = 6·10⁶, M = 0,15, de
+la *Turbulence Modeling Resource* de la NASA (SA : Cd ≈ 0,0081 à 0° ; codes
+publiés : Cz ≈ 1,09 à 10° et ≈ 1,54 à 15°).
 
 ## Limites
 

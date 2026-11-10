@@ -11,6 +11,13 @@ import { GpuFlowView } from './render-gpu.js';
 
 const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000, 15000, 20000];
 const U_VALUES = [0.05, 0.08, 0.1, 0.12];
+/** Facteurs de vitesse : temps physique simulé par seconde écoulée. */
+const SPEEDS = ['max', 10, 2, 1, 0.5, 0.1];
+/** Fluides : viscosité cinématique (m²/s) et masse volumique (kg/m³). */
+const FLUIDS = {
+  air: { label: 'Air 15 °C', nu: 1.46e-5, rho: 1.225 },
+  water: { label: 'Eau 20 °C', nu: 1.0e-6, rho: 998 },
+};
 const WINDOW_T = 20; // fenêtre glissante de moyenne (t*)
 const SETTLE_T = 6; // transitoire ignoré après un changement (t*)
 const HISTORY_SPAN_T = 40; // largeur du graphique (t*)
@@ -44,6 +51,9 @@ const DEFAULTS = {
   view: 'near',
   engine: 'auto',
   collision: 'rr',
+  speed: 'max',
+  chord: 0.1,
+  fluid: 'air',
 };
 
 function storageGet(key) {
@@ -70,6 +80,9 @@ if (!RE_VALUES.includes(state.re)) state.re = DEFAULTS.re;
 if (!U_VALUES.includes(state.u)) state.u = DEFAULTS.u;
 if (!FIELDS[state.field]) state.field = DEFAULTS.field;
 if (!VIEWS[state.view]) state.view = DEFAULTS.view;
+if (!SPEEDS.includes(state.speed)) state.speed = DEFAULTS.speed;
+if (!FLUIDS[state.fluid]) state.fluid = DEFAULTS.fluid;
+if (!(state.chord > 0 && state.chord <= 100)) state.chord = DEFAULTS.chord;
 if (!parseNaca(state.naca)) state.naca = DEFAULTS.naca;
 
 let points = storageGet(POINTS_KEY) || [];
@@ -492,7 +505,7 @@ function updateReadouts() {
   const status = $('status');
   status.dataset.state = st;
   status.textContent = label;
-  $('hud-time').textContent = `t* ${wt.tStar.toFixed(1)}`;
+  $('hud-time').textContent = `t* ${wt.tStar.toFixed(1)} · ${fmtDuration(wt.tStar * physical().secondsPerTStar)}`;
 
   const useMean = a.ready;
   const cx = useMean ? a.cx : lastCoeffs.cx;
@@ -521,17 +534,84 @@ function updateReadouts() {
 let perfSteps = 0;
 let perfT0 = performance.now();
 let perfText = '';
+let achievedSpeed = NaN;
 function perfRate() {
   const now = performance.now();
   if (now - perfT0 > 1000) {
     const sps = (perfSteps * 1000) / (now - perfT0);
     const mlups = (sps * wt.nx * wt.ny) / 1e6;
     const tps = (sps * wt.uIn) / wt.L;
+    achievedSpeed = running && !diverged ? sps * physical().secondsPerStep : NaN;
     perfText = `${Math.round(sps)} pas/s · ${mlups.toFixed(1)} MLUPS · ${tps.toFixed(2)} t*/s`;
     perfSteps = 0;
     perfT0 = now;
   }
   return perfText;
+}
+
+// ---------------------------------------------------------------- échelle physique
+
+/** Grandeurs dimensionnelles déduites de Re, de L (m) et du fluide. */
+function physical() {
+  const f = FLUIDS[state.fluid];
+  const V = (state.re * f.nu) / state.chord; // m/s
+  const secondsPerTStar = state.chord / V;
+  return {
+    V,
+    rho: f.rho,
+    secondsPerTStar,
+    secondsPerStep: wt ? secondsPerTStar / wt.stepsPerTStar : NaN,
+  };
+}
+
+/** Nombre avec 3 chiffres significatifs, sans notation exponentielle si possible. */
+function sig3(v) {
+  if (!Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 1000 || (a > 0 && a < 1e-3)) return v.toExponential(2).replace('e', '·10^').replace('+', '');
+  return Number(v.toPrecision(3)).toString();
+}
+
+function fmtDuration(sec) {
+  if (!Number.isFinite(sec)) return '—';
+  if (sec < 60) return `${sig3(sec)} s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ${String(Math.round(sec % 60)).padStart(2, '0')} s`;
+  return `${(sec / 3600).toFixed(1)} h`;
+}
+
+function speedLabel(v) {
+  if (v === 'max') return 'Max';
+  if (v === 1) return 'Temps réel';
+  return `×${v}`;
+}
+
+/** Infos physiques (vitesse, durées, efforts par mètre d'envergure). */
+function updatePhysical() {
+  const p = physical();
+  const parts = [
+    `V = ${sig3(p.V)} m/s`,
+    `1 t* = L/V = ${fmtDuration(p.secondsPerTStar)}`,
+    `1 pas = ${sig3(p.secondsPerStep)} s`,
+  ];
+  const a = analysis;
+  if (a && a.ready) {
+    const q = 0.5 * p.rho * p.V * p.V * state.chord; // N/m par unité de coefficient
+    parts.push(`traînée ${sig3(a.cx * q)} N/m, portance ${sig3(a.cz * q)} N/m d\u2019envergure`);
+  }
+  $('phys-info').textContent = parts.join(' · ');
+  const hint = $('speed-hint');
+  if (sweep) {
+    hint.textContent = 'Polaire en cours : calcul à vitesse maximale.';
+  } else if (state.speed === 'max') {
+    hint.textContent = Number.isFinite(achievedSpeed)
+      ? `Calcul aussi rapide que possible : ×${sig3(achievedSpeed)} par rapport au temps réel.`
+      : 'Calcul aussi rapide que possible.';
+  } else {
+    const ok = Number.isFinite(achievedSpeed) && achievedSpeed >= 0.95 * state.speed;
+    hint.textContent = Number.isFinite(achievedSpeed)
+      ? `Cible ${speedLabel(state.speed).toLowerCase()}, atteint ×${sig3(achievedSpeed)}${ok ? '.' : ' : le calcul ne suit pas, réduisez la résolution ou Re, ou augmentez L.'}`
+      : `Cible ${speedLabel(state.speed).toLowerCase()}.`;
+  }
 }
 
 function drawCharts() {
@@ -840,7 +920,22 @@ function updateSweepUi() {
 let lastFrameTs = 0;
 let frameMs = 16;
 
+let stepBudget = 0;
+
+/** Pas autorisés pour cette image quand une vitesse de simulation est imposée. */
+function allowedSteps(dtMs) {
+  if (state.speed === 'max' || sweep) {
+    stepBudget = 0;
+    return Infinity;
+  }
+  const perSecond = state.speed / physical().secondsPerStep;
+  // Au plus 100 ms de retard accumulé : on ne rattrape pas une longue pause.
+  stepBudget = Math.min(stepBudget + (perSecond * Math.min(dtMs, 100)) / 1000, perSecond * 0.1 + 1);
+  return Math.floor(stepBudget);
+}
+
 function frame(ts) {
+  const dtFrame = lastFrameTs ? ts - lastFrameTs : 16;
   if (lastFrameTs) frameMs = 0.8 * frameMs + 0.2 * Math.min(200, ts - lastFrameTs);
   lastFrameTs = ts;
   if (pendingBody && !diverged) {
@@ -851,9 +946,11 @@ function frame(ts) {
     const t0 = performance.now();
     let n = 0;
     const lbm = wt.lbm;
+    const allowed = allowedSteps(dtFrame);
     if (wt.engine === 'gpu') {
       lbm.beginFrame();
-      for (; n < gpuSteps; n++) {
+      const todo = Math.min(gpuSteps, allowed);
+      for (; n < todo; n++) {
         wt.step();
         // Deux pas consécutifs par échantillon : la moyenne annule une
         // éventuelle alternance pair/impair des efforts.
@@ -869,14 +966,15 @@ function frame(ts) {
       const lag = lbm.gpuLag;
       if (lag >= 3) gpuSteps = Math.max(1, Math.floor(gpuSteps * 0.75));
       else if (lag === 2 && frameMs > 40) gpuSteps = Math.max(1, Math.floor(gpuSteps * 0.85));
-      else if (lag <= 1 && frameMs < 60) gpuSteps = Math.min(4000, Math.ceil(gpuSteps * 1.15) + 1);
+      else if (lag <= 1 && frameMs < 60 && n === gpuSteps) gpuSteps = Math.min(4000, Math.ceil(gpuSteps * 1.15) + 1);
     } else {
-      do {
+      while (n < allowed && (n === 0 || performance.now() - t0 < FRAME_BUDGET_MS)) {
         wt.step();
         n++;
         if (lbm.time % sampleEvery === 0) sample();
-      } while (performance.now() - t0 < FRAME_BUDGET_MS);
+      }
     }
+    if (allowed !== Infinity) stepBudget -= n;
     stepsSinceRender += n;
     perfSteps += n;
     if (!lbm.isFinite()) onDiverged();
@@ -899,6 +997,7 @@ function frame(ts) {
     drawCharts();
     sweepTick();
     $('perf').textContent = perfRate() || '—';
+    updatePhysical();
   }
   requestAnimationFrame(frame);
 }
@@ -980,6 +1079,41 @@ function bind() {
     updateInfo();
     drawCharts();
     savePrefs();
+  });
+
+  segmented(
+    $('speed-seg'),
+    SPEEDS.map((v) => ({ value: v, label: speedLabel(v) })),
+    state.speed,
+    (v) => {
+      state.speed = v;
+      stepBudget = 0;
+      updatePhysical();
+      savePrefs();
+    },
+  );
+  segmented(
+    $('fluid-seg'),
+    Object.entries(FLUIDS).map(([k, f]) => ({ value: k, label: f.label })),
+    state.fluid,
+    (v) => {
+      state.fluid = v;
+      updatePhysical();
+      savePrefs();
+    },
+  );
+  const chord = $('chord');
+  chord.value = state.chord;
+  chord.addEventListener('input', () => {
+    const v = Number(chord.value);
+    if (v > 0 && v <= 100) {
+      state.chord = v;
+      chord.removeAttribute('aria-invalid');
+      updatePhysical();
+      savePrefs();
+    } else {
+      chord.setAttribute('aria-invalid', 'true');
+    }
   });
 
   buildResSeg();

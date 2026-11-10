@@ -134,6 +134,19 @@
         </div>
       </div>
       <div class="field">
+        <span class="label" id="lbl-scale">Échelle physique</span>
+        <div class="phys-row">
+          <label class="inline" for="chord">Longueur L <input type="number" id="chord" min="0.001" max="100" step="0.01" value="0.1" inputmode="decimal"> m</label>
+          <div class="seg small" role="radiogroup" aria-labelledby="lbl-scale" id="fluid-seg"></div>
+        </div>
+        <p class="hint num" id="phys-info"></p>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-speed">Vitesse de simulation <span class="hint">temps simulé / temps écoulé</span></span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-speed" id="speed-seg"></div>
+        <p class="hint" id="speed-hint"></p>
+      </div>
+      <div class="field">
         <span class="label" id="lbl-res">Résolution</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-res" id="res-seg"></div>
         <p class="hint">Chaque palier coûte 2 à 4 fois plus de calcul. Très fine est destinée à un ordinateur portable.</p>
