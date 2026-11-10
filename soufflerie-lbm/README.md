@@ -514,7 +514,14 @@ confinement latéral (veine de 6 D).
 
 | Résolution D | Cx | Écart |
 | --- | --- | --- |
-| 8 mailles (sous-maille active, ancien seuil) | 1,33 | +22 % |
+| 8 mailles, sous-maille active (ancien seuil τ < 0,53) | 1,33 | +22 % |
+| 8 mailles | 1,26 | +16 % |
+| 12 mailles | 1,18 | +8 % |
+
+Le modèle de sous-maille, sans amortissement pariétal en 3D, ajoutait 5 % de
+traînée : il n'est plus activé qu'en dessous de τ = 0,51. Le confinement
+(rapport des sections 2,2 %, bords périodiques) explique encore quelques
+pour cent à 12 mailles.
 
 **Prise en charge.** WebGPU : Chrome et Edge (ordinateur, Android 12+),
 Safari 26 (iOS, iPadOS, macOS), Firefox (Windows, macOS ARM). Ailleurs,
