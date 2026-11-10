@@ -8,6 +8,7 @@
 import { LBM } from '../js/lbm.js';
 import { WindTunnel, RAMP_T } from '../js/sim.js';
 import { ForceHistory, analyze } from '../js/stats.js';
+import { panelSolve, potentialFlow, airfoilPoints } from '../js/panel.js';
 
 let failures = 0;
 const t0 = performance.now();
@@ -18,8 +19,9 @@ function check(name, ok, detail) {
 }
 
 /** Fait tourner une configuration et renvoie l'analyse des `avgT` derniers t*. */
-function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
-  const wt = new WindTunnel({ L, re, shape, params });
+function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {}, turbulence, transition = false }) {
+  const wt = new WindTunnel({ L, re, shape, params, turbulence });
+  if (transition) wt.setTransition(panelSolve(shape, { params, alphaDeg: params.alpha ?? 0, re }));
   const hist = new ForceHistory(32768);
   const spt = wt.stepsPerTStar;
   const every = Math.max(1, Math.round(spt / 40));
@@ -34,6 +36,25 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
   const a = analyze(hist.since(wt.lbm.time - avgT * spt), wt.uIn, wt.L);
   a.finite = wt.lbm.isFinite();
   return a;
+}
+
+// 0. Méthode des panneaux + couche limite intégrale (instantané).
+{
+  const inv = potentialFlow(airfoilPoints('naca', { naca: '0012' }), (4 * Math.PI) / 180);
+  check('Panneaux : NACA 0012 non visqueux, α = 4°', Math.abs(inv.cl - 0.48) < 0.01, `Cz = ${inv.cl.toFixed(4)} (≈ 0,48)`);
+  const t0 = panelSolve('naca', { params: { naca: '0012' }, alphaDeg: 0, re: 6e6, xTrip: 0 });
+  const t10 = panelSolve('naca', { params: { naca: '0012' }, alphaDeg: 10, re: 6e6, xTrip: 0 });
+  check(
+    'Panneaux + CL : NACA 0012, Re = 6·10⁶ turbulent',
+    Math.abs(t0.cd - 0.0081) < 0.0008 && Math.abs(t10.cl - 1.09) < 0.12 && Math.abs(t10.cd - 0.0123) < 0.002,
+    `Cx(0°) = ${t0.cd.toFixed(4)} (NASA TMR 0,0081) ; Cz, Cx(10°) = ${t10.cl.toFixed(3)}, ${t10.cd.toFixed(4)} (1,09, 0,0123)`,
+  );
+  const free = panelSolve('naca', { params: { naca: '0012' }, alphaDeg: 0, re: 1e6 });
+  check(
+    'Panneaux + CL : transition naturelle, Re = 10⁶',
+    free.transitionUpper > 0.4 && free.transitionUpper < 0.8 && free.cd > 0.0045 && free.cd < 0.0075,
+    `x_tr = ${free.transitionUpper.toFixed(2)}, Cx = ${free.cd.toFixed(4)} (XFOIL ≈ 0,0054)`,
+  );
 }
 
 // 1. Écoulement uniforme sans obstacle : conditions d'entrée, de sortie et
@@ -113,6 +134,17 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {} }) {
 {
   const a = run({ re: 5000, L: 12, tEnd: 30, avgT: 10 });
   check('Re = 5000 (LES)', a.finite && Number.isFinite(a.cx), `Cx = ${a.cx.toFixed(3)}`);
+}
+
+// 7. Spalart–Allmaras + loi de paroi, transition imposée par la méthode des
+//    panneaux. Seules la portance et la stabilité sont vérifiées : la traînée
+//    LBM d'un profil mince n'est pas convergée en maillage à ces résolutions
+//    (voir README, « Étape A »).
+{
+  const a = run({ shape: 'naca', re: 1e6, L: 16, tEnd: 20, avgT: 5, turbulence: 'sa', transition: true, params: { naca: '0012', alpha: 4 } });
+  check('SA, NACA 0012, Re = 10⁶, α = 4°, transition libre', a.finite && a.cz > 0.42 && a.cz < 0.56, `Cz = ${a.cz.toFixed(3)} (panneaux 0,471 ; mesures ≈ 0,44), Cx = ${a.cx.toFixed(4)}`);
+  const b = run({ shape: 'naca', re: 1e7, L: 16, tEnd: 15, avgT: 5, turbulence: 'sa', params: { naca: '0012', alpha: 8 } });
+  check('SA, NACA 0012, Re = 10⁷, α = 8° (stabilité)', b.finite && b.cz > 0.75 && b.cz < 1.1, `Cz = ${b.cz.toFixed(3)} (≈ 0,85 à 0,9)`);
 }
 
 console.log(`\n${failures ? `${failures} échec(s)` : 'Tous les tests passent'} en ${((performance.now() - t0) / 1000).toFixed(0)} s`);

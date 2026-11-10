@@ -1,7 +1,7 @@
 /* Service worker : application utilisable hors ligne.
    Ressources locales : « stale-while-revalidate » (réponse immédiate depuis le
    cache, mise à jour en arrière-plan pour la prochaine ouverture). */
-const VERSION = 'soufflerie-v2';
+const VERSION = 'soufflerie-v3';
 const FONTS = 'soufflerie-fonts';
 const ASSETS = [
   './',
@@ -17,6 +17,7 @@ const ASSETS = [
   './js/stats.js',
   './js/render.js',
   './js/chart.js',
+  './js/panel.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',

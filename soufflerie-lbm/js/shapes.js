@@ -223,7 +223,8 @@ export function makeBody(id, o) {
     const dy = (y - y0) / L;
     return test(ca * dx - sa * dy, sa * dx + ca * dy, p);
   };
-  const outline = shape.outline(p).map(([bx, by]) => [x0 + L * (ca * bx + sa * by), y0 + L * (-sa * bx + ca * by)]);
+  const outlineLocal = shape.outline(p);
+  const outline = outlineLocal.map(([bx, by]) => [x0 + L * (ca * bx + sa * by), y0 + L * (-sa * bx + ca * by)]);
   let ymin = Infinity;
   let ymax = -Infinity;
   for (const [, y] of outline) {
@@ -236,6 +237,7 @@ export function makeBody(id, o) {
     shape,
     inside,
     outline,
+    outlineLocal,
     L,
     refX: x0,
     refY: y0,

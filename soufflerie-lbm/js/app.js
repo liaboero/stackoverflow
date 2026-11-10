@@ -8,8 +8,18 @@ import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
 import { drawHistory, drawPolar } from './chart.js';
 import { GpuLBM, gpuSupported } from './lbm-gpu.js';
 import { GpuFlowView } from './render-gpu.js';
+import { panelSolve } from './panel.js';
 
-const RE_VALUES = [10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000, 15000, 20000];
+const RE_VALUES = [
+  10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000, 15000, 20000, 50000, 1e5, 2e5,
+  5e5, 1e6, 2e6, 5e6, 1e7,
+];
+/** Reynolds à partir duquel « Auto » active Spalart–Allmaras et la loi de paroi. */
+const RE_SA_AUTO = 50000;
+/** Formes traitées par la méthode des panneaux et la couche limite intégrale. */
+const PANEL_SHAPES = ['naca', 'ellipse', 'plate'];
+/** Reynolds minimal de la référence « panneaux + couche limite ». */
+const RE_PANEL_MIN = 20000;
 const U_VALUES = [0.05, 0.08, 0.1, 0.12];
 /** Facteurs de vitesse : temps physique simulé par seconde écoulée. */
 const SPEEDS = ['max', 10, 2, 1, 0.5, 0.1];
@@ -54,6 +64,8 @@ const DEFAULTS = {
   speed: 'max',
   chord: 0.1,
   fluid: 'air',
+  turb: 'auto',
+  transition: 'free',
 };
 
 function storageGet(key) {
@@ -84,6 +96,8 @@ if (!SPEEDS.includes(state.speed)) state.speed = DEFAULTS.speed;
 if (!FLUIDS[state.fluid]) state.fluid = DEFAULTS.fluid;
 if (!(state.chord > 0 && state.chord <= 100)) state.chord = DEFAULTS.chord;
 if (!parseNaca(state.naca)) state.naca = DEFAULTS.naca;
+if (!['auto', 'none', 'sa'].includes(state.turb)) state.turb = DEFAULTS.turb;
+if (!['free', 'turb'].includes(state.transition)) state.transition = DEFAULTS.transition;
 
 let points = storageGet(POINTS_KEY) || [];
 
@@ -104,6 +118,21 @@ function alphaOf(id = state.shape) {
 
 function bodyParams() {
   return { alpha: alphaOf(), naca: state.naca, thickness: state.thickness, spinRatio: state.spin };
+}
+
+/** Modèle de turbulence effectif : Spalart–Allmaras ou aucun (LES seule). */
+function turbMode() {
+  if (state.turb === 'auto') return state.re >= RE_SA_AUTO ? 'sa' : 'none';
+  return state.turb;
+}
+
+/** Reynolds lisible : 20 000, 2·10⁵, 10⁶… */
+function fmtRe(v) {
+  if (v < 1e5) return v.toLocaleString('fr-FR');
+  const e = Math.floor(Math.log10(v) + 1e-9);
+  const m = Math.round(v / 10 ** e);
+  const sup = String(e).replace(/\d/g, (d) => '⁰¹²³⁴⁵⁶⁷⁸⁹'[d]);
+  return m === 1 ? `10${sup}` : `${m}·10${sup}`;
 }
 
 /** Variable de la polaire : incidence, ou rotation pour le cylindre. */
@@ -175,6 +204,7 @@ function buildSim() {
     les: state.les,
     bouzidi: state.wall === 'bouzidi',
     collision: state.collision,
+    turbulence: turbMode(),
   };
   try {
     wt = new WindTunnel(eng === 'gpu' ? { ...cfg, gpu: { Solver: GpuLBM, gl } } : cfg);
@@ -204,6 +234,7 @@ function buildSim() {
   lastCoeffs = { cx: NaN, cz: NaN, cm: NaN };
   view.attach(wt);
   hideToast();
+  refreshPanel();
   updateInfo();
 }
 
@@ -215,8 +246,100 @@ function markChange() {
 
 function applyBody() {
   wt.setBody(state.shape, bodyParams());
+  refreshPanel();
   markChange();
   updateInfo();
+}
+
+// ---------------------------------------------------------------- méthode des panneaux
+
+/**
+ * Méthode des panneaux + couche limite intégrale (js/panel.js) : référence
+ * en écoulement attaché, et position de la transition imposée au calcul LBM
+ * quand Spalart–Allmaras est actif (zone laminaire en amont).
+ */
+let panelRef = null;
+const panelCache = new Map();
+
+function panelKey(alpha = alphaOf()) {
+  const s = shapeDef();
+  const extra = s.naca ? state.naca : s.thickness ? state.thickness.toFixed(2) : '';
+  return [state.shape, extra, state.re, state.transition, alpha].join('|');
+}
+
+function panelAt(alpha) {
+  if (!PANEL_SHAPES.includes(state.shape) || state.re < RE_PANEL_MIN) return null;
+  const key = panelKey(alpha);
+  if (panelCache.has(key)) return panelCache.get(key);
+  let r = null;
+  try {
+    r = panelSolve(state.shape, {
+      params: { naca: state.naca, thickness: state.thickness },
+      alphaDeg: alpha,
+      re: state.re,
+      // Transition « turbulente » : déclenchement au bord d'attaque.
+      xTrip: state.transition === 'turb' ? 0 : undefined,
+    });
+    if (r && !(Number.isFinite(r.cl) && Number.isFinite(r.cd))) r = null;
+  } catch {
+    r = null;
+  }
+  if (panelCache.size > 400) panelCache.clear();
+  panelCache.set(key, r);
+  return r;
+}
+
+/** Recalcule la référence et la zone laminaire imposée au calcul LBM. */
+function refreshPanel() {
+  panelRef = panelAt(alphaOf());
+  if (!wt) return;
+  const couple = wt.lbm.saActive && state.transition === 'free' && panelRef;
+  wt.setTransition(couple ? panelRef : null);
+  syncPanelRef();
+}
+
+function pct(v) {
+  return Number.isFinite(v) ? `${Math.round(Math.min(1, Math.max(0, v)) * 100)} %` : '—';
+}
+
+function syncPanelRef() {
+  const el = $('panel-ref');
+  if (!panelRef) {
+    el.hidden = true;
+    return;
+  }
+  const r = panelRef;
+  const tr = state.transition === 'turb' ? 'transition au bord d’attaque' : `transition extrados ${pct(r.transitionUpper)}, intrados ${pct(r.transitionLower)}`;
+  let txt = `Panneaux + couche limite : Cz ${fmt(r.cl)} · Cx ${fmt(r.cd, 4)} · Cm ${fmt(r.cm)} · ${tr}`;
+  if (r.separated) txt += ' · décollement prévu : hors du domaine de validité (Cz surestimé)';
+  else if (state.re < 2e5 && state.transition === 'free') txt += ' · bulbes laminaires non modélisés';
+  el.textContent = txt;
+  el.classList.toggle('caution', !!r.separated);
+  el.hidden = false;
+}
+
+/** Polaire de référence, calculée par petits morceaux entre deux images. */
+let refPolar = null;
+function refPolarTick() {
+  const s = shapeDef();
+  if (!s.alpha || !PANEL_SHAPES.includes(state.shape) || state.re < RE_PANEL_MIN) {
+    refPolar = null;
+    return;
+  }
+  const key = panelKey('*');
+  if (!refPolar || refPolar.key !== key) {
+    const lo = Math.max(s.alpha[0], -10);
+    const hi = Math.min(s.alpha[1], 16);
+    const alphas = [];
+    for (let a = Math.ceil(lo); a <= hi; a++) alphas.push(a);
+    refPolar = { key, alphas, pts: [], next: 0 };
+  }
+  const t0 = performance.now();
+  while (refPolar.next < refPolar.alphas.length && performance.now() - t0 < 20) {
+    const a = refPolar.alphas[refPolar.next++];
+    const r = panelAt(a);
+    if (r) refPolar.pts.push({ x: a, cx: r.cd, cz: r.cl, sep: r.separated });
+  }
 }
 
 function sample() {
@@ -260,7 +383,7 @@ function onDiverged() {
   running = false;
   stopSweep('Polaire interrompue : le calcul a divergé.');
   showToast(
-    'Le calcul a divergé : Reynolds trop élevé pour cette résolution. Activez le modèle de sous-maille, réduisez Re ou affinez la grille, puis relancez.',
+    'Le calcul a divergé : Reynolds trop élevé pour cette résolution. Activez le modèle de sous-maille ou Spalart–Allmaras, réduisez Re ou affinez la grille, puis relancez.',
   );
   syncPlay();
 }
@@ -437,14 +560,43 @@ function updateColorbar() {
 function updateInfo() {
   if (!wt) return;
   const i = wt.info();
+  const sa = !!wt.lbm.saActive;
+  const s = shapeDef();
+  const L = i.L;
+  // Couche limite turbulente de plaque plane (ordre de grandeur) : épaisseur
+  // δ ≈ 0,37 L Re^(−1/5), frottement Cf ≈ 0,026 Re^(−1/7), y⁺ du premier nœud
+  // (½ maille de la paroi en moyenne).
+  const re = state.re;
+  const cf = 0.026 * re ** (-1 / 7);
+  const yPlus = (0.5 / L) * re * Math.sqrt(cf / 2);
+  const deltaCells = 0.37 * L * re ** -0.2;
+  $('row-trans').hidden = !(sa && PANEL_SHAPES.includes(state.shape));
   $('numinfo').textContent =
     `${wt.engine === 'gpu' ? 'GPU' : 'CPU'} · collision ${state.collision === 'rr' ? 'régularisée' : 'BGK'} · ` +
-    `Grille ${i.nx}×${i.ny} · L = ${i.L} mailles · τ = ${i.tau.toFixed(4)} · Ma = ${i.mach.toFixed(2)} · ` +
+    `Grille ${i.nx}×${i.ny} · L = ${L} mailles · τ = ${i.tau < 0.5001 ? `½ + ${sig3(i.tau - 0.5)}` : i.tau.toFixed(4)} · Ma = ${i.mach.toFixed(2)} · ` +
     `confinement ${(i.blockage * 100).toFixed(1)} % · sous-maille ${i.les ? 'active' : 'inactive'} · ` +
-    `Re fiable ≲ ${i.reLimit}`;
+    (sa
+      ? `Spalart–Allmaras + loi de paroi · y⁺ ≈ ${yPlus < 100 ? sig3(yPlus) : (Math.round(yPlus / 10) * 10).toLocaleString('fr-FR')} · ` +
+        `couche limite ≈ ${sig3(deltaCells)} maille${deltaCells >= 2 ? 's' : ''}`
+      : `Re fiable ≲ ${fmtRe(i.reLimit)}`);
   const warn = $('warn');
   const msgs = [];
-  if (state.re > i.reLimit) {
+  const profile = !['cylinder', 'square', 'triangle'].includes(s.id);
+  if (sa) {
+    msgs.push(
+      `Turbulence modélisée (RANS Spalart–Allmaras, couche limite plus mince qu’une maille : frottement donné par la loi de paroi). ` +
+        `Portance et décrochage sont qualitatifs ; la traînée LBM d’un profil mince reste approximative (de −50 % à +300 % à L = 32, ` +
+        `davantage sur une grille plus grossière).` +
+        (PANEL_SHAPES.includes(s.id) && panelRef ? ' Pour la traînée en écoulement attaché, fiez-vous à la référence « panneaux + couche limite ».' : ''),
+    );
+    if (!profile || (['plate', 'ellipse'].includes(s.id) && Math.abs(alphaOf()) >= 20)) {
+      msgs.push(
+        'Corps non profilé : la couche limite est supposée turbulente dès l’amont, comme au-delà de la crise de traînée ' +
+          '(cylindre lisse : Re ≳ 3·10⁵, Cx ≈ 0,3 à 0,6). En dessous, préférez « Aucun » : le décollement laminaire domine.',
+      );
+    }
+    if (L < 24) msgs.push(`Avec ${L} mailles par longueur, le bord d’attaque n’est pas résolu : passez en résolution Très fine ou au-delà.`);
+  } else if (state.re > i.reLimit) {
     const next =
       state.res === 'rapide'
         ? 'passez en résolution Standard ou Fine'
@@ -454,20 +606,20 @@ function updateInfo() {
             ? 'passez en résolution Très fine (sur ordinateur) ou réduisez Re'
             : 'réduisez Re';
     msgs.push(
-      `Au-delà de Re ≈ ${i.reLimit} avec ${i.L} mailles par longueur, la couche limite est trop peu résolue : ` +
-        `la traînée est surestimée (de +20 % à +100 %) et les résultats sont qualitatifs ; ${next}.`,
+      `Au-delà de Re ≈ ${fmtRe(i.reLimit)} avec ${L} mailles par longueur, la couche limite est trop peu résolue : ` +
+        `la traînée est surestimée (de +20 % à +100 %) et les résultats sont qualitatifs ; ${next}` +
+        (state.re >= 20000 ? ', ou activez Spalart–Allmaras (Modèle de turbulence).' : '.'),
     );
   }
-  const s = shapeDef();
   const a = Math.abs(alphaOf());
-  if (state.re >= 10000 && !['cylinder', 'square', 'triangle'].includes(s.id)) {
+  if (!sa && state.re >= 10000 && profile) {
     msgs.push(
       'Vers Re ≈ 10⁴ apparaissent sur un profil réel des bulbes de décollement laminaire et la transition, ' +
         'phénomènes tridimensionnels que ce calcul 2D ne représente pas : résultats indicatifs, surtout en incidence.',
     );
   }
-  const bluff = ['cylinder', 'square', 'triangle'].includes(s.id) || (['plate', 'ellipse'].includes(s.id) && a >= 20);
-  if (bluff && state.re > RE_WAKE_3D) {
+  const bluff = !profile || (['plate', 'ellipse'].includes(s.id) && a >= 20);
+  if (!sa && bluff && state.re > RE_WAKE_3D) {
     msgs.push(
       `Au-delà de Re ≈ ${RE_WAKE_3D}, le sillage réel d’un corps non profilé devient tridimensionnel : ` +
         'le calcul 2D surestime Cx, St et l’amplitude de Cz (cylindre vers Re = 1000 : Cx ≈ 1,4 en 2D, ≈ 1 mesuré).',
@@ -598,6 +750,9 @@ function updatePhysical() {
     const q = 0.5 * p.rho * p.V * p.V * state.chord; // N/m par unité de coefficient
     parts.push(`traînée ${sig3(a.cx * q)} N/m, portance ${sig3(a.cz * q)} N/m d\u2019envergure`);
   }
+  // Écoulement réel compressible (air, Mach > 0,3) : le calcul reste incompressible.
+  const mach = state.fluid === 'air' ? p.V / 340 : 0;
+  if (mach > 0.3) parts.push(`Mach réel ≈ ${mach >= 10 ? Math.round(mach) : sig3(mach)} : compressibilité non représentée`);
   $('phys-info').textContent = parts.join(' · ');
   const hint = $('speed-hint');
   if (sweep) {
@@ -642,10 +797,20 @@ function drawCharts() {
   const pts = points
     .filter((p) => p.key === key)
     .map((p) => ({ x: v === 'alpha' ? p.alpha : p.spin, cx: p.cx, cz: p.cz }));
-  drawPolar($('polar'), pts, state.polarMode, themeColors, { lift: themeColors.lift, drag: themeColors.accent }, v === 'alpha' ? '°' : '');
+  const ref = v === 'alpha' && refPolar && refPolar.pts.length > 1 ? refPolar.pts : null;
+  drawPolar(
+    $('polar'),
+    pts,
+    state.polarMode,
+    themeColors,
+    { lift: themeColors.lift, drag: themeColors.accent },
+    v === 'alpha' ? '°' : '',
+    ref,
+  );
+  const refTxt = ref ? ' Tirets : méthode des panneaux + couche limite (écoulement attaché).' : '';
   $('polar-hint').textContent = pts.length
-    ? `${pts.length} point${pts.length > 1 ? 's' : ''} pour ${wt.body.label} à Re ${state.re} (résolution ${RESOLUTIONS[state.res].label.toLowerCase()}).`
-    : `La polaire trace les points enregistrés pour la configuration courante (forme, Re, résolution).`;
+    ? `${pts.length} point${pts.length > 1 ? 's' : ''} pour ${wt.body.label} à Re ${fmtRe(state.re)} (résolution ${RESOLUTIONS[state.res].label.toLowerCase()}).${refTxt}`
+    : `La polaire trace les points enregistrés pour la configuration courante (forme, Re, résolution).${refTxt}`;
 }
 
 function renderTable() {
@@ -662,7 +827,7 @@ function renderTable() {
     const cells = [
       p.label,
       p.alpha === null ? '—' : `${fmt(p.alpha, 1)}°`,
-      String(p.re),
+      fmtRe(p.re) + (p.turb && p.turb !== 'aucun' ? ' SA' : ''),
       fmt(p.cx),
       fmt(p.cz),
       fmt(p.cm),
@@ -682,7 +847,8 @@ function configKey() {
   const s = shapeDef();
   const extra = s.naca ? state.naca : s.thickness ? state.thickness.toFixed(2) : '';
   const spin = s.spin && sweepVar() !== 'spin' ? state.spin : '';
-  return [state.shape, extra, spin, state.re, RESOLUTIONS[state.res].L, state.u, state.wall].join('|');
+  const turb = turbMode() === 'sa' ? `sa-${state.transition}` : '';
+  return [state.shape, extra, spin, state.re, RESOLUTIONS[state.res].L, state.u, state.wall, turb].join('|');
 }
 
 let toastTimer = 0;
@@ -721,6 +887,7 @@ function recordPoint(a, source = 'manuel') {
     cz: a.cz,
     cm: a.cm,
     st: a.periodic ? a.st : NaN,
+    turb: turbMode() === 'sa' ? (state.transition === 'free' ? 'SA, transition libre' : 'SA, turbulent') : 'aucun',
     source,
   };
   points.push(p);
@@ -731,7 +898,7 @@ function recordPoint(a, source = 'manuel') {
 }
 
 function copyTable() {
-  const head = ['maquette', 'alpha_deg', 'rotation_OmegaR_U', 'Re', 'L_mailles', 'Cx', 'Cz', 'Cm', 'St', 'Cz_Cx'];
+  const head = ['maquette', 'alpha_deg', 'rotation_OmegaR_U', 'Re', 'L_mailles', 'turbulence', 'Cx', 'Cz', 'Cm', 'St', 'Cz_Cx'];
   const rows = points.map((p) =>
     [
       p.label,
@@ -739,6 +906,7 @@ function copyTable() {
       p.spin === null ? '' : fmtCsv(p.spin, 2),
       p.re,
       p.L,
+      p.turb ?? 'aucun',
       fmtCsv(p.cx),
       fmtCsv(p.cz),
       fmtCsv(p.cm),
@@ -996,6 +1164,7 @@ function frame(ts) {
     updateReadouts();
     drawCharts();
     sweepTick();
+    refPolarTick();
     $('perf').textContent = perfRate() || '—';
     updatePhysical();
   }
@@ -1070,16 +1239,52 @@ function bind() {
   const re = $('re');
   re.max = RE_VALUES.length - 1;
   re.value = RE_VALUES.indexOf(state.re);
-  $('re-out').textContent = String(state.re);
+  $('re-out').textContent = fmtRe(state.re);
   re.addEventListener('input', () => {
     state.re = RE_VALUES[Number(re.value)];
-    $('re-out').textContent = String(state.re);
+    $('re-out').textContent = fmtRe(state.re);
     wt.setReynolds(state.re);
+    syncTurbulence();
+    refreshPanel();
     markChange();
     updateInfo();
     drawCharts();
     savePrefs();
   });
+  segmented(
+    $('turb-seg'),
+    [
+      { value: 'auto', label: 'Auto' },
+      { value: 'none', label: 'Aucun' },
+      { value: 'sa', label: 'Spalart–Allmaras' },
+    ],
+    state.turb,
+    (v) => {
+      state.turb = v;
+      syncTurbulence();
+      refreshPanel();
+      markChange();
+      updateInfo();
+      drawCharts();
+      savePrefs();
+    },
+  );
+  segmented(
+    $('trans-seg'),
+    [
+      { value: 'free', label: 'Libre (eᴺ)' },
+      { value: 'turb', label: 'Bord d’attaque' },
+    ],
+    state.transition,
+    (v) => {
+      state.transition = v;
+      refreshPanel();
+      markChange();
+      updateInfo();
+      drawCharts();
+      savePrefs();
+    },
+  );
 
   segmented(
     $('speed-seg'),
@@ -1272,6 +1477,12 @@ function bind() {
     mq.addEventListener?.('change', applyTheme);
   }
   new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+}
+
+/** Applique le modèle de turbulence effectif (Auto suit le Reynolds). */
+function syncTurbulence() {
+  const mode = turbMode();
+  if ((mode === 'sa') !== !!wt.lbm.saActive) wt.lbm.setTurbulence(mode);
 }
 
 // ---------------------------------------------------------------- démarrage

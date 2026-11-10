@@ -175,7 +175,12 @@ export function drawHistory(canvas, d, theme) {
  * @param {'var'|'eiffel'} mode
  * @param {string} unit suffixe des graduations de la variable (« ° » pour α)
  */
-export function drawPolar(canvas, pts, mode, theme, colors, unit = '') {
+/**
+ * @param {Array<{x:number,cx:number,cz:number,sep?:boolean}>|null} [ref] courbe
+ *        de référence (méthode des panneaux) tracée en tirets ; les points
+ *        décollés (sep) sont omis.
+ */
+export function drawPolar(canvas, pts, mode, theme, colors, unit = '', ref = null) {
   const { ctx, w, h } = setup(canvas);
   ctx.clearRect(0, 0, w, h);
   const padL = 40;
@@ -186,7 +191,8 @@ export function drawPolar(canvas, pts, mode, theme, colors, unit = '') {
   const ph = h - padT - padB;
   ctx.font = `11px ${theme.font}`;
 
-  if (pts.length < 1) {
+  const refPts = ref ? ref.filter((p) => !p.sep) : [];
+  if (pts.length < 1 && refPts.length < 2) {
     ctx.fillStyle = theme.muted;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -196,18 +202,27 @@ export function drawPolar(canvas, pts, mode, theme, colors, unit = '') {
   const sorted = [...pts].sort((a, b) => a.x - b.x);
   let xs;
   let ys;
+  let rxs = [];
+  let rys = [];
   if (mode === 'eiffel') {
     xs = sorted.map((p) => p.cx);
     ys = [sorted.map((p) => p.cz)];
+    rxs = refPts.map((p) => p.cx);
+    rys = [refPts.map((p) => p.cz)];
   } else {
     xs = sorted.map((p) => p.x);
     ys = [sorted.map((p) => p.cz), sorted.map((p) => p.cx)];
+    rxs = refPts.map((p) => p.x);
+    rys = [refPts.map((p) => p.cz), refPts.map((p) => p.cx)];
   }
-  const flat = ys.flat();
+  // Axes ajustés aux points mesurés ; la référence n'élargit l'échelle que
+  // s'il n'y a pas encore de point (elle est sinon tronquée au cadre).
+  const flat = pts.length ? ys.flat() : rys.flat();
+  const allX = pts.length ? xs : rxs;
   let ylo = Math.min(0, ...flat);
   let yhi = Math.max(...flat);
-  let xlo = Math.min(...xs);
-  let xhi = Math.max(...xs);
+  let xlo = Math.min(...allX);
+  let xhi = Math.max(...allX);
   if (mode === 'eiffel') xlo = Math.min(0, xlo);
   if (xhi - xlo < 1e-6) {
     xlo -= mode === 'eiffel' ? 0.1 : 2;
@@ -242,10 +257,29 @@ export function drawPolar(canvas, pts, mode, theme, colors, unit = '') {
     ctx.lineTo(x, padT + ph);
     ctx.stroke();
     ctx.fillStyle = theme.muted;
-    ctx.fillText(fmt(v, xt.step) + (mode === 'var' ? unit : ''), x, h - padB + 6);
+    // Dernière graduation au bord droit : alignée à droite pour rester visible.
+    const label = fmt(v, xt.step) + (mode === 'var' ? unit : '');
+    const lw = ctx.measureText(label).width;
+    ctx.fillText(label, Math.min(x, w - 2 - lw / 2), h - padB + 6);
   }
 
   const seriesColors = mode === 'var' ? [colors.lift, colors.drag] : [colors.lift];
+  if (rxs.length > 1) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padL, padT, pw, ph);
+    ctx.clip();
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.3;
+    ctx.globalAlpha = 0.75;
+    rys.forEach((vals, s) => {
+      ctx.strokeStyle = seriesColors[s];
+      ctx.beginPath();
+      vals.forEach((v, k) => (k ? ctx.lineTo(X(rxs[k]), Y(v)) : ctx.moveTo(X(rxs[k]), Y(v))));
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
   ys.forEach((vals, s) => {
     ctx.strokeStyle = seriesColors[s];
     ctx.fillStyle = seriesColors[s];

@@ -17,7 +17,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
 
 // Ordre de dépendance.
-const MODULES = ['geometry', 'lbm', 'shapes', 'stats', 'sim', 'lbm-gpu', 'render', 'render-gpu', 'chart', 'app'];
+const MODULES = ['geometry', 'lbm', 'shapes', 'stats', 'sim', 'panel', 'lbm-gpu', 'render', 'render-gpu', 'chart', 'app'];
 const ident = (name) => name.replace(/-/g, '_');
 
 function bundle() {

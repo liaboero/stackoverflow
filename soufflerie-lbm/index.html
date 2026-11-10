@@ -66,6 +66,7 @@
       <div class="ro ro-cm"><dt>Cm <small>tangage</small></dt><dd><span class="v num" id="ro-cm">—</span><span class="amp num" id="ro-cm-sub"></span></dd></div>
       <div class="ro ro-st"><dt>St <small>Strouhal</small></dt><dd><span class="v num" id="ro-st">—</span><span class="amp num" id="ro-st-sub"></span></dd></div>
     </dl>
+    <p class="panel-ref num" id="panel-ref" hidden></p>
   </section>
 
   <div class="panels">
@@ -132,6 +133,16 @@
           <input type="range" id="re" min="0" max="10" step="1" value="4">
           <output id="re-out" for="re">100</output>
         </div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-turb">Modèle de turbulence</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-turb" id="turb-seg"></div>
+        <p class="hint">Auto : Spalart–Allmaras avec loi de paroi dès Re = 5·10⁴ (couche limite plus mince qu’une maille), aucun modèle en dessous.</p>
+      </div>
+      <div class="field" id="row-trans" hidden>
+        <span class="label" id="lbl-trans">Transition laminaire → turbulente</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-trans" id="trans-seg"></div>
+        <p class="hint">Libre : position prédite par la méthode des panneaux et la couche limite intégrale (critère eᴺ, N = 9) ; la paroi est laminaire en amont. Bord d’attaque : couche limite turbulente partout.</p>
       </div>
       <div class="field">
         <span class="label" id="lbl-scale">Échelle physique</span>
@@ -236,7 +247,9 @@
         <li>Efforts par échange de quantité de mouvement. Cx = Fx / (½ρU²L), Cz = Fz / (½ρU²L), Cm = M / (½ρU²L²), positif cabreur.</li>
         <li>Moyennes sur un nombre entier de périodes quand l'écoulement est périodique ; Strouhal St = f·L/U tiré de Cz.</li>
         <li>Veine de 24 L × 12 L, maquette à 8 L de l'entrée, bandes absorbantes en haut et en bas.</li>
-        <li>Domaine de validité : traînée à ± 10 % jusqu'à Re ≈ 350, 650, 1450 ou 5000 selon la résolution ; corps non profilés jusqu'à Re ≈ 190, au-delà duquel le sillage réel devient 3D.</li>
+        <li>Domaine de validité sans modèle de turbulence : traînée à ± 10 % jusqu'à Re ≈ 350, 650, 1450 ou 5000 selon la résolution ; corps non profilés jusqu'à Re ≈ 190, au-delà duquel le sillage réel devient 3D.</li>
+        <li>Au-delà (Re ≥ 5·10⁴ en mode Auto) : turbulence RANS de Spalart–Allmaras et loi de paroi de Spalding. La couche limite, plus mince qu'une maille, n'est pas résolue : un glissement de paroi transmet le frottement turbulent prédit par la loi. Portance et décollement qualitatifs ; traînée LBM approximative.</li>
+        <li>Méthode hybride pour les profils, ellipses et plaques : méthode des panneaux (tourbillons linéaires, condition de Kutta) et couche limite intégrale (Thwaites, transition eᴺ, Head, Squire–Young). Elle donne la référence Cz, Cx, Cm en écoulement attaché (polaire en tirets) et la position de la transition, en amont de laquelle la paroi du calcul LBM est laminaire.</li>
       </ul>
       <p class="hint">Calcul 2D par unité d'envergure, à nombre de Mach ≈ 0,17. Les valeurs restent indicatives : confinement de ~8 %, résolution limitée aux Reynolds élevés, pas de transition ni d'effets 3D.</p>
     </section>

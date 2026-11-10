@@ -27,6 +27,8 @@ const U_Q0 = 15;
 const U_Q1 = 16;
 const U_LIST = 17;
 const U_PART = 18;
+const U_NT = [19, 20]; // ν̃ (Spalart–Allmaras), ping-pong synchrone avec les populations
+const U_WALL = 21; // distance, normale, zone laminaire
 const PBO_COUNT = 3;
 
 const VS = `#version 300 es
@@ -49,6 +51,9 @@ uniform ivec2 uSize;
 uniform int uBouzidi;
 uniform float uSpin;
 uniform vec2 uRot;
+uniform sampler2D uWall;
+uniform int uSA;
+uniform float uNu;
 
 const ivec2 CV[9] = ivec2[9](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1),
                              ivec2(1, 1), ivec2(-1, 1), ivec2(-1, -1), ivec2(1, -1));
@@ -72,14 +77,66 @@ float linkQ(ivec2 p, int j) {
   return texelFetch(uQ1, p, 0)[j - 5];
 }
 
+const float KAPPA = 0.41;
+const float E_KB = 0.12873490358780418; // e^(−κB), B = 5
+
+// Vitesse de frottement par la loi de Spalding (voir lbm.js).
+float spaldingUtau(float ut, float y, float nu) {
+  if (ut < 1e-12) return 0.0;
+  float rey = y * ut / nu;
+  float up = rey < 30.0 ? sqrt(rey) : log(rey) / KAPPA;
+  for (int k = 0; k < 20; k++) {
+    float ku = KAPPA * up;
+    float e = exp(ku);
+    float Y = up + E_KB * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+    float dY = 1.0 + E_KB * KAPPA * (e - 1.0 - ku - ku * ku / 2.0);
+    float h = up * Y - rey;
+    float nxt = up - h / (Y + up * dY);
+    up = nxt > 0.0 ? nxt : 0.5 * up;
+    if (abs(h) < 1e-6 * rey) break;
+  }
+  return ut / up;
+}
+
+// Vitesse (populations de l'état lu) d'une maille.
+vec2 cellVelocity(ivec2 q) {
+  vec4 a = texelFetch(uA, q, 0);
+  vec4 b = texelFetch(uB, q, 0);
+  float f8 = texelFetch(uC, q, 0).r;
+  float rho = a.x + a.y + a.z + a.w + b.x + b.y + b.z + b.w + f8;
+  return vec2(a.y - a.w + b.y - b.z - b.w + f8, a.z - b.x + b.y + b.z - b.w - f8) / rho;
+}
+
+// Loi de paroi : glissement tangentiel tel que (ν + ν_t)(u_t − u_s)/y = u_τ².
+// Renvoie (glissement x, glissement y) ; u_τ dans utau.
+vec2 wallSlip(ivec2 p, out float utau) {
+  utau = 0.0;
+  vec4 w = texelFetch(uWall, p, 0);
+  if (uSA == 0) return vec2(0.0);
+  vec2 n = w.yz;
+  vec2 u = cellVelocity(p);
+  if (uSpin != 0.0) u -= uSpin * vec2(-(float(p.y) - uRot.y), float(p.x) - uRot.x);
+  vec2 tv = u - dot(u, n) * n;
+  float ut = length(tv);
+  float yw = max(0.1, w.x);
+  // Zone laminaire (w.w = Cf de la couche limite intégrale) : τ_w = ½ Cf u_t².
+  bool lam = w.w > 0.0;
+  utau = lam ? ut * sqrt(0.5 * w.w) : spaldingUtau(ut, yw, uNu);
+  if (ut < 1e-12) return vec2(0.0);
+  // Viscosité de paroi κ u_τ y dans les deux cas : la couche limite laminaire,
+  // plus mince qu'une maille, n'est pas résolue ; seule sa contrainte compte.
+  float us = max(0.0, ut - utau * utau * yw / (uNu + KAPPA * utau * yw));
+  return us * tv / ut;
+}
+
 // Population j tirée en p à travers une paroi située à la fraction q du lien
 // (Bouzidi linéaire, correction de paroi mobile). fi : population incidente.
-float bounce(ivec2 p, int j, float q, out float fi, out vec2 uw, out vec2 wp) {
+float bounce(ivec2 p, int j, float q, vec2 slip, out float fi, out vec2 uw, out vec2 wp) {
   ivec2 c = CV[j];
   int i = OPP[j];
   fi = getF(p, i);
   wp = vec2(p) - q * vec2(c);
-  uw = uSpin * vec2(-(wp.y - uRot.y), wp.x - uRot.x);
+  uw = uSpin * vec2(-(wp.y - uRot.y), wp.x - uRot.x) + slip;
   float corr = 6.0 * WT[j] * dot(vec2(c), uw);
   if (uBouzidi == 0) return fi + corr;
   if (q < 0.5) {
@@ -112,6 +169,7 @@ uniform int uLes;
 uniform float uC18;
 uniform float uAccel;
 uniform int uRR;
+uniform sampler2D uNt;
 layout(location = 0) out vec4 o0;
 layout(location = 1) out vec4 o1;
 layout(location = 2) out float o2;
@@ -166,6 +224,9 @@ void main() {
     f[8] = texelFetch(uC, p + ivec2(-1, 1), 0).x;
   } else {
     f[0] = texelFetch(uA, p, 0).x;
+    float utau;
+    vec2 slip = vec2(0.0);
+    bool slipDone = false;
     for (int j = 1; j < 9; j++) {
       ivec2 c = CV[j];
       ivec2 s = p - c;
@@ -179,10 +240,14 @@ void main() {
         f[j] = getF(s, j);
         continue;
       }
+      if (!slipDone) {
+        slip = wallSlip(p, utau);
+        slipDone = true;
+      }
       float fi;
       vec2 uw;
       vec2 wp;
-      f[j] = bounce(p, j, q, fi, uw, wp);
+      f[j] = bounce(p, j, q, slip, fi, uw, wp);
     }
   }
 
@@ -196,6 +261,13 @@ void main() {
   if (x > uSpongeStart) {
     float sp = float(x - uSpongeStart) / float(max(1, uSize.x - 1 - uSpongeStart));
     tau += (uTauSponge - uTau0) * sp * sp;
+  }
+  if (uSA == 1) {
+    // Viscosité turbulente ν_t = ν̃ f_v1 de Spalart–Allmaras.
+    float v = texelFetch(uNt, p, 0).r;
+    float chi = v / uNu;
+    float c3 = chi * chi * chi;
+    tau += 3.0 * v * c3 / (c3 + 357.911);
   }
 
   float d4 = f[5] + f[6] + f[7] + f[8];
@@ -312,15 +384,22 @@ void main() {
   }
   ivec2 p = ivec2(texelFetch(uList, fp, 0).xy + 0.5);
   vec3 acc = vec3(0.0);
+  float utau;
+  vec2 slip = vec2(0.0);
+  bool slipDone = false;
   for (int j = 1; j < 9; j++) {
     ivec2 s = p - CV[j];
     if (s.y < 0 || s.y >= uSize.y) continue;
     float q = linkQ(p, j);
     if (q <= 0.0) continue;
+    if (!slipDone) {
+      slip = wallSlip(p, utau);
+      slipDone = true;
+    }
     float fi;
     vec2 uw;
     vec2 wp;
-    float val = bounce(p, j, q, fi, uw, wp);
+    float val = bounce(p, j, q, slip, fi, uw, wp);
     vec2 cc = vec2(CV[j]);
     float sum = fi + val;
     float dif = fi - val;
@@ -329,6 +408,92 @@ void main() {
     acc.z += (wp.x - uRef.x) * fl.y - (wp.y - uRef.y) * fl.x;
   }
   o = vec4(acc, 0.0);
+}
+`;
+
+// Spalart–Allmaras : un pas explicite de ν̃ (même schéma que lbm.js).
+const FS_SA = `${COMMON}
+uniform sampler2D uNt;
+uniform float uAbsW;
+uniform float uAbsS;
+out float o;
+const float CB1 = 0.1355;
+const float CB2 = 0.622;
+const float ISIG = 1.5;
+const float CW1 = 0.1355 / (0.41 * 0.41) + (1.0 + 0.622) * 1.5;
+const float CW2 = 0.3;
+const float CW3_6 = 64.0;
+const float CV1_3 = 357.911;
+const float NT_MAX = 0.15;
+float nt(ivec2 q) {
+  return texelFetch(uNt, q, 0).r;
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = p.x;
+  int y = p.y;
+  float inf = 3.0 * uNu;
+  int t = cellType(p);
+  if (t == 1) {
+    o = 0.0;
+    return;
+  }
+  if (x == 0) {
+    o = inf;
+    return;
+  }
+  if (x == uSize.x - 1) {
+    o = nt(p + ivec2(-1, 0));
+    return;
+  }
+  if (y == 0 || y == uSize.y - 1) {
+    o = nt(p + ivec2(0, y == 0 ? 1 : -1));
+    return;
+  }
+  vec4 w = texelFetch(uWall, p, 0);
+  if (t == 2) {
+    bool wall = false;
+    for (int j = 1; j < 9; j++) if (linkQ(p, j) > 0.0) wall = true;
+    if (wall) {
+      float utau;
+      wallSlip(p, utau);
+      o = min(NT_MAX, KAPPA * utau * max(0.1, w.x));
+      return;
+    }
+  }
+  float v = nt(p);
+  float vl = nt(p + ivec2(-1, 0));
+  float vr = nt(p + ivec2(1, 0));
+  float vd = nt(p + ivec2(0, -1));
+  float vu = nt(p + ivec2(0, 1));
+  vec2 u = cellVelocity(p);
+  vec2 ul = cellVelocity(p + ivec2(-1, 0));
+  vec2 ur = cellVelocity(p + ivec2(1, 0));
+  vec2 ud = cellVelocity(p + ivec2(0, -1));
+  vec2 uu = cellVelocity(p + ivec2(0, 1));
+  float adv = (u.x > 0.0 ? u.x * (v - vl) : u.x * (vr - v)) + (u.y > 0.0 ? u.y * (v - vd) : u.y * (vu - v));
+  float diff = (uNu + 0.5 * (v + vr)) * (vr - v) - (uNu + 0.5 * (v + vl)) * (v - vl)
+             + (uNu + 0.5 * (v + vu)) * (vu - v) - (uNu + 0.5 * (v + vd)) * (v - vd);
+  float gx = 0.5 * (vr - vl);
+  float gy = 0.5 * (vu - vd);
+  diff = (diff + CB2 * (gx * gx + gy * gy)) * ISIG;
+  float omega = abs(0.5 * (ur.y - ul.y) - 0.5 * (uu.x - ud.x));
+  float d = max(0.5, w.x);
+  float kd2 = KAPPA * KAPPA * d * d;
+  float chi = v / uNu;
+  float c3 = chi * chi * chi;
+  float fv1 = c3 / (c3 + CV1_3);
+  float fv2 = 1.0 - chi / (1.0 + chi * fv1);
+  float sT = max(omega + v / kd2 * fv2, 0.3 * omega);
+  float prod = w.w > 0.0 ? 0.0 : CB1 * sT * v;
+  float r = sT > 1e-12 ? min(v / (sT * kd2), 10.0) : 10.0;
+  float g = r + CW2 * (pow(r, 6.0) - r);
+  float fw = g * pow((1.0 + CW3_6) / (pow(g, 6.0) + CW3_6), 1.0 / 6.0);
+  float nv = (v + prod + diff - adv) / (1.0 + CW1 * fw * v / (d * d));
+  float dw = float(min(y, uSize.y - 1 - y));
+  float sb = uAbsW > 0.0 ? 1.0 - dw / uAbsW : 0.0;
+  if (sb > 0.0) nv -= uAbsS * sb * sb * (nv - inf);
+  o = clamp(nv, 0.0, NT_MAX);
 }
 `;
 
@@ -473,6 +638,13 @@ export class GpuLBM {
     this.progInit = createProgram(gl, VS, FS_INIT);
     this.progForce = createProgram(gl, VS, FS_FORCE);
     this.progReduce = createProgram(gl, VS, FS_REDUCE);
+    this.progSA = [0, 1].map(() => createProgram(gl, VS, FS_SA));
+    // Spalart–Allmaras : ν̃ en ping-pong, géométrie de paroi (d, n_x, n_y, laminaire).
+    this.ntTex = [createTexture(gl, nx, ny, gl.R32F), createTexture(gl, nx, ny, gl.R32F)];
+    this.ntFbo = this.ntTex.map((t) => createFramebuffer(gl, [t]));
+    this.wallTex = createTexture(gl, nx, ny, gl.RGBA32F);
+    this.turbulence = 'none';
+    this.saActive = false;
 
     this.tex = [0, 1].map(() => [
       createTexture(gl, nx, ny, gl.RGBA32F),
@@ -523,6 +695,7 @@ export class GpuLBM {
   }
 
   _updateLes() {
+    // Avec Spalart–Allmaras, la LES reste active loin de la paroi (voir lbm.js).
     this.lesActive = this.lesMode === 'on' || (this.lesMode === 'auto' && this.tau0 < 0.51);
   }
 
@@ -561,7 +734,7 @@ export class GpuLBM {
     this.rotX = o.rotX ?? this.refX;
     this.rotY = o.rotY ?? this.refY;
     // Les mailles solides portent déjà l'équilibre au repos (écrit à chaque pas).
-    this.geo.build(inside, o.bbox);
+    this.geo.build(inside, o.bbox, o.outline);
     this._uploadGeometry(true);
   }
 
@@ -616,8 +789,51 @@ export class GpuLBM {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.listTex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, LIST_W, rows, gl.RGBA, gl.FLOAT, list);
+      this._uploadWall();
     }
     this._bindUnits();
+  }
+
+  /** Distance à la paroi, normale et zone laminaire (modèle de turbulence). */
+  _uploadWall() {
+    const gl = this.gl;
+    const { nx, ny, N } = this;
+    const { dist, normal, lam } = this.geo;
+    const w = new Float32Array(4 * N);
+    for (let i = 0; i < N; i++) {
+      w[4 * i] = Math.min(dist[i], 1e5);
+      w[4 * i + 1] = normal[2 * i];
+      w[4 * i + 2] = normal[2 * i + 1];
+      w[4 * i + 3] = lam[i];
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.wallTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, nx, ny, gl.RGBA, gl.FLOAT, w);
+  }
+
+  /** Zone laminaire imposée (transition) : à appeler après modification de geo.lam. */
+  updateLaminarZone() {
+    this._uploadWall();
+    this._bindUnits();
+  }
+
+  /** Active ou coupe le modèle de Spalart–Allmaras avec loi de paroi. */
+  setTurbulence(mode) {
+    this.turbulence = mode === 'sa' ? 'sa' : 'none';
+    this.saActive = this.turbulence === 'sa';
+    this._updateLes();
+    if (this.saActive) this._initSA();
+  }
+
+  /** ν̃ = 3ν partout (les solides sont remis à zéro au premier pas). */
+  _initSA() {
+    const gl = this.gl;
+    for (const fb of this.ntFbo) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.clearBufferfv(gl.COLOR, 0, new Float32Array([3 * this.nu, 0, 0, 0]));
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._dirty = true;
   }
 
   /** Lie toutes les textures du solveur à leurs unités réservées. */
@@ -631,6 +847,11 @@ export class GpuLBM {
     bind(U_GEO, this.geoTex);
     bind(U_Q0, this.qTex[0]);
     bind(U_Q1, this.qTex[1]);
+    if (this.ntTex) {
+      bind(U_NT[0], this.ntTex[0]);
+      bind(U_NT[1], this.ntTex[1]);
+      bind(U_WALL, this.wallTex);
+    }
     if (this.listTex) {
       bind(U_LIST, this.listTex);
       bind(U_PART, this.partTex);
@@ -652,12 +873,22 @@ export class GpuLBM {
       if (L.uQ1) gl.uniform1i(L.uQ1, U_Q1);
       if (L.uList) gl.uniform1i(L.uList, U_LIST);
       if (L.uPart) gl.uniform1i(L.uPart, U_PART);
+      if (L.uNt) gl.uniform1i(L.uNt, U_NT[set]);
+      if (L.uWall) gl.uniform1i(L.uWall, U_WALL);
       if (L.uSize) gl.uniform2i(L.uSize, this.nx, this.ny);
       P.cache = {};
     };
     this.progStep.forEach((P, set) => {
       setSamplers(P, set);
       gl.uniform1i(P.loc.uSpongeStart, this.spongeStart);
+      gl.uniform1f(P.loc.uAbsW, this.absorbWidth);
+      gl.uniform1f(P.loc.uAbsS, this.absorbStrength);
+    });
+    this.progSA.forEach((P, set) => {
+      setSamplers(P, set);
+      // Après un pas, les populations sont dans le tampon `set` et ν̃ courant
+      // dans l'autre : la passe lit ν̃[1 − set] et écrit ν̃[set].
+      gl.uniform1i(P.loc.uNt, U_NT[1 - set]);
       gl.uniform1f(P.loc.uAbsW, this.absorbWidth);
       gl.uniform1f(P.loc.uAbsS, this.absorbStrength);
     });
@@ -683,6 +914,8 @@ export class GpuLBM {
 
   _wallUniforms(P) {
     this._ui(P, 'uBouzidi', this.bouzidi ? 1 : 0);
+    if (P.loc.uSA) this._ui(P, 'uSA', this.saActive ? 1 : 0);
+    if (P.loc.uNu) this._uf(P, 'uNu', this.nu);
     this._uf(P, 'uSpin', this.spin);
     if (P.cache.rotX !== this.rotX || P.cache.rotY !== this.rotY) {
       P.cache.rotX = this.rotX;
@@ -729,6 +962,7 @@ export class GpuLBM {
     this.time = 0;
     this.fx = this.fy = this.mz = 0;
     this.health = 16;
+    if (this.saActive) this._initSA();
     this._drainPending(false);
     this.sampleTimes = [];
     this._dirty = true;
@@ -755,6 +989,14 @@ export class GpuLBM {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.cur = 1 - this.cur;
     this.time++;
+    if (this.saActive) {
+      // ν̃ : lit les populations du nouvel état et l'ancien ν̃, écrit ν̃[cur].
+      const S = this.progSA[this.cur];
+      gl.useProgram(S.p);
+      this._wallUniforms(S);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.ntFbo[this.cur]);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
   }
 
   /** Programme le calcul des efforts sur l'état courant (relu par readSamples). */
@@ -907,9 +1149,9 @@ export class GpuLBM {
     for (const b of this.pboFree) gl.deleteBuffer(b);
     for (const set of this.tex) for (const t of set) gl.deleteTexture(t);
     for (const fb of this.fbo) gl.deleteFramebuffer(fb);
-    [this.geoTex, ...this.qTex, this.accTex, this.listTex, this.partTex].forEach((t) => t && gl.deleteTexture(t));
-    [this.accFbo, this.partFbo].forEach((f) => f && gl.deleteFramebuffer(f));
-    [...this.progStep, this.progInit, this.progForce, this.progReduce].forEach((p) => gl.deleteProgram(p.p));
+    [this.geoTex, ...this.qTex, this.accTex, this.listTex, this.partTex, ...this.ntTex, this.wallTex].forEach((t) => t && gl.deleteTexture(t));
+    [this.accFbo, this.partFbo, ...this.ntFbo].forEach((f) => f && gl.deleteFramebuffer(f));
+    [...this.progStep, ...this.progSA, this.progInit, this.progForce, this.progReduce].forEach((p) => gl.deleteProgram(p.p));
     gl.deleteVertexArray(this.vao);
   }
 }

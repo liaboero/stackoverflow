@@ -417,6 +417,17 @@ body::before {
   text-overflow: ellipsis;
 }
 
+.panel-ref {
+  margin: 6px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.panel-ref.caution {
+  color: var(--warn);
+}
+
 /* ---------- Cartes ---------- */
 .card {
   background: var(--surface);

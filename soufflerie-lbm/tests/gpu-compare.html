@@ -12,6 +12,7 @@
 <script type="module">
 import { WindTunnel } from '../js/sim.js';
 import { GpuLBM, gpuSupported } from '../js/lbm-gpu.js';
+import { panelSolve } from '../js/panel.js';
 
 const out = document.getElementById('out');
 const log = (s) => (out.textContent += '\n' + s);
@@ -23,16 +24,23 @@ const steps = Number(params.get('steps') || 2400);
 const alpha = Number(params.get('alpha') || 0);
 const spin = Number(params.get('spin') || 0);
 const coll = params.get('coll') || 'rr';
+const turbulence = params.get('turb') || 'none';
+const transition = params.get('trans') || 'turb';
 const every = 10;
 
 async function main() {
-  out.textContent = `${shape} Re=${re} L=${L} α=${alpha} spin=${spin} ${coll}, ${steps} pas`;
+  out.textContent = `${shape} Re=${re} L=${L} α=${alpha} spin=${spin} ${coll} ${turbulence} ${transition}, ${steps} pas`;
   const canvas = document.createElement('canvas');
   const gl = canvas.getContext('webgl2');
   if (!gpuSupported(gl)) throw new Error('WebGL2 + EXT_color_buffer_float indisponible');
-  const cfg = { L, re, shape, collision: coll, params: { alpha, naca: '0012', spinRatio: spin } };
+  const cfg = { L, re, shape, collision: coll, turbulence, params: { alpha, naca: '0012', spinRatio: spin } };
   const cpu = new WindTunnel(cfg);
   const gpu = new WindTunnel({ ...cfg, gpu: { Solver: GpuLBM, gl } });
+  if (transition === 'free') {
+    const bl = panelSolve(shape, { params: cfg.params, alphaDeg: alpha, re });
+    cpu.setTransition(bl);
+    gpu.setTransition(bl);
+  }
 
   const cpuSeries = new Map();
   let t0 = performance.now();

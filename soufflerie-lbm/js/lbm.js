@@ -25,6 +25,46 @@ export const OPP = [0, 3, 4, 1, 2, 7, 8, 5, 6];
 /** Direction réfléchie par un plan horizontal (cy → −cy). */
 const REFY = [0, 1, 4, 3, 2, 8, 7, 6, 5];
 
+// Spalart–Allmaras (version standard sans terme ft2) et loi de paroi de Spalding.
+export const SA = {
+  cb1: 0.1355,
+  cb2: 0.622,
+  sigma: 2 / 3,
+  kappa: 0.41,
+  cw2: 0.3,
+  cw3: 2,
+  cv1: 7.1,
+};
+SA.cw1 = SA.cb1 / (SA.kappa * SA.kappa) + (1 + SA.cb2) / SA.sigma;
+const CV1_3 = SA.cv1 ** 3;
+const CW3_6 = SA.cw3 ** 6;
+const KAPPA = SA.kappa;
+const E_KB = Math.exp(-KAPPA * 5.0); // B = 5,0
+/** Plafond de ν̃ (unités réseau) : stabilité de la diffusion explicite. */
+const NU_TILDE_MAX = 0.15;
+
+/**
+ * Vitesse de frottement u_τ telle que la loi de Spalding passe par (y, u_t) :
+ * y⁺ = u⁺ + e^(−κB) [e^(κu⁺) − 1 − κu⁺ − (κu⁺)²/2 − (κu⁺)³/6].
+ * Valable de la sous-couche visqueuse à la zone logarithmique.
+ */
+export function spaldingUtau(ut, y, nu) {
+  if (!(ut > 1e-12)) return 0;
+  const rey = (y * ut) / nu; // = u⁺ y⁺
+  let up = rey < 30 ? Math.sqrt(rey) : Math.log(rey) / KAPPA;
+  for (let k = 0; k < 20; k++) {
+    const ku = KAPPA * up;
+    const e = Math.exp(ku);
+    const Y = up + E_KB * (e - 1 - ku - (ku * ku) / 2 - (ku * ku * ku) / 6);
+    const dY = 1 + E_KB * KAPPA * (e - 1 - ku - (ku * ku) / 2);
+    const h = up * Y - rey;
+    const next = up - h / (Y + up * dY);
+    up = next > 0 ? next : 0.5 * up;
+    if (Math.abs(h) < 1e-7 * rey) break;
+  }
+  return ut / up;
+}
+
 /** Équilibre D2Q9 écrit dans `out` (longueur 9). */
 export function equilibrium(rho, ux, uy, out) {
   const usq = 1.5 * (ux * ux + uy * uy);
@@ -83,6 +123,7 @@ export class LBM {
     this.ux = new Float32Array(N);
     this.uy = new Float32Array(N);
     this._tmp = new Float64Array(9);
+    this._slip = new Float64Array(2);
     this._eqA = new Float64Array(9);
     this._eqB = new Float64Array(9);
 
@@ -107,6 +148,9 @@ export class LBM {
     this.fy = 0;
     this.mz = 0;
     this.time = 0;
+    /** Modèle de turbulence RANS : 'none' ou 'sa' (Spalart–Allmaras + loi de paroi). */
+    this.turbulence = 'none';
+    this.saActive = false;
     /** Accélération uniforme selon x (démarrage progressif), en unités réseau. */
     this.accelX = 0;
 
@@ -139,11 +183,176 @@ export class LBM {
   }
 
   _updateLes() {
+    // Avec Spalart–Allmaras, la LES reste active loin de la paroi (amortie près
+    // d'elle) : sans elle, l'écoulement quasi non visqueux autour du bord
+    // d'attaque diverge aux fortes incidences (α ≳ 8° à Re = 10⁶).
     this.lesActive = this.lesMode === 'on' || (this.lesMode === 'auto' && this.tau0 < 0.51);
   }
 
   setInletVelocity(u) {
     this.uIn = u;
+  }
+
+  /** Active ou coupe le modèle de Spalart–Allmaras avec loi de paroi. */
+  setTurbulence(mode) {
+    const was = this.saActive;
+    this.turbulence = mode === 'sa' ? 'sa' : 'none';
+    this.saActive = this.turbulence === 'sa';
+    if (this.saActive && this.nuTilde && !was) this._initSA();
+    if (this.saActive && !this.nuTilde) {
+      const N = this.N;
+      this.nuTilde = new Float32Array(N);
+      this._nuTilde2 = new Float32Array(N);
+      this.usx = new Float32Array(N);
+      this.usy = new Float32Array(N);
+      this.utau = new Float32Array(N);
+      this._initSA();
+    }
+    this._updateLes();
+  }
+
+  /** ν̃ = 3ν au large (valeur de la NASA TMR), nul dans le corps. */
+  _initSA() {
+    if (!this.nuTilde) return;
+    const v = 3 * this.nu;
+    const { N, type } = this;
+    for (let i = 0; i < N; i++) this.nuTilde[i] = type[i] === SOLID ? 0 : v;
+    this.utau.fill(0);
+  }
+
+  /** Viscosité turbulente ν_t = ν̃ f_v1(ν̃/ν) d'une maille. */
+  nuTurb(idx) {
+    if (!this.saActive) return 0;
+    const v = this.nuTilde[idx];
+    const chi = v / this.nu;
+    const c3 = chi * chi * chi;
+    return (v * c3) / (c3 + CV1_3);
+  }
+
+  /**
+   * Loi de paroi : vitesse de glissement tangentielle imposée à la paroi pour
+   * que la contrainte transmise par le réseau, (ν + ν_t)(u_t − u_s)/y, égale
+   * u_τ² donné par la loi de Spalding au premier nœud (vitesse du pas
+   * précédent). Renvoie le vecteur de glissement dans this._slip.
+   */
+  _wallSlip(idx, x, y) {
+    const geo = this.geo;
+    const slip = this._slip;
+    slip[0] = 0;
+    slip[1] = 0;
+    const cfLam = geo.lam[idx];
+    const nxw = geo.normal[2 * idx];
+    const nyw = geo.normal[2 * idx + 1];
+    let ux = this.usx[idx];
+    let uy = this.usy[idx];
+    if (this.spin !== 0) {
+      ux += this.spin * (y - this.rotY);
+      uy -= this.spin * (x - this.rotX);
+    }
+    const un = ux * nxw + uy * nyw;
+    const tx = ux - un * nxw;
+    const ty = uy - un * nyw;
+    const ut = Math.sqrt(tx * tx + ty * ty);
+    const yw = Math.max(0.1, geo.dist[idx]);
+    const nu = this.nu;
+    // Zone laminaire : frottement de la couche limite intégrale, τ_w = ½ Cf u_t².
+    const uTau = cfLam > 0 ? ut * Math.sqrt(0.5 * cfLam) : spaldingUtau(ut, yw, nu);
+    this.utau[idx] = uTau;
+    if (ut < 1e-12) return;
+    // Viscosité de paroi κ u_τ y dans les deux cas : la couche limite laminaire,
+    // plus mince qu'une maille, n'est pas résolue ; seule sa contrainte compte.
+    const us = Math.max(0, ut - (uTau * uTau * yw) / (nu + KAPPA * uTau * yw));
+    slip[0] = (us * tx) / ut;
+    slip[1] = (us * ty) / ut;
+  }
+
+  /**
+   * Un pas explicite de Spalart–Allmaras sur le réseau (Δt = Δx = 1) :
+   * advection amont, diffusion conservative, destruction semi-implicite.
+   */
+  _stepSA() {
+    const { nx, ny, N, type, geo } = this;
+    const { cb1, cb2, sigma, kappa, cw1, cw2 } = SA;
+    const k2 = kappa * kappa;
+    const nu = this.nu;
+    const inf = 3 * nu;
+    const vt = this.nuTilde;
+    const out = this._nuTilde2;
+    const ux = this.usx;
+    const uy = this.usy;
+    const dist = geo.dist;
+    const lam = geo.lam;
+    const wq = this.wallQ;
+    const isig = 1 / sigma;
+    for (let y = 0; y < ny; y++) {
+      const row = y * nx;
+      const sg = this.sigmaRow[y];
+      for (let x = 0; x < nx; x++) {
+        const idx = row + x;
+        if (type[idx] === SOLID) {
+          out[idx] = 0;
+          continue;
+        }
+        if (x === 0) {
+          out[idx] = inf;
+          continue;
+        }
+        if (x === nx - 1) {
+          out[idx] = vt[idx - 1];
+          continue;
+        }
+        if (y === 0 || y === ny - 1) {
+          out[idx] = vt[y === 0 ? idx + nx : idx - nx];
+          continue;
+        }
+        if (type[idx] === NEAR_WALL) {
+          let wall = false;
+          for (let j = 1; j < 9 && !wall; j++) if (wq[j * N + idx] > 0) wall = true;
+          if (wall) {
+            // Premier nœud : ν̃ ≈ ν_t = κ u_τ y (zone logarithmique).
+            out[idx] = Math.min(NU_TILDE_MAX, kappa * this.utau[idx] * Math.max(0.1, dist[idx]));
+            continue;
+          }
+        }
+        const v = vt[idx];
+        const vl = vt[idx - 1];
+        const vr = vt[idx + 1];
+        const vd = vt[idx - nx];
+        const vu = vt[idx + nx];
+        const a = ux[idx];
+        const b = uy[idx];
+        const adv = (a > 0 ? a * (v - vl) : a * (vr - v)) + (b > 0 ? b * (v - vd) : b * (vu - v));
+        let diff =
+          (nu + 0.5 * (v + vr)) * (vr - v) -
+          (nu + 0.5 * (v + vl)) * (v - vl) +
+          (nu + 0.5 * (v + vu)) * (vu - v) -
+          (nu + 0.5 * (v + vd)) * (v - vd);
+        const gx = 0.5 * (vr - vl);
+        const gy = 0.5 * (vu - vd);
+        diff = (diff + cb2 * (gx * gx + gy * gy)) * isig;
+        const omega = Math.abs(0.5 * (uy[idx + 1] - uy[idx - 1]) - 0.5 * (ux[idx + nx] - ux[idx - nx]));
+        const d = Math.max(0.5, dist[idx]);
+        const kd2 = k2 * d * d;
+        const chi = v / nu;
+        const c3 = chi * chi * chi;
+        const fv1 = c3 / (c3 + CV1_3);
+        const fv2 = 1 - chi / (1 + chi * fv1);
+        const sTilde = Math.max(omega + (v / kd2) * fv2, 0.3 * omega);
+        const prod = lam[idx] > 0 ? 0 : cb1 * sTilde * v;
+        let r = sTilde > 1e-12 ? v / (sTilde * kd2) : 10;
+        if (r > 10) r = 10;
+        const r2 = r * r;
+        const g = r + cw2 * (r2 * r2 * r2 - r);
+        const g2 = g * g;
+        // x^(1/6) = ∛√x, bien plus rapide que Math.pow.
+        const fw = g * Math.cbrt(Math.sqrt((1 + CW3_6) / (g2 * g2 * g2 + CW3_6)));
+        let nv = (v + prod + diff - adv) / (1 + (cw1 * fw * v) / (d * d));
+        if (sg > 0) nv -= sg * (nv - inf);
+        out[idx] = nv < 0 ? 0 : nv > NU_TILDE_MAX ? NU_TILDE_MAX : nv;
+      }
+    }
+    this._nuTilde2 = vt;
+    this.nuTilde = out;
   }
 
   /**
@@ -175,6 +384,7 @@ export class LBM {
     this.g.set(f);
     this.time = 0;
     this.fx = this.fy = this.mz = 0;
+    this._initSA();
   }
 
   /**
@@ -195,7 +405,7 @@ export class LBM {
     this.spin = o.spin ?? 0;
     this.rotX = o.rotX ?? this.refX;
     this.rotY = o.rotY ?? this.refY;
-    const revived = this.geo.build(inside, o.bbox);
+    const revived = this.geo.build(inside, o.bbox, o.outline);
     // Maille qui redevient fluide : on la remet au repos.
     const eq = equilibrium(1, 0, 0, this._eqA);
     for (const idx of revived) for (let i = 0; i < 9; i++) f[i * N + idx] = eq[i];
@@ -223,6 +433,10 @@ export class LBM {
     const { N, nx, ny, wallQ, type } = this;
     const bouzidi = this.bouzidi;
     const spin = this.spin;
+    const sa = this.saActive;
+    let slipDone = false;
+    let slx = 0;
+    let sly = 0;
     out[0] = src[idx];
     for (let j = 1; j < 9; j++) {
       const cx = CX[j];
@@ -249,6 +463,16 @@ export class LBM {
       if (spin !== 0) {
         uwx = -spin * (wy - this.rotY);
         uwy = spin * (wx - this.rotX);
+      }
+      if (sa) {
+        if (!slipDone) {
+          this._wallSlip(idx, x, y);
+          slx = this._slip[0];
+          sly = this._slip[1];
+          slipDone = true;
+        }
+        uwx += slx;
+        uwy += sly;
       }
       const corr = 6 * W[j] * (cx * uwx + cy * uwy);
       let val;
@@ -290,6 +514,11 @@ export class LBM {
     const tmp = this._tmp;
     const les = this.lesActive;
     const rr = this.collision === 'rr';
+    const sa = this.saActive;
+    const nt = this.nuTilde;
+    const usx = this.usx;
+    const usy = this.usy;
+    const inu = 1 / this.nu;
     const c18 = 18 * this.cs * this.cs;
     const lesDamp = this.lesDamp;
     const N2 = 2 * N, N3 = 3 * N, N4 = 4 * N, N5 = 5 * N, N6 = 6 * N, N7 = 7 * N, N8 = 8 * N;
@@ -334,6 +563,18 @@ export class LBM {
         const ux = (f1 - f3 + f5 - f6 - f7 + f8) * ir;
         const uy = (f2 - f4 + f5 + f6 - f7 - f8) * ir;
         let p0, p1, p2, p3, p4, p5, p6, p7, p8;
+        // τ local : éponge de sortie + viscosité turbulente de Spalart–Allmaras.
+        let tb = tauCol[x];
+        if (sa) {
+          usx[idx] = ux;
+          usy[idx] = uy;
+          const v = nt[idx];
+          if (v > 0) {
+            const chi = v * inu;
+            const c3 = chi * chi * chi;
+            tb += (3 * v * c3) / (c3 + CV1_3);
+          }
+        }
 
         if (rr) {
           // Collision régularisée récursive (Malaspinas 2015), Hermite d'ordre 3 :
@@ -348,10 +589,10 @@ export class LBM {
           let om;
           if (les) {
             const qn = Math.sqrt(2 * (a1xx * a1xx + a1yy * a1yy + 2 * a1xy * a1xy));
-            const t0 = tauCol[x];
+            const t0 = tb;
             om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
           } else {
-            om = omegaCol[x];
+            om = sa ? 1 / tb : omegaCol[x];
           }
           const k = 1 - om;
           const bxx = k * a1xx;
@@ -409,10 +650,10 @@ export class LBM {
             const pyy = n2 + n4 + pd;
             const pxy = n5 - n6 + n7 - n8;
             const qn = Math.sqrt(2 * (pxx * pxx + pyy * pyy + 2 * pxy * pxy));
-            const t0 = tauCol[x];
+            const t0 = tb;
             om = 2 / (t0 + Math.sqrt(t0 * t0 + c18 * lesDamp[idx] * qn * ir));
           } else {
-            om = omegaCol[x];
+            om = sa ? 1 / tb : omegaCol[x];
           }
 
           p0 = f0 + om * (e0 - f0);
@@ -457,6 +698,7 @@ export class LBM {
     }
 
     this._openBoundaries(dst);
+    if (sa) this._stepSA();
 
     this.f = dst;
     this.g = src;
@@ -484,6 +726,10 @@ export class LBM {
       equilibrium(m.rho, U, 0, eqB);
       equilibrium(m.rho, m.ux, m.uy, eqN);
       for (let i = 0; i < 9; i++) dst[i * N + b] = eqB[i] + dst[i * N + n] - eqN[i];
+      if (this.saActive) {
+        this.usx[b] = U;
+        this.usy[b] = 0;
+      }
       // Sortie
       b = y * nx + nx - 1;
       n = b - 1;
@@ -491,6 +737,10 @@ export class LBM {
       equilibrium(1, m.ux, m.uy, eqB);
       equilibrium(m.rho, m.ux, m.uy, eqN);
       for (let i = 0; i < 9; i++) dst[i * N + b] = eqB[i] + dst[i * N + n] - eqN[i];
+      if (this.saActive) {
+        this.usx[b] = m.ux;
+        this.usy[b] = m.uy;
+      }
     }
   }
 

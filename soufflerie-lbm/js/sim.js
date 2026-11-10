@@ -87,6 +87,7 @@ export class WindTunnel {
     // Moteur : solveur CPU, ou classe GPU fournie avec son contexte WebGL2.
     this.engine = cfg.gpu ? 'gpu' : 'cpu';
     this.lbm = cfg.gpu ? new cfg.gpu.Solver(cfg.gpu.gl, opts) : new LBM(opts);
+    this.lbm.setTurbulence?.(cfg.turbulence ?? 'none');
     this.setBody(cfg.shape, cfg.params ?? {});
     // Démarrage progressif : fluide au repos, vitesse d'entrée et accélération
     // uniforme du fluide en rampe (1 − cos) sur RAMP_T temps convectifs. Évite
@@ -138,7 +139,61 @@ export class WindTunnel {
       refY: this.body.refY,
       spin: this.body.spin,
       bbox: { x0, x1, y0, y1 },
+      outline: this.body.outline,
     });
+  }
+
+  /**
+   * Transition laminaire–turbulent imposée au modèle de Spalart–Allmaras à
+   * partir de la couche limite intégrale (méthode des panneaux) : en amont de
+   * la transition, pas de production turbulente et frottement pariétal pris
+   * égal au Cf laminaire calculé.
+   * @param {object|null} bl résultat de panelSolve (null : entièrement turbulent)
+   */
+  setTransition(bl) {
+    const geo = this.lbm.geo;
+    geo.lam.fill(0);
+    if (bl && bl.friction) {
+      const body = this.body;
+      const loc = body.outlineLocal;
+      const m = loc.length;
+      let iLE = 0;
+      let xmin = Infinity;
+      let xmax = -Infinity;
+      for (let k = 0; k < m; k++) {
+        if (loc[k][0] < xmin) {
+          xmin = loc[k][0];
+          iLE = k;
+        }
+        xmax = Math.max(xmax, loc[k][0]);
+      }
+      const span = xmax - xmin || 1;
+      const byIndex = body.shape.id === 'naca';
+      const band = Math.max(3, 0.1 * this.L);
+      const cfAt = (side, xc) => {
+        const { x, cf } = side;
+        let k = 1;
+        while (k < x.length - 1 && x[k] < xc) k++;
+        // Plafond : pic de Cf au point d'arrêt (abscisse curviligne nulle).
+        return Math.min(0.02, Math.max(1e-5, cf[k]));
+      };
+      const { N } = this.lbm;
+      for (let i = 0; i < N; i++) {
+        const pos = geo.nearPos[i];
+        if (pos < 0 || geo.dist[i] > band) continue;
+        const k = Math.min(m - 1, Math.round(pos));
+        const [bx, by] = loc[k];
+        // Faces : pour le NACA, extrados de l'indice 0 (bord de fuite) au bord
+        // d'attaque ; ailleurs (formes symétriques), signe de y dans le repère propre.
+        const upper = byIndex ? k <= iLE : by >= 0;
+        const xc = (bx - xmin) / span;
+        const xtr = upper ? bl.transitionUpper : bl.transitionLower;
+        if (Number.isFinite(xtr) && xc < xtr) {
+          geo.lam[i] = cfAt(upper ? bl.friction.upper : bl.friction.lower, xc);
+        }
+      }
+    }
+    this.lbm.updateLaminarZone?.();
   }
 
   get ramping() {
