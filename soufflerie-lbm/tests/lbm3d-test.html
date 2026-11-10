@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Validation 3D</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:24px;max-width:760px}pre{background:#eef2f4;padding:12px;overflow:auto}</style>
+</head>
+<body>
+<h1>Soufflerie 3D : validation du solveur WebGPU</h1>
+<p>Paramètres : ?shape=sphere&re=100&L=10&t=30&fp16=1</p>
+<pre id="out">Calcul en cours…</pre>
+<script type="module">
+import { Lbm3D, webgpuAdapter } from '../js/lbm3d.js';
+import { makeBody3D } from '../js/bodies3d.js';
+const out = document.getElementById('out');
+const log = (s) => (out.textContent += '\n' + s);
+const q = new URLSearchParams(location.search);
+const shape = q.get('shape') || 'sphere';
+const re = Number(q.get('re') || 100);
+const L = Number(q.get('L') || 10);
+const tEnd = Number(q.get('t') || 30);
+const fp16 = q.get('fp16') !== '0';
+const alpha = Number(q.get('alpha') || 0);
+async function main() {
+  const adapter = await webgpuAdapter();
+  if (!adapter) throw new Error('WebGPU indisponible');
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: adapter.limits.maxBufferSize,
+    },
+  });
+  device.addEventListener?.('uncapturederror', (e) => log('GPU error: ' + e.error.message));
+  const body = makeBody3D(shape, L, { alpha });
+  const U = 0.1;
+  const sim = new Lbm3D(device, { nx: body.nx, ny: body.ny, nz: body.nz, nu: (U * L) / re, uIn: U, fp16 });
+  sim.setGeometry(body.inside, body.box);
+  sim.reset(0);
+  const spt = L / U;
+  const ramp = 5 * spt;
+  const uAt = (t) => (t >= ramp ? U : 0.5 * U * (1 - Math.cos((Math.PI * t) / ramp)));
+  log(`${shape} Re=${re} L=${L} grille ${body.nx}×${body.ny}×${body.nz} (${(sim.N / 1e6).toFixed(2)} M mailles), ${sim.wallCount} mailles pariétales, ${sim.solidCount} solides, fp16=${fp16}, τ=${sim.tau0.toFixed(4)}`);
+  const total = Math.round(tEnd * spt);
+  const chunk = Math.round(spt / 2);
+  const hist = [];
+  const t0 = performance.now();
+  let done = 0;
+  while (done < total) {
+    const n = Math.min(chunk, total - done);
+    sim.step(n, uAt);
+    done += n;
+    const f = await sim.readForce();
+    if (f) {
+      const qd = 0.5 * U * U * body.area;
+      hist.push({ t: f.time / spt, cd: f.fx / qd, cy: f.fy / qd, cz: f.fz / qd });
+    }
+  }
+  await device.queue.onSubmittedWorkDone();
+  const dt = (performance.now() - t0) / 1000;
+  const last = hist.filter((h) => h.t > tEnd - 10);
+  const mean = (k) => last.reduce((s, h) => s + h[k], 0) / last.length;
+  const res = {
+    shape, re, L, fp16, N: sim.N,
+    cd: mean('cd'), cy: mean('cy'), cz: mean('cz'),
+    cdAmp: Math.max(...last.map((h) => h.cd)) - Math.min(...last.map((h) => h.cd)),
+    czAmp: Math.max(...last.map((h) => h.cz)) - Math.min(...last.map((h) => h.cz)),
+    mlups: (sim.N * total) / dt / 1e6,
+    seconds: dt,
+    finite: Number.isFinite(mean('cd')),
+    trace: hist.filter((_, i) => i % 6 === 0).map((h) => `${h.t.toFixed(0)}:${h.cd.toFixed(3)}/${h.cz.toFixed(3)}`).join(' '),
+  };
+  log(JSON.stringify(res, null, 1));
+  window.__result = res;
+}
+main().catch((e) => {
+  log('Erreur : ' + e.message);
+  window.__result = { error: e.message };
+});
+</script>
+</body>
+</html>

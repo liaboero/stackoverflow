@@ -5,10 +5,13 @@ import { WindTunnel, RESOLUTIONS, RAMP_T, RE_WAKE_3D } from './sim.js';
 import { SHAPES, SHAPE_BY_ID, parseNaca, shapeIconPath } from './shapes.js';
 import { ForceHistory, analyze } from './stats.js';
 import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
-import { drawHistory, drawPolar } from './chart.js';
+import { drawHistory, drawPolar, drawWall } from './chart.js';
 import { GpuLBM, gpuSupported } from './lbm-gpu.js';
 import { GpuFlowView } from './render-gpu.js';
-import { panelSolve } from './panel.js';
+import { panelSolve, sectionCoefficients, compressibleCorrection } from './panel.js';
+import { WallSampler, WALL_SHAPES, upstreamDensity } from './wall.js';
+import { WingTab } from './wing-tab.js';
+import { Lab3D } from './lab3d.js';
 
 const RE_VALUES = [
   10, 20, 40, 60, 100, 150, 200, 300, 500, 1000, 1500, 2000, 3000, 5000, 10000, 15000, 20000, 50000, 1e5, 2e5,
@@ -66,6 +69,8 @@ const DEFAULTS = {
   fluid: 'air',
   turb: 'auto',
   transition: 'free',
+  wallQ: 'cp',
+  tab: '2d',
 };
 
 function storageGet(key) {
@@ -98,6 +103,8 @@ if (!(state.chord > 0 && state.chord <= 100)) state.chord = DEFAULTS.chord;
 if (!parseNaca(state.naca)) state.naca = DEFAULTS.naca;
 if (!['auto', 'none', 'sa'].includes(state.turb)) state.turb = DEFAULTS.turb;
 if (!['free', 'turb'].includes(state.transition)) state.transition = DEFAULTS.transition;
+if (!['cp', 'cf'].includes(state.wallQ)) state.wallQ = DEFAULTS.wallQ;
+if (!['2d', 'wing', '3d'].includes(state.tab)) state.tab = DEFAULTS.tab;
 
 let points = storageGet(POINTS_KEY) || [];
 
@@ -234,11 +241,13 @@ function buildSim() {
   lastCoeffs = { cx: NaN, cz: NaN, cm: NaN };
   view.attach(wt);
   hideToast();
+  wallSampler = null;
   refreshPanel();
   updateInfo();
 }
 
 function markChange() {
+  wallSampler?.reset();
   tChange = wt.lbm.time;
   markers.push(wt.tStar);
   if (markers.length > 40) markers.shift();
@@ -246,6 +255,7 @@ function markChange() {
 
 function applyBody() {
   wt.setBody(state.shape, bodyParams());
+  wallSampler = null;
   refreshPanel();
   markChange();
   updateInfo();
@@ -302,6 +312,11 @@ function pct(v) {
   return Number.isFinite(v) ? `${Math.round(Math.min(1, Math.max(0, v)) * 100)} %` : '—';
 }
 
+/** Mach réel de l'essai (air seulement ; l'eau reste incompressible). */
+function realMach() {
+  return state.fluid === 'air' ? physical().V / 340 : 0;
+}
+
 function syncPanelRef() {
   const el = $('panel-ref');
   if (!panelRef) {
@@ -309,13 +324,136 @@ function syncPanelRef() {
     return;
   }
   const r = panelRef;
+  const k = sectionCoefficients(r);
+  const mach = realMach();
+  let cl = k.cl;
+  let cm = k.cm;
+  let comp = '';
+  if (mach > 0.7) {
+    comp = ` · Mach ${fmt(mach, 2)} : transsonique, hors du domaine de la méthode`;
+  } else if (mach >= 0.1) {
+    const c = compressibleCorrection(mach, Math.min(...r.cp.cp));
+    cl *= c.factor;
+    cm *= c.factor;
+    comp = c.critical
+      ? ` · Mach ${fmt(mach, 2)} : zone supersonique locale (Cp min < Cp* = ${fmt(c.cpStar, 2)}), correction de compressibilité hors domaine`
+      : ` · corrigé de la compressibilité (Prandtl–Glauert, Mach ${fmt(mach, 2)})`;
+  }
   const tr = state.transition === 'turb' ? 'transition au bord d’attaque' : `transition extrados ${pct(r.transitionUpper)}, intrados ${pct(r.transitionLower)}`;
-  let txt = `Panneaux + couche limite : Cz ${fmt(r.cl)} · Cx ${fmt(r.cd, 4)} · Cm ${fmt(r.cm)} · ${tr}`;
-  if (r.separated) txt += ' · décollement prévu : hors du domaine de validité (Cz surestimé)';
+  let txt = `Panneaux + couche limite : Cz ${fmt(cl)} · Cx ${fmt(k.cd, 4)} · Cm ${fmt(cm)} · ${tr}${comp}`;
+  if (k.kirchhoff) txt += ` · décollement à ${pct(Math.min(r.separationUpper ?? 1, r.separationLower ?? 1))} de corde : décrochage approché (modèle de Kirchhoff)`;
   else if (state.re < 2e5 && state.transition === 'free') txt += ' · bulbes laminaires non modélisés';
   el.textContent = txt;
-  el.classList.toggle('caution', !!r.separated);
+  el.classList.toggle('caution', k.kirchhoff || mach > 0.7);
   el.hidden = false;
+}
+
+// ---------------------------------------------------------------- distributions pariétales
+
+let wallSampler = null;
+let wallVisible = false;
+let wallTick = 0;
+
+/** Échantillonne Cp et Cf à la paroi (moyenne depuis la fin du transitoire). */
+function sampleWall() {
+  if (!wallVisible || diverged || !WALL_SHAPES.includes(state.shape)) return;
+  const spt = wt.stepsPerTStar;
+  const settle = tChange === 0 ? RAMP_T + SETTLE_T : SETTLE_T;
+  if (wt.lbm.time < tChange + settle * spt) {
+    wallSampler?.reset();
+    return;
+  }
+  if (!wallSampler) wallSampler = new WallSampler(wt);
+  if (!wallSampler.region) return;
+  const lbm = wt.lbm;
+  if (wt.engine === 'gpu') {
+    // Lecture synchrone de la seule zone pariétale, une fois par seconde.
+    if (++wallTick % 4 !== 0) return;
+    const { x0, y0, w, h } = wallSampler.region;
+    const f = lbm.readRegion(x0, y0, w, h);
+    const col = lbm.readRegion(3, 0, 1, lbm.ny).rho;
+    wallSampler.add(f, (x, y) => (y - y0) * w + (x - x0), upstreamDensity(col));
+  } else {
+    const nx = lbm.nx;
+    const col = new Float32Array(lbm.ny);
+    for (let y = 0; y < lbm.ny; y++) col[y] = lbm.rho[y * nx + 3];
+    wallSampler.add(lbm, (x, y) => y * nx + x, upstreamDensity(col));
+  }
+}
+
+function drawWallChart() {
+  const card = $('card-wall');
+  const ok = WALL_SHAPES.includes(state.shape);
+  card.hidden = !ok;
+  if (!ok || !wallVisible || !wt) return;
+  const cyl = state.shape === 'cylinder';
+  const cp = state.wallQ === 'cp';
+  const res = wallSampler ? wallSampler.result() : { upper: [], lower: [], n: 0 };
+  const key = (p) => (cp ? p.cp : 1000 * p.cf);
+  const series = [];
+  if (cyl) {
+    if (cp) {
+      const pts = [];
+      for (let t = 0; t <= 180; t += 2) pts.push([t, 1 - 4 * Math.sin((t * Math.PI) / 180) ** 2]);
+      series.push({ pts, color: themeColors.muted, style: 'dash' });
+    }
+  } else if (panelRef) {
+    const r = panelRef;
+    if (cp) {
+      const { x, cp: c, iLE } = r.cp;
+      const up = [];
+      const lo = [];
+      for (let i = 0; i < x.length; i++) {
+        if (i >= iLE) up.push([x[i], c[i]]);
+        if (i <= iLE) lo.unshift([x[i], c[i]]);
+      }
+      series.push({ pts: up, color: themeColors.lift, style: 'dash' }, { pts: lo, color: themeColors.accent, style: 'dash' });
+    } else {
+      const side = (f) => f.x.map((xv, i) => [xv, 1000 * f.cf[i] * f.ue[i] * f.ue[i]]);
+      series.push(
+        { pts: side(r.friction.upper), color: themeColors.lift, style: 'dash' },
+        { pts: side(r.friction.lower), color: themeColors.accent, style: 'dash' },
+      );
+    }
+  }
+  series.push(
+    { pts: res.upper.map((p) => [p.s, key(p)]), color: themeColors.lift, style: 'dots' },
+    { pts: res.lower.map((p) => [p.s, key(p)]), color: themeColors.accent, style: 'dots' },
+  );
+  const marks = [];
+  if (!cyl && panelRef && wt.lbm.saActive && state.transition === 'free') {
+    if (Number.isFinite(panelRef.transitionUpper)) marks.push({ x: panelRef.transitionUpper, color: themeColors.lift });
+    if (Number.isFinite(panelRef.transitionLower)) marks.push({ x: panelRef.transitionLower, color: themeColors.accent });
+  }
+  drawWall(
+    $('wallchart'),
+    {
+      series,
+      xLo: 0,
+      xHi: cyl ? 180 : 1,
+      xUnit: cyl ? '°' : '',
+      yLabel: cp ? 'Cp' : 'Cf × 1000',
+      invert: cp,
+      marks,
+      empty: 'Moyenne disponible après le transitoire',
+    },
+    themeColors,
+  );
+  $('key-up').textContent = cyl ? 'dessus' : 'extrados';
+  $('key-lo').textContent = cyl ? 'dessous' : 'intrados';
+  $('key-dash').textContent = cyl ? 'potentiel' : 'panneaux';
+  const what = cyl ? 'angle depuis le point d’arrêt avant' : 'x/c';
+  const lbmNote = res.n
+    ? `Points : mailles voisines de la paroi, moyenne de ${res.n} relevés.`
+    : 'Points : mailles voisines de la paroi (après le transitoire).';
+  const refNote = cyl ? ' Tirets : écoulement potentiel (1 − 4 sin²θ).' : panelRef ? ' Tirets : méthode des panneaux + couche limite.' : '';
+  const qNote = cp
+    ? cyl
+      ? ' Cp lu à moins d’une maille de la paroi ; l’écart au potentiel au-delà de ≈ 80° vient du décollement.'
+      : ' Cp lu à moins d’une maille de la paroi : le pic d’aspiration du bord d’attaque est écrêté.'
+    : ' Cf rapporté à ½ρV² ; négatif = écoulement de retour (décollement).' +
+      (wt.lbm.saActive ? ' Frottement donné par la loi de paroi (laminaire en amont de la transition).' : '');
+  $('wall-hint').textContent = `Abscisse : ${what}. ${lbmNote}${refNote}${qNote}`;
 }
 
 /** Polaire de référence, calculée par petits morceaux entre deux images. */
@@ -328,8 +466,8 @@ function refPolarTick() {
   }
   const key = panelKey('*');
   if (!refPolar || refPolar.key !== key) {
-    const lo = Math.max(s.alpha[0], -10);
-    const hi = Math.min(s.alpha[1], 16);
+    const lo = Math.max(s.alpha[0], -12);
+    const hi = Math.min(s.alpha[1], 20);
     const alphas = [];
     for (let a = Math.ceil(lo); a <= hi; a++) alphas.push(a);
     refPolar = { key, alphas, pts: [], next: 0 };
@@ -338,7 +476,10 @@ function refPolarTick() {
   while (refPolar.next < refPolar.alphas.length && performance.now() - t0 < 20) {
     const a = refPolar.alphas[refPolar.next++];
     const r = panelAt(a);
-    if (r) refPolar.pts.push({ x: a, cx: r.cd, cz: r.cl, sep: r.separated });
+    if (r) {
+      const k = sectionCoefficients(r);
+      refPolar.pts.push({ x: a, cx: k.cd, cz: k.cl, sep: false });
+    }
   }
 }
 
@@ -409,12 +550,42 @@ function applyTheme() {
     body: v('--body-fill'),
     bodyEdge: v('--body-edge'),
     tracer: v('--tracer'),
+    stage: v('--surface-2'),
     font: v('--font-num') || 'monospace',
   };
   cpuView.setTheme(themeName(), themeColors);
   if (gpuView) gpuView.setTheme(themeName(), themeColors);
   updateColorbar();
   drawCharts();
+  wingTab?.draw();
+}
+
+// ---------------------------------------------------------------- onglets
+
+let wingTab = null;
+let lab3d = null;
+const TAB_SUB = {
+  '2d': 'CFD 2D Lattice Boltzmann · D2Q9',
+  wing: 'Aile finie · surface portante + polaires 2D',
+  '3d': 'CFD 3D Lattice Boltzmann · D3Q19 · WebGPU',
+};
+
+function setTab(tab) {
+  state.tab = tab;
+  for (const t of ['2d', 'wing', '3d']) {
+    $(`tab-${t}`).hidden = t !== tab;
+    $(`tabbtn-${t}`).setAttribute('aria-selected', String(t === tab));
+  }
+  $('app-sub').textContent = TAB_SUB[tab];
+  if (tab === 'wing') wingTab.activate();
+  else wingTab.deactivate();
+  if (tab === '3d') lab3d.activate();
+  else lab3d.deactivate();
+  if (tab === '2d') {
+    view.resize();
+    drawCharts();
+  }
+  savePrefs();
 }
 
 // ---------------------------------------------------------------- formatage
@@ -771,6 +942,7 @@ function updatePhysical() {
 
 function drawCharts() {
   if (!wt || !hist) return;
+  drawWallChart();
   const spt = wt.stepsPerTStar;
   const tMax = Math.max(wt.tStar, 10);
   const tMin = Math.max(0, tMax - HISTORY_SPAN_T);
@@ -1103,6 +1275,12 @@ function allowedSteps(dtMs) {
 }
 
 function frame(ts) {
+  if (state.tab !== '2d') {
+    // Soufflerie 2D en sommeil pendant les autres onglets.
+    lastFrameTs = 0;
+    requestAnimationFrame(frame);
+    return;
+  }
   const dtFrame = lastFrameTs ? ts - lastFrameTs : 16;
   if (lastFrameTs) frameMs = 0.8 * frameMs + 0.2 * Math.min(200, ts - lastFrameTs);
   lastFrameTs = ts;
@@ -1165,6 +1343,7 @@ function frame(ts) {
     drawCharts();
     sweepTick();
     refPolarTick();
+    sampleWall();
     $('perf').textContent = perfRate() || '—';
     updatePhysical();
   }
@@ -1304,6 +1483,7 @@ function bind() {
     (v) => {
       state.fluid = v;
       updatePhysical();
+      syncPanelRef();
       savePrefs();
     },
   );
@@ -1315,6 +1495,7 @@ function bind() {
       state.chord = v;
       chord.removeAttribute('aria-invalid');
       updatePhysical();
+      syncPanelRef();
       savePrefs();
     } else {
       chord.setAttribute('aria-invalid', 'true');
@@ -1425,6 +1606,27 @@ function bind() {
     },
   );
   segmented(
+    $('wallq-seg'),
+    [
+      { value: 'cp', label: 'Cp' },
+      { value: 'cf', label: 'Cf' },
+    ],
+    state.wallQ,
+    (v) => {
+      state.wallQ = v;
+      drawWallChart();
+      savePrefs();
+    },
+  );
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver((entries) => {
+      wallVisible = entries.some((e) => e.isIntersecting);
+      if (wallVisible) drawWallChart();
+    }).observe($('card-wall'));
+  } else {
+    wallVisible = true;
+  }
+  segmented(
     $('polar-seg'),
     [
       { value: 'var', label: 'Cx, Cz (α)' },
@@ -1471,6 +1673,7 @@ function bind() {
   });
   ro.observe($('flow'));
   ro.observe($('chart'));
+  ro.observe($('wallchart'));
 
   if (window.matchMedia) {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1528,11 +1731,26 @@ function start() {
 
   buildShapeList();
   bind();
+  wingTab = new WingTab({
+    segmented,
+    theme: () => themeColors,
+    fmt,
+    fmtRe,
+    sig3,
+    fluids: FLUIDS,
+    storageGet,
+    storageSet,
+  });
+  wingTab.init();
+  lab3d = new Lab3D({ segmented, theme: () => themeColors, fmt, sig3, storageGet, storageSet });
+  lab3d.init();
+  for (const t of ['2d', 'wing', '3d']) $(`tabbtn-${t}`).addEventListener('click', () => setTab(t));
   buildSim();
   syncShapeControls();
   applyTheme();
   renderTable();
   syncPlay();
+  setTab(state.tab);
   requestAnimationFrame(frame);
 
   if ('serviceWorker' in navigator && !window.__SOUFFLERIE_INLINE__) {

@@ -30,11 +30,17 @@
   </svg>
   <div>
     <h1>Soufflerie de poche</h1>
-    <p class="sub">CFD 2D Lattice Boltzmann · D2Q9</p>
+    <p class="sub" id="app-sub">CFD 2D Lattice Boltzmann · D2Q9</p>
   </div>
 </header>
 
-<main class="layout">
+<nav class="tabs" role="tablist" aria-label="Mode d'essai">
+  <button type="button" role="tab" id="tabbtn-2d" aria-controls="tab-2d" aria-selected="true">Soufflerie 2D</button>
+  <button type="button" role="tab" id="tabbtn-wing" aria-controls="tab-wing" aria-selected="false">Aile finie</button>
+  <button type="button" role="tab" id="tabbtn-3d" aria-controls="tab-3d" aria-selected="false">Soufflerie 3D</button>
+</nav>
+
+<main class="layout" id="tab-2d" role="tabpanel" aria-labelledby="tabbtn-2d">
   <section class="viewer" aria-label="Veine d'essai">
     <div class="stage">
       <canvas id="flow-gl" aria-hidden="true" hidden></canvas>
@@ -76,6 +82,16 @@
         <div class="legend"><span class="key key-cx">Cx</span><span class="key key-cz">Cz</span><span class="key key-win">moyenne</span></div>
       </div>
       <canvas id="chart" class="chart" role="img" aria-label="Historique des coefficients Cx et Cz"></canvas>
+    </section>
+
+    <section class="card" aria-labelledby="h-wall" id="card-wall">
+      <div class="card-head">
+        <h2 id="h-wall">Paroi</h2>
+        <div class="seg small" role="radiogroup" aria-label="Grandeur le long de la paroi" id="wallq-seg"></div>
+      </div>
+      <div class="legend"><span class="key key-cz" id="key-up">extrados</span><span class="key key-cx" id="key-lo">intrados</span><span class="key key-dots">LBM</span><span class="key key-dash" id="key-dash">panneaux</span></div>
+      <canvas id="wallchart" class="chart" role="img" aria-label="Distribution de pression ou de frottement le long de la paroi"></canvas>
+      <p class="hint" id="wall-hint"></p>
     </section>
 
     <section class="card" aria-labelledby="h-model">
@@ -252,6 +268,213 @@
         <li>Méthode hybride pour les profils, ellipses et plaques : méthode des panneaux (tourbillons linéaires, condition de Kutta) et couche limite intégrale (Thwaites, transition eᴺ, Head, Squire–Young). Elle donne la référence Cz, Cx, Cm en écoulement attaché (polaire en tirets) et la position de la transition, en amont de laquelle la paroi du calcul LBM est laminaire.</li>
       </ul>
       <p class="hint">Calcul 2D par unité d'envergure, à nombre de Mach ≈ 0,17. Les valeurs restent indicatives : confinement de ~8 %, résolution limitée aux Reynolds élevés, pas de transition ni d'effets 3D.</p>
+    </section>
+  </div>
+</main>
+
+<main class="layout" id="tab-wing" role="tabpanel" aria-labelledby="tabbtn-wing" hidden>
+  <section class="viewer" aria-label="Aile finie">
+    <div class="stage stage-wing">
+      <canvas id="wing-view" role="img" aria-label="Vue 3D de l'aile, de sa charge et de ses tourbillons marginaux"></canvas>
+      <div class="hud hud-tl"><span class="pill" id="wing-status">Calcul des polaires…</span></div>
+      <div class="hud hud-bl">
+        <div class="pill scale">
+          <span class="lbl">Cl / Cl max local</span>
+          <span class="num">0</span>
+          <span class="cb-grad" id="wing-grad"></span>
+          <span class="num">1</span>
+        </div>
+      </div>
+      <div class="hud hud-br"><span class="pill hint-pill">Glisser pour tourner</span></div>
+    </div>
+    <dl class="readouts" aria-live="off">
+      <div class="ro ro-cz"><dt>CL <small>portance</small></dt><dd><span class="v num" id="w-cl">—</span><span class="amp num" id="w-cl-sub"></span></dd></div>
+      <div class="ro ro-cx"><dt>CD <small>traînée</small></dt><dd><span class="v num" id="w-cd">—</span><span class="amp num" id="w-cd-sub"></span></dd></div>
+      <div class="ro"><dt>L/D <small>finesse</small></dt><dd><span class="v num" id="w-ld">—</span><span class="amp num" id="w-ld-sub"></span></dd></div>
+      <div class="ro"><dt>e <small>Oswald</small></dt><dd><span class="v num" id="w-e">—</span><span class="amp num" id="w-e-sub"></span></dd></div>
+    </dl>
+    <p class="panel-ref num" id="w-phys"></p>
+  </section>
+
+  <div class="panels">
+    <section class="card" aria-labelledby="h-wgeo">
+      <h2 id="h-wgeo">Forme en plan</h2>
+      <div class="field">
+        <label for="w-alpha">Incidence α <span class="hint">à l'emplanture</span></label>
+        <div class="slider-row">
+          <input type="range" id="w-alpha" min="-8" max="22" step="0.5" value="4">
+          <output id="w-alpha-out" for="w-alpha">4.0°</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="w-naca">Profil NACA à 4 chiffres</label>
+        <div class="naca-row">
+          <input type="text" id="w-naca" inputmode="numeric" maxlength="4" autocomplete="off" value="2412">
+          <div class="chips" id="w-naca-presets">
+            <button class="chip-btn" type="button" data-naca="0012">0012</button>
+            <button class="chip-btn" type="button" data-naca="2412">2412</button>
+            <button class="chip-btn" type="button" data-naca="4412">4412</button>
+            <button class="chip-btn" type="button" data-naca="0009">0009</button>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="w-ar">Allongement A = b²/S</label>
+        <div class="slider-row"><input type="range" id="w-ar" min="2" max="20" step="0.5" value="8"><output id="w-ar-out" for="w-ar">8</output></div>
+      </div>
+      <div class="field">
+        <label for="w-taper">Effilement λ <span class="hint">corde en bout / à l'emplanture</span></label>
+        <div class="slider-row"><input type="range" id="w-taper" min="0.1" max="1" step="0.05" value="0.5"><output id="w-taper-out" for="w-taper">0.50</output></div>
+      </div>
+      <div class="field">
+        <label for="w-sweep">Flèche Λ <span class="hint">au quart de corde</span></label>
+        <div class="slider-row"><input type="range" id="w-sweep" min="-30" max="45" step="1" value="0"><output id="w-sweep-out" for="w-sweep">0°</output></div>
+      </div>
+      <div class="field">
+        <label for="w-dihedral">Dièdre Γ</label>
+        <div class="slider-row"><input type="range" id="w-dihedral" min="-10" max="15" step="0.5" value="0"><output id="w-dihedral-out" for="w-dihedral">0°</output></div>
+      </div>
+      <div class="field">
+        <label for="w-twist">Vrillage en bout <span class="hint">négatif = bout moins incidenté</span></label>
+        <div class="slider-row"><input type="range" id="w-twist" min="-8" max="4" step="0.5" value="0"><output id="w-twist-out" for="w-twist">0°</output></div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-wflow">
+      <h2 id="h-wflow">Écoulement</h2>
+      <div class="field">
+        <label for="w-re">Reynolds <span class="hint">sur la corde moyenne c̄</span></label>
+        <div class="slider-row"><input type="range" id="w-re" min="0" max="7" step="1" value="4"><output id="w-re-out" for="w-re">10⁶</output></div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-wtrans">Transition</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-wtrans" id="w-trans-seg"></div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-wscale">Échelle physique</span>
+        <div class="phys-row">
+          <label class="inline" for="w-chord">Corde moyenne c̄ <input type="number" id="w-chord" min="0.01" max="20" step="0.01" value="0.2" inputmode="decimal"> m</label>
+          <div class="seg small" role="radiogroup" aria-labelledby="lbl-wscale" id="w-fluid-seg"></div>
+        </div>
+      </div>
+      <p class="warn" id="w-warn" hidden></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-wspan">
+      <div class="card-head">
+        <h2 id="h-wspan">Répartition en envergure</h2>
+      </div>
+      <div class="legend"><span class="key key-cz">c·Cl/c̄</span><span class="key key-dash">elliptique</span><span class="key key-cx">Cl local</span><span class="key key-cx key-dashc">Cl max</span></div>
+      <canvas id="w-span" class="chart" role="img" aria-label="Répartition de la charge le long de l'envergure"></canvas>
+      <p class="hint" id="w-span-hint"></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-wpolar">
+      <div class="card-head">
+        <h2 id="h-wpolar">Polaire de l'aile</h2>
+        <div class="seg small" role="radiogroup" aria-label="Type de graphique" id="w-polar-seg"></div>
+      </div>
+      <div class="legend"><span class="key key-cz">aile CL</span><span class="key key-cx">aile CD</span><span class="key key-dash">profil 2D</span></div>
+      <canvas id="w-polar" class="chart" role="img" aria-label="Polaire de l'aile comparée à celle du profil"></canvas>
+      <p class="hint" id="w-polar-hint"></p>
+    </section>
+
+    <section class="card about" aria-labelledby="h-wabout">
+      <h2 id="h-wabout">Méthode</h2>
+      <ul>
+        <li>Surface portante de Weissinger rendue non linéaire : 80 tourbillons en fer à cheval (segment lié au quart de corde, incidence relevée aux trois quarts de corde) ; la circulation de chaque bande suit la polaire 2D de sa section à l'incidence effective (« décambrage »). Flèche, dièdre, effilement et vrillage sont pris en compte.</li>
+        <li>Polaires de section : méthode des panneaux + couche limite intégrale (onglet 2D), au Reynolds local de chaque corde, corrigées du décollement (modèle de Kirchhoff).</li>
+        <li>Traînée induite par Kutta–Joukowski avec la vitesse locale ; traînée de profil par bandes. Coefficients rapportés à S = b·c̄ ; Cm au quart de la corde aérodynamique moyenne, positif cabreur.</li>
+        <li>Validation (profil de pente 2π) : aile rectangulaire d'allongement 6, CLα = 4,2/rad (ligne portante de Prandtl : 4,5, qui surestime aux allongements modérés), e ≈ 0,99 ; aile effilée λ = 0,4 ou en flèche de 30°, e ≈ 1,0 ; résultats stables quand on raffine.</li>
+        <li>Limites : écoulement attaché et faibles flèches (≲ 30°) ; après le décrochage, plusieurs solutions existent et le résultat devient indicatif. Pas de fuselage, d'effet de sol ni de compressibilité.</li>
+      </ul>
+    </section>
+  </div>
+</main>
+
+<main class="layout" id="tab-3d" role="tabpanel" aria-labelledby="tabbtn-3d" hidden>
+  <section class="viewer" aria-label="Soufflerie 3D">
+    <div class="stage stage-3d">
+      <canvas id="view3d" role="img" aria-label="Vue 3D de l'écoulement autour de la maquette"></canvas>
+      <div class="hud hud-tl"><span class="pill status" id="s3-status" data-state="transient">Démarrage</span></div>
+      <div class="hud hud-tr"><span class="pill num" id="s3-time">t* 0.0</span></div>
+      <div class="hud hud-bl"><span class="pill hint-pill" id="s3-legend">Coupe : vitesse</span></div>
+      <div class="hud hud-br">
+        <button id="s3-reset" class="icon-btn" type="button" aria-label="Relancer le calcul 3D">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.3-5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3.5v4.4h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="s3-play" class="icon-btn primary" type="button" aria-label="Mettre en pause">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="ic-pause"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="ic-play" hidden><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="toast" id="s3-msg" role="alert" hidden></div>
+    </div>
+    <dl class="readouts" aria-live="off">
+      <div class="ro ro-cx"><dt>Cx <small>traînée</small></dt><dd><span class="v num" id="s3-cx">—</span><span class="amp num" id="s3-cx-sub"></span></dd></div>
+      <div class="ro ro-cz"><dt>Cz <small>portance</small></dt><dd><span class="v num" id="s3-cz">—</span><span class="amp num" id="s3-cz-sub"></span></dd></div>
+      <div class="ro"><dt>Cy <small>latéral</small></dt><dd><span class="v num" id="s3-cy">—</span><span class="amp num" id="s3-cy-sub"></span></dd></div>
+      <div class="ro ro-st"><dt>St <small>Strouhal</small></dt><dd><span class="v num" id="s3-st">—</span><span class="amp num" id="s3-st-sub"></span></dd></div>
+    </dl>
+    <p class="panel-ref num" id="s3-ref"></p>
+  </section>
+
+  <div class="panels">
+    <section class="card" aria-labelledby="h-s3hist">
+      <div class="card-head">
+        <h2 id="h-s3hist">Efforts</h2>
+        <div class="legend"><span class="key key-cx">Cx</span><span class="key key-cz">Cz</span></div>
+      </div>
+      <canvas id="s3-chart" class="chart" role="img" aria-label="Historique des coefficients 3D"></canvas>
+    </section>
+
+    <section class="card" aria-labelledby="h-s3model">
+      <h2 id="h-s3model">Maquette et écoulement</h2>
+      <div class="field">
+        <span class="label" id="lbl-s3shape">Maquette</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-s3shape" id="s3-shape-seg"></div>
+        <p class="hint" id="s3-shape-hint"></p>
+      </div>
+      <div class="field" id="s3-row-alpha">
+        <label for="s3-alpha">Incidence α</label>
+        <div class="slider-row"><input type="range" id="s3-alpha" min="-10" max="30" step="1" value="8"><output id="s3-alpha-out" for="s3-alpha">8°</output></div>
+      </div>
+      <div class="field">
+        <label for="s3-re">Nombre de Reynolds</label>
+        <div class="slider-row"><input type="range" id="s3-re" min="0" max="8" step="1" value="4"><output id="s3-re-out" for="s3-re">300</output></div>
+      </div>
+      <div class="field">
+        <span class="label" id="lbl-s3res">Résolution <span class="hint">mailles par longueur de référence</span></span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-s3res" id="s3-res-seg"></div>
+        <p class="hint num" id="s3-res-hint"></p>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-s3view">
+      <h2 id="h-s3view">Affichage</h2>
+      <div class="field">
+        <span class="label" id="lbl-s3field">Plan de coupe</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-s3field" id="s3-field-seg"></div>
+        <div class="seg" role="radiogroup" aria-label="Orientation du plan" id="s3-plane-seg"></div>
+        <div class="slider-row"><input type="range" id="s3-pos" min="0" max="1" step="0.005" value="0.5" aria-label="Position du plan"><output id="s3-pos-out" for="s3-pos">—</output></div>
+      </div>
+      <div class="field">
+        <label class="switch"><input type="checkbox" id="s3-iso" checked> Tourbillons (isosurfaces du critère Q)</label>
+        <div class="slider-row"><input type="range" id="s3-iso-level" min="0.05" max="2" step="0.05" value="0.4" aria-label="Seuil du critère Q"><output id="s3-iso-out" for="s3-iso-level">Q = 0.40 (U/L)²</output></div>
+      </div>
+      <p class="hint">Glisser pour tourner, molette ou pincement pour zoomer.</p>
+      <p class="numinfo num" id="s3-info"></p>
+    </section>
+
+    <section class="card about" aria-labelledby="h-s3about">
+      <h2 id="h-s3about">Méthode</h2>
+      <ul>
+        <li>Lattice Boltzmann D3Q19 sur WebGPU : une passe de calcul par pas (propagation et collision fusionnées), collision régularisée, modèle de Smagorinsky quand τ &lt; 0,51.</li>
+        <li>Populations en demi-précision décalées de leur poids d'équilibre (≈ 80 octets par maille) : deux fois plus de mailles qu'en simple précision, à précision quasi identique.</li>
+        <li>Paroi : rebond interpolé de Bouzidi ; efforts par échange de quantité de mouvement, moyennés entre deux relectures. Entrée à vitesse imposée, sortie à gradient nul avec zone éponge, bords latéraux périodiques.</li>
+        <li>Vorticité et critère Q calculés sur le GPU ; isosurfaces par lancer de rayons à travers le volume.</li>
+        <li>Domaine visé : Re ≲ 1000. Sphère : sillage stationnaire axisymétrique jusqu'à Re ≈ 210, oblique jusqu'à ≈ 270, puis lâcher de tourbillons en épingle (St ≈ 0,13 à Re = 300). Cylindre : modes 3D du sillage vers Re ≈ 190 (A) et 260 (B).</li>
+      </ul>
     </section>
   </div>
 </main>

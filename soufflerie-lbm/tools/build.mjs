@@ -17,7 +17,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
 
 // Ordre de dépendance.
-const MODULES = ['geometry', 'lbm', 'shapes', 'stats', 'sim', 'panel', 'lbm-gpu', 'render', 'render-gpu', 'chart', 'app'];
+const MODULES = [
+  'geometry', 'lbm', 'shapes', 'stats', 'sim', 'panel', 'wall', 'vlm', 'lbm-gpu', 'render', 'render-gpu', 'chart',
+  'wing-tab', 'lbm3d', 'bodies3d', 'render3d', 'lab3d', 'app',
+];
 const ident = (name) => name.replace(/-/g, '_');
 
 function bundle() {
@@ -25,7 +28,7 @@ function bundle() {
   for (const name of MODULES) {
     let src = read(`js/${name}.js`);
     const exportsList = [];
-    src = src.replace(/^export (function|class|const|let) ([A-Za-z_$][\w$]*)/gm, (_, kind, id) => {
+    src = src.replace(/^export ((?:async )?function|class|const|let) ([A-Za-z_$][\w$]*)/gm, (_, kind, id) => {
       exportsList.push(id);
       return `${kind} ${id}`;
     });

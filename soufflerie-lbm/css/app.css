@@ -148,6 +148,63 @@ body::before {
   letter-spacing: 0.02em;
 }
 
+/* ---------- Onglets ---------- */
+.tabs {
+  max-width: 1280px;
+  margin: 0 auto 10px;
+  display: flex;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.tabs button {
+  flex: 1 1 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 8px 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.stage-3d canvas {
+  touch-action: none;
+  cursor: grab;
+}
+
+.stage-3d {
+  aspect-ratio: 16 / 10;
+}
+
+.stage-wing canvas {
+  touch-action: none;
+  cursor: grab;
+}
+
+.hint-pill {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.key-dashc::before {
+  height: 0;
+  border-top: 2px dashed currentColor;
+  background: none;
+}
+
 /* ---------- Mise en page ---------- */
 .layout {
   max-width: 1280px;
@@ -491,6 +548,19 @@ body::before {
 
 .key-cz {
   color: var(--lift);
+}
+
+.key-dots::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.key-dash::before {
+  height: 0;
+  border-top: 2px dashed var(--muted);
+  background: none;
 }
 
 .key-win::before {

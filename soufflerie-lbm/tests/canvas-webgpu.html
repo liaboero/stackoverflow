@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><canvas id="c" width="64" height="64"></canvas><pre id="out"></pre>
+<script type="module">
+const log = (s) => (document.getElementById('out').textContent += s + '\n');
+(async () => {
+  try {
+    const a = await navigator.gpu.requestAdapter();
+    const d = await a.requestDevice();
+    d.lost.then((i) => log('lost ' + i.message));
+    const ctx = document.getElementById('c').getContext('webgpu');
+    log('ctx ' + !!ctx);
+    ctx.configure({ device: d, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'opaque' });
+    log('configured');
+    const enc = d.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: { r: 1, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
+    pass.end();
+    d.queue.submit([enc.finish()]);
+    await d.queue.onSubmittedWorkDone();
+    log('cleared ok');
+  } catch (e) { log('ERR ' + e.message); }
+  window.__done = true;
+})();
+</script></body></html>

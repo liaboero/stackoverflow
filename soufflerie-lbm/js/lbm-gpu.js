@@ -1134,6 +1134,38 @@ export class GpuLBM {
     return { rho, ux, uy };
   }
 
+  /**
+   * ρ, ux, uy d'une zone rectangulaire (lecture synchrone, à réserver aux
+   * petites zones : mailles pariétales, colonne amont).
+   */
+  readRegion(x0, y0, w, h) {
+    const gl = this.gl;
+    const n = w * h;
+    const bufs = [0, 1, 2].map(() => new Float32Array(4 * n));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[this.cur]);
+    bufs.forEach((buf, k) => {
+      gl.readBuffer(gl.COLOR_ATTACHMENT0 + k);
+      gl.readPixels(x0, y0, w, h, gl.RGBA, gl.FLOAT, buf);
+    });
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const rho = new Float32Array(n);
+    const ux = new Float32Array(n);
+    const uy = new Float32Array(n);
+    const [A, B, C] = bufs;
+    for (let i = 0; i < n; i++) {
+      const a = 4 * i;
+      const f1 = A[a + 1], f2 = A[a + 2], f3 = A[a + 3], f4 = B[a];
+      const f5 = B[a + 1], f6 = B[a + 2], f7 = B[a + 3], f8 = C[a];
+      const r = A[a] + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8;
+      rho[i] = r;
+      ux[i] = (f1 - f3 + f5 - f6 - f7 + f8) / r;
+      uy[i] = (f2 - f4 + f5 + f6 - f7 - f8) / r;
+    }
+    this._dirty = true;
+    return { rho, ux, uy };
+  }
+
   isFinite() {
     return Number.isFinite(this.fx) && Number.isFinite(this.fy) && this.health > 8 && this.health < 32;
   }

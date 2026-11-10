@@ -355,14 +355,73 @@ export function panelSolve(shape, o) {
     transitionLower: bl.lower.transitionX,
     separationUpper: bl.upper.separationX,
     separationLower: bl.lower.separationX,
-    separated: Number.isFinite(bl.upper.separationX) && bl.upper.separationX < 0.95,
-    // Frottement local (rapporté à la vitesse extérieure locale) le long de chaque face.
+    separated:
+      (Number.isFinite(bl.upper.separationX) && bl.upper.separationX < 0.95) ||
+      (Number.isFinite(bl.lower.separationX) && bl.lower.separationX < 0.95),
+    // Frottement local (rapporté à la vitesse extérieure locale ue) le long de
+    // chaque face ; cf·ue² le rapporte à la vitesse amont.
     friction: {
-      upper: { x: Array.from(bl.upperX), cf: Array.from(bl.upper.cf) },
-      lower: { x: Array.from(bl.lowerX), cf: Array.from(bl.lower.cf) },
+      upper: { x: Array.from(bl.upperX), cf: Array.from(bl.upper.cf), ue: Array.from(bl.upperUe) },
+      lower: { x: Array.from(bl.lowerX), cf: Array.from(bl.lower.cf), ue: Array.from(bl.lowerUe) },
     },
-    cp: { x: Array.from(flow.xc), cp: Array.from(flow.cp) },
+    // Cp aux points de contrôle, du bord de fuite par l'intrados au bord
+    // d'attaque puis par l'extrados ; iLE : panneau le plus en avant.
+    cp: { x: Array.from(flow.xc), y: Array.from(flow.yc), cp: Array.from(flow.cp), iLE: leadingPanel(flow.xc) },
+    alphaDeg: o.alphaDeg,
   };
+}
+
+function leadingPanel(xc) {
+  let k = 0;
+  for (let i = 1; i < xc.length; i++) if (xc[i] < xc[k]) k = i;
+  return k;
+}
+
+/**
+ * Coefficients de section corrigés du décollement (écoulement de Kirchhoff,
+ * forme de Beddoes et Leishman) : f, position du point de décollement de la
+ * couche limite intégrale, réduit l'effort normal, Cn = Cn_att ((1 + √f)/2)²,
+ * et l'aspiration de bord d'attaque, Cc = Cc_att √f. Sans décollement (f = 1)
+ * on retrouve le résultat attaché. Modèle approché : il donne l'allure du
+ * décrochage, pas son incidence exacte.
+ * @param {object} r résultat de panelSolve
+ * @returns {{cl:number, cd:number, cm:number, f:number, kirchhoff:boolean}}
+ */
+export function sectionCoefficients(r) {
+  const fOf = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x / 0.97)) : 1);
+  const f = r.separated ? Math.min(fOf(r.separationUpper), fOf(r.separationLower)) : 1;
+  if (f >= 1) return { cl: r.cl, cd: r.cd, cm: r.cm, f: 1, kirchhoff: false };
+  const a = (r.alphaDeg * Math.PI) / 180;
+  const cnAtt = r.cl * Math.cos(a);
+  const ccAtt = r.cl * Math.sin(a);
+  const sf = Math.sqrt(f);
+  const cn = cnAtt * ((1 + sf) / 2) ** 2;
+  const cc = ccAtt * sf;
+  const cl = cn * Math.cos(a) + cc * Math.sin(a);
+  const cd = r.cd + Math.max(0, cn * Math.sin(a) - cc * Math.cos(a));
+  // Le centre de poussée recule vers ≈ 0,4 c quand le décollement remonte.
+  const cm = r.cm - cn * 0.15 * (1 - f);
+  return { cl, cd, cm, f, kirchhoff: true };
+}
+
+/** Cp critique (écoulement localement sonique), γ = 1,4. */
+export function criticalCp(mach) {
+  const g = 1.4;
+  const m2 = mach * mach;
+  return (2 / (g * m2)) * (((2 + (g - 1) * m2) / (g + 1)) ** (g / (g - 1)) - 1);
+}
+
+/**
+ * Corrections de compressibilité subsonique : Prandtl–Glauert pour Cz et Cm,
+ * Kármán–Tsien pour Cp. `critical` : Cp minimal corrigé sous le Cp critique
+ * (zone supersonique locale, hors du domaine de ces corrections).
+ */
+export function compressibleCorrection(mach, cpMin) {
+  const m = Math.min(mach, 0.95);
+  const beta = Math.sqrt(1 - m * m);
+  const kt = (cp) => cp / (beta + ((m * m) / (1 + beta)) * (cp / 2));
+  const cpMinC = Number.isFinite(cpMin) ? kt(cpMin) : NaN;
+  return { beta, factor: 1 / beta, cp: kt, cpMin: cpMinC, cpStar: criticalCp(m), critical: cpMinC < criticalCp(m) };
 }
 
 /** Couche limite sur les deux faces à partir de la solution potentielle. */
@@ -451,6 +510,8 @@ function surfaceBL(pts, flow, re, nCrit, xTripU, xTripL, o2 = {}) {
     lower: blL,
     upperX: U.xs,
     lowerX: Lw.xs,
+    upperUe: U.ue,
+    lowerUe: Lw.ue,
     cd: squire(blU, U) + squire(blL, Lw),
     dstarNode,
   };

@@ -1,9 +1,17 @@
 # Soufflerie de poche
 
-Petite soufflerie numérique 2D pour mobile, basée sur la méthode de
-Boltzmann sur réseau (Lattice Boltzmann, D2Q9). Elle calcule en direct les
-efforts aérodynamiques sur des formes simples : **Cx** (traînée), **Cz**
-(portance), **Cm** (tangage) et le nombre de **Strouhal**.
+Petite soufflerie numérique pour mobile, basée sur la méthode de Boltzmann
+sur réseau (Lattice Boltzmann). Elle calcule en direct les efforts
+aérodynamiques sur des formes simples : **Cx** (traînée), **Cz** (portance),
+**Cm** (tangage) et le nombre de **Strouhal**. Trois onglets :
+
+- **Soufflerie 2D** (D2Q9, GPU WebGL2 ou CPU), du Reynolds 10 à 10⁷, avec la
+  référence « panneaux + couche limite » et les distributions Cp, Cf ;
+- **Aile finie** : surface portante de Weissinger non linéaire alimentée par
+  les polaires 2D des profils (allongement, effilement, flèche, dièdre,
+  vrillage) ;
+- **Soufflerie 3D** (D3Q19 sur WebGPU) : sphère, cube, cylindre, aile, aux
+  Reynolds modérés, avec plans de coupe et isosurfaces des tourbillons.
 
 C'est une application web progressive (PWA) : HTML/CSS/JavaScript sans
 dépendance ni étape de compilation. Elle s'installe sur l'écran d'accueil
@@ -37,6 +45,9 @@ Deux moteurs de calcul partagent le même modèle : un solveur **GPU**
   fluide (air, eau) → vitesse amont V = Re·ν/L, durée réelle simulée et
   efforts en N/m d'envergure ; vitesse de simulation imposée (temps réel,
   ×0,1, ×0,5, ×2, ×10) ou maximale.
+- **Distributions pariétales** : Cp et Cf le long du profil (ou de l'angle
+  pour le cylindre), moyennés dans le temps, comparés à la méthode des
+  panneaux (ou à l'écoulement potentiel).
 - **Polaires** : enregistrement de points, balayage automatique en incidence
   (ou en vitesse de rotation pour le cylindre), tracé Cx, Cz = f(α) ou
   polaire d'Eiffel Cz(Cx), copie du tableau vers un tableur.
@@ -413,11 +424,112 @@ qui est le cadre de cette soufflerie. Une extension naturelle serait une
 ligne portante alimentée par la polaire 2D (LBM ou panneaux) pour estimer
 les efforts d'une aile d'allongement donné.
 
+## Distributions pariétales, compressibilité, décrochage de la référence
+
+**Cp et Cf.** Les mailles voisines du corps fournissent ρ et u (lecture d'une
+petite zone sur GPU, une fois par seconde) : Cp = (ρ − ρ∞)c_s²/(½ρ∞U²), avec
+ρ∞ lu à l'amont ; Cf vient de la loi de paroi (Spalding, ou frottement
+laminaire imposé en amont de la transition) avec Spalart–Allmaras, du
+gradient pariétal sinon. Négatif, Cf signale l'écoulement de retour. Le Cp
+LBM est lu à moins d'une maille de la paroi : le pic d'aspiration du bord
+d'attaque est écrêté sur les grilles grossières, ce que la comparaison avec
+la méthode des panneaux montre directement.
+
+**Compressibilité.** Le calcul reste incompressible. Pour l'air, l'échelle
+physique donne le Mach réel : au-delà de 0,1, la référence panneaux est
+corrigée (Prandtl–Glauert pour Cz et Cm) ; si le Cp minimal corrigé
+(Kármán–Tsien) passe sous le Cp critique, la référence est signalée hors
+domaine (zone supersonique locale) ; au-delà de Mach 0,7, elle l'est
+toujours.
+
+**Décrochage de la référence.** Quand la couche limite intégrale prévoit un
+décollement de bord de fuite à x_s, la référence applique le modèle de
+Kirchhoff (Beddoes–Leishman) avec f = x_s : Cn = Cn_att((1 + √f)/2)²,
+aspiration Cc = Cc_att√f. On obtient un décrochage progressif plausible
+(NACA 0012 à Re = 10⁶ : Cz max ≈ 1,40 vers 16°), mais pas le décrochage de
+bord d'attaque des profils minces : Cz max est surestimé de 10 à 25 % aux
+Reynolds élevés.
+
+## Aile finie
+
+Surface portante de **Weissinger** (un tourbillon en fer à cheval par bande,
+segment lié au quart de corde, sillage plan, condition aux trois quarts de
+corde), rendue non linéaire par **décambrage** : chaque bande porte le Cl de
+la polaire 2D de sa section (panneaux + couche limite + Kirchhoff, au
+Reynolds local de sa corde) à l'incidence effective α(3/4 c) + Cl/a0 ; en
+régime linéaire, on retrouve exactement Weissinger. 80 bandes uniformes,
+Newton à jacobien numérique (quelques ms par incidence). Traînée induite
+dans le plan de Trefftz, traînée de profil par bandes, Cm au quart de la
+corde aérodynamique moyenne.
+
+| Cas (profil de pente 2π) | Calcul | Référence |
+| --- | --- | --- |
+| Rectangulaire, A = 6 | CLα = 4,19/rad, e = 0,995 | surface portante ≈ 4,2 ; ligne portante 4,5 |
+| Effilée λ = 0,4, A = 8 | e = 1,007 | ≈ 1 (charge quasi elliptique) |
+| Flèche 30°, λ = 0,5, A = 6 | e = 0,995, charge régulière à l'emplanture | — |
+| NACA 2412, A = 8, λ = 0,5, Re = 10⁶, α = 4° | CL = 0,51, CDi = 0,0101, CDp = 0,0071 | — |
+
+Deux essais écartés : la ligne portante de Phillips et Snyder (point de
+contrôle sur le tourbillon lié) donne une charge qui s'effondre au raccord
+d'une aile en flèche quand on raffine (0,29 → 0,16) ; une répartition des
+bandes en cosinus crée en bout d'aile des bandes cent fois plus étroites que
+la corde, qui rendent la condition aux trois quarts de corde mal posée.
+
+Limites : écoulement attaché et flèches modérées ; après le décrochage, la
+solution n'est pas unique (signalé « non convergé ») ; pas de fuselage, de
+compressibilité ni d'effet de sol.
+
+## Soufflerie 3D (WebGPU)
+
+**Schéma.** D3Q19, une passe de calcul WebGPU par pas : propagation « pull »
+et collision fusionnées. Collision régularisée (projection d'ordre 2),
+Smagorinsky quand τ < 0,51. Populations stockées décalées de leur poids
+d'équilibre, g = f − w, en **demi-précision** (deux par mot de 32 bits) :
+80 octets par maille au lieu de 152, deux tampons de 20 octets par maille
+pour rester sous la limite par défaut de 128 Mo par tampon. À la sphère de
+Re = 100, demi et simple précision donnent Cx = 1,328 et 1,332 (0,3 %).
+
+**Parois et efforts.** Rebond interpolé de Bouzidi ; les fractions q des
+liens et la liste des mailles pariétales sont calculées sur le CPU à la
+voxelisation. Les efforts (échange de quantité de mouvement) s'accumulent
+par maille pariétale sur le GPU et sont relus de façon asynchrone ≈ 4 fois
+par seconde : chaque relecture donne la moyenne exacte depuis la précédente.
+Entrée à vitesse imposée (équilibre, mise en vitesse sur 4 t*), sortie à
+gradient nul avec zone éponge, bords latéraux périodiques.
+
+**Rendu.** Vorticité et critère Q calculés sur le GPU (texture 3D) ; plan de
+coupe (vitesse ou composante de vorticité normale au plan) ; isosurfaces
+Q > seuil·(U/L)² par lancer de rayons, teintées par la vitesse ; Q est
+annulé au contact du corps (les différences finies y traversent la paroi).
+
+**Maquettes.** Sphère (veine 12 × 6 × 6 D), cube (incidence réglable),
+cylindre d'envergure périodique 4D (modes 3D du sillage), aile rectangulaire
+NACA 0012 d'allongement 4. Résolutions de 8 à 32 mailles par longueur de
+référence : 0,2 à 14 millions de mailles pour la sphère ; celles qui
+dépassent la mémoire de l'adaptateur sont désactivées.
+
+**Validation** (sphère, Re = 100, référence Cx ≈ 1,09) : voir le tableau
+ci-dessous ; l'écart diminue avec la résolution, le reste venant du
+confinement latéral (veine de 6 D).
+
+| Résolution D | Cx | Écart |
+| --- | --- | --- |
+| 8 mailles (sous-maille active, ancien seuil) | 1,33 | +22 % |
+
+**Prise en charge.** WebGPU : Chrome et Edge (ordinateur, Android 12+),
+Safari 26 (iOS, iPadOS, macOS), Firefox (Windows, macOS ARM). Ailleurs,
+l'onglet l'indique. Je n'ai pu mesurer que le rendu logiciel SwiftShader
+(≈ 1,5 million de mailles par seconde) ; un GPU réel est 100 à 1000 fois
+plus rapide.
+
 ## Limites
 
-- Calcul **2D** : pas de turbulence 3D résolue. Sans modèle, l'écoulement
+- Soufflerie 2D : pas de turbulence 3D résolue. Sans modèle, l'écoulement
   est laminaire ; avec Spalart–Allmaras, la turbulence est moyennée (RANS)
   et la transition vient de la méthode des panneaux.
+- Soufflerie 3D : Reynolds modérés seulement (≲ 1000) ; grille uniforme,
+  sans modèle de turbulence ni loi de paroi ; veine confinée (bords
+  latéraux périodiques) ; WebGPU obligatoire.
 - Traînée LBM des profils minces non convergée aux Reynolds élevés (voir
   « Étape A ») ; la référence panneaux + couche limite ne vaut qu'en
   écoulement attaché.
@@ -443,11 +555,20 @@ soufflerie-lbm/
 ├── js/render-gpu.js      rendu GPU du champ et des traceurs
 ├── js/chart.js           graphiques (historique, polaire)
 ├── js/panel.js           méthode des panneaux + couche limite intégrale
+├── js/wall.js            distributions Cp, Cf du calcul LBM
+├── js/vlm.js             aile finie : surface portante non linéaire
+├── js/wing-tab.js        onglet « Aile finie »
+├── js/lbm3d.js           solveur 3D D3Q19 WebGPU
+├── js/bodies3d.js        maquettes 3D (voxelisation, maillages)
+├── js/render3d.js        rendu 3D (coupes, isosurfaces Q)
+├── js/lab3d.js           onglet « Soufflerie 3D »
 ├── js/app.js             logique de l'interface
 ├── sw.js, manifest.webmanifest, icons/   PWA
 ├── tests/validate.mjs    validation physique (moteur CPU)
 ├── tests/gpu-compare.html  comparaison GPU / CPU dans le navigateur
 ├── tests/gpu-bench.html    vitesse du moteur GPU sur l'appareil
+├── tests/lbm3d-test.html   validation du solveur 3D (traînée de la sphère)
+├── tests/render3d-test.html  rendu 3D hors écran
 └── tools/build.mjs       version « fichier unique »
 ```
 
@@ -468,8 +589,10 @@ Pages…) ; le service worker exige HTTPS, sauf sur `localhost`.
 - Raffinement local de maillage près de la maquette (étape B), qui
   résoudrait le bord d'attaque et le bord de fuite sans payer une grille
   fine partout : c'est ce qui manque pour une traînée LBM quantitative.
-- Ligne portante de Prandtl alimentée par la polaire 2D : efforts d'une aile
-  finie (allongement, traînée induite).
+- Moteur 2D en WebGPU (base commune avec la 3D) ; en 3D, propagation en
+  place (« esoteric pull ») pour diviser encore la mémoire par deux.
+- Aile finie : fuselage, empennage et stabilité longitudinale ; polaires
+  de section issues du calcul LBM plutôt que des panneaux.
 - Correction de blocage, mode dimensionnel (corde en m, vitesse en m/s,
   air ou eau → efforts en N/m).
 - Dessin libre de la maquette au doigt.

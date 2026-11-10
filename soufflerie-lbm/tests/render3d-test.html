@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>Rendu 3D</title>
+<style>body{margin:0;font:13px system-ui}#c{width:640px;height:400px;display:block;position:absolute;left:-9999px}#img{width:640px;height:400px;display:block}</style></head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="img" width="640" height="400"></canvas>
+<pre id="out"></pre>
+<script type="module">
+import { Lbm3D, webgpuAdapter } from '../js/lbm3d.js';
+import { makeBody3D } from '../js/bodies3d.js';
+import { Render3D } from '../js/render3d.js';
+const out = document.getElementById('out');
+const log = (s) => (out.textContent += s + '\n');
+const q = new URLSearchParams(location.search);
+const shape = q.get('shape') || 'sphere';
+const L = Number(q.get('L') || 6);
+const steps = Number(q.get('steps') || 200);
+const iso = q.get('iso') !== '0';
+const plane = q.get('plane') || 'y';
+const field = q.get('field') || 'vort';
+const alpha = Number(q.get('alpha') || 8);
+async function main() {
+  const adapter = await webgpuAdapter();
+  const device = await adapter.requestDevice();
+  device.addEventListener('uncapturederror', (e) => log('GPU error: ' + e.error.message));
+  device.lost.then((i) => log('lost: ' + i.reason + ' ' + i.message));
+  const body = makeBody3D(shape, L, { alpha });
+  const sim = new Lbm3D(device, { nx: body.nx, ny: body.ny, nz: body.nz, nu: (0.1 * L) / Number(q.get('re') || 200), uIn: 0.1 });
+  sim.setGeometry(body.inside, body.box);
+  sim.reset(0.1);
+  log('sim ok');
+  const r = new Render3D(device, document.getElementById('c'), { offscreen: true });
+  r.attach(sim, body);
+  log('attach ok');
+  for (let k = 0; k < steps; k += 20) {
+    sim.step(20);
+    await device.queue.onSubmittedWorkDone();
+  }
+  log('steps ok');
+  const ax = { x: 0, y: 1, z: 2 }[plane];
+  const pos = plane === 'x' ? body.center[0] + 2 * L : body.center[ax];
+  r.render({ az: Number(q.get('az') || 62), el: 24, dist: Number(q.get('dist') || 6), plane: { axis: plane, pos }, field, iso: { on: iso, level: 0.3, step: 0.8 }, theme: { bg: [0.9, 0.92, 0.93], body: [0.2, 0.25, 0.3], line: [0.5, 0.5, 0.5] }, U: 0.1 });
+  await device.queue.onSubmittedWorkDone();
+  log('render ok');
+  const px = await r.readPixels();
+  const cv = document.getElementById('img');
+  cv.width = px.w;
+  cv.height = px.h;
+  cv.getContext('2d').putImageData(new ImageData(px.data, px.w, px.h), 0, 0);
+  log(`image ${px.w}×${px.h}`);
+  window.__done = true;
+}
+main().catch((e) => { log('ERR ' + e.message); window.__done = true; });
+</script>
+</body>
+</html>

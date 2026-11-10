@@ -8,7 +8,8 @@
 import { LBM } from '../js/lbm.js';
 import { WindTunnel, RAMP_T } from '../js/sim.js';
 import { ForceHistory, analyze } from '../js/stats.js';
-import { panelSolve, potentialFlow, airfoilPoints } from '../js/panel.js';
+import { panelSolve, potentialFlow, airfoilPoints, sectionCoefficients } from '../js/panel.js';
+import { buildWing, solveWing, polarTable, polarAt } from '../js/vlm.js';
 
 let failures = 0;
 const t0 = performance.now();
@@ -55,6 +56,25 @@ function run({ shape = 'cylinder', re, L = 16, tEnd, avgT = 20, params = {}, tur
     free.transitionUpper > 0.4 && free.transitionUpper < 0.8 && free.cd > 0.0045 && free.cd < 0.0075,
     `x_tr = ${free.transitionUpper.toFixed(2)}, Cx = ${free.cd.toFixed(4)} (XFOIL ≈ 0,0054)`,
   );
+}
+
+// 0 bis. Aile finie (surface portante de Weissinger non linéaire).
+{
+  const lin = (i, a) => ({ cl: (2 * Math.PI * a * Math.PI) / 180, cd: 0, cm: 0 });
+  const slope = (w) => ((solveWing(w, 5, lin).CL - solveWing(w, 3, lin).CL) / 2) * (180 / Math.PI);
+  const rect = buildWing({ ar: 6, taper: 1 });
+  const r6 = solveWing(rect, 4, lin);
+  const a6 = slope(rect);
+  check('Aile rectangulaire A = 6 (profil 2π)', a6 > 4.0 && a6 < 4.5 && r6.e > 0.95 && r6.e < 1.03, `CLα = ${a6.toFixed(2)}/rad (surface portante ≈ 4,2 ; ligne portante 4,5), e = ${r6.e.toFixed(3)}`);
+  const tap = solveWing(buildWing({ ar: 8, taper: 0.4 }), 4, lin);
+  check('Aile effilée λ = 0,4 : quasi elliptique', tap.e > 0.98 && tap.e < 1.03, `e = ${tap.e.toFixed(3)}`);
+  const sw = solveWing(buildWing({ ar: 6, taper: 0.5, sweep: 30 }), 4, lin);
+  const root = sw.strips[sw.strips.length / 2].ccl;
+  const peak = Math.max(...sw.strips.map((s) => s.ccl));
+  check('Aile en flèche 30° : charge régulière à l’emplanture', sw.e > 0.9 && sw.e < 1.03 && root > 0.9 * peak, `e = ${sw.e.toFixed(3)}, charge emplanture/max = ${(root / peak).toFixed(2)}`);
+  const tab = polarTable((a) => sectionCoefficients(panelSolve('naca', { params: { naca: '2412' }, alphaDeg: a, re: 1e6 })), -6, 22);
+  const nl = solveWing(buildWing({ ar: 8, taper: 0.5 }), 4, (i, a) => polarAt(tab, a));
+  check('Aile NACA 2412, A = 8, Re = 10⁶, α = 4°', nl.converged && nl.CL > 0.4 && nl.CL < 0.65 && nl.CDv > 0.004 && nl.CDv < 0.012, `CL = ${nl.CL.toFixed(3)}, CDi = ${nl.CDi.toFixed(4)}, CDp = ${nl.CDv.toFixed(4)}`);
 }
 
 // 1. Écoulement uniforme sans obstacle : conditions d'entrée, de sortie et

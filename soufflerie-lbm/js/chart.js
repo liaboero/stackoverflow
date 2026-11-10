@@ -294,3 +294,125 @@ export function drawPolar(canvas, pts, mode, theme, colors, unit = '', ref = nul
     });
   });
 }
+
+/**
+ * Distribution le long de la paroi (Cp, Cf).
+ * @param {object} d { series: [{pts: [[x, y]], color, style: 'line'|'dash'|'dots'}],
+ *        xLo, xHi, xUnit, yLabel, invert (axe y retourné, −Cp vers le haut),
+ *        marks: [{x, color}] (repères verticaux), empty (texte sans données) }
+ */
+export function drawWall(canvas, d, theme) {
+  const { ctx, w, h } = setup(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 40;
+  const padR = 12;
+  const padT = 10;
+  const padB = 24;
+  const pw = w - padL - padR;
+  const ph = h - padT - padB;
+  ctx.font = `11px ${theme.font}`;
+  const ys = [];
+  for (const s of d.series) for (const p of s.pts) if (Number.isFinite(p[1])) ys.push(p[1]);
+  if (!ys.length) {
+    ctx.fillStyle = theme.muted;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(d.empty || 'Pas encore de données', w / 2, h / 2);
+    return;
+  }
+  // Échelle robuste (quantiles 1 % et 99 %) : une maille isolée au bord de
+  // fuite ne doit pas écraser la courbe.
+  ys.sort((a, b) => a - b);
+  let lo = Math.min(0, ys[Math.floor(0.01 * (ys.length - 1))]);
+  let hi = Math.max(0, ys[Math.ceil(0.99 * (ys.length - 1))]);
+  if (hi - lo < 1e-9) hi = lo + 1;
+  const pad = 0.05 * (hi - lo);
+  const yt = niceTicks(lo - pad, hi + pad, 4);
+  const xt = niceTicks(d.xLo, d.xHi, 5);
+  const X = (v) => padL + ((v - d.xLo) / (d.xHi - d.xLo)) * pw;
+  const Yr = (v) => padT + (1 - (v - yt.lo) / (yt.hi - yt.lo)) * ph;
+  const Y = d.invert ? (v) => padT + ph - (Yr(v) - padT) : Yr;
+
+  ctx.lineWidth = 1;
+  ctx.textBaseline = 'middle';
+  for (const v of yt.ticks) {
+    const y = Math.round(Y(v)) + 0.5;
+    ctx.strokeStyle = v === 0 ? theme.muted : theme.grid;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(w - padR, y);
+    ctx.stroke();
+    ctx.fillStyle = theme.muted;
+    ctx.textAlign = 'right';
+    ctx.fillText(fmt(v, yt.step), padL - 6, y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const v of xt.ticks) {
+    if (v < d.xLo - 1e-9 || v > d.xHi + 1e-9) continue;
+    const x = Math.round(X(v)) + 0.5;
+    ctx.strokeStyle = theme.grid;
+    ctx.beginPath();
+    ctx.moveTo(x, padT);
+    ctx.lineTo(x, padT + ph);
+    ctx.stroke();
+    ctx.fillStyle = theme.muted;
+    const label = fmt(v, xt.step) + (d.xUnit || '');
+    const lw = ctx.measureText(label).width;
+    ctx.fillText(label, Math.min(Math.max(x, padL + lw / 2), w - 2 - lw / 2), h - padB + 6);
+  }
+  if (d.yLabel) {
+    ctx.save();
+    ctx.fillStyle = theme.muted;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(d.yLabel, padL + 4, padT + 2);
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(padL, padT, pw, ph);
+  ctx.clip();
+  for (const m of d.marks || []) {
+    ctx.strokeStyle = m.color;
+    ctx.globalAlpha = 0.6;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(X(m.x), padT);
+    ctx.lineTo(X(m.x), padT + ph);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+  for (const s of d.series) {
+    ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
+    if (s.style === 'dots') {
+      ctx.globalAlpha = 0.85;
+      for (const [x, y] of s.pts) {
+        if (!Number.isFinite(y)) continue;
+        ctx.beginPath();
+        ctx.arc(X(x), Y(y), 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(s.style === 'dash' ? [5, 4] : []);
+    ctx.beginPath();
+    let pen = false;
+    for (const [x, y] of s.pts) {
+      if (!Number.isFinite(y)) {
+        pen = false;
+        continue;
+      }
+      if (pen) ctx.lineTo(X(x), Y(y));
+      else ctx.moveTo(X(x), Y(y));
+      pen = true;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
