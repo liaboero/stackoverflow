@@ -200,15 +200,15 @@ impl App {
         rebuild |= (self.settings.cfg.collision, self.settings.cfg.les) != c0;
         ui.horizontal(|ui| {
             let label = if self.settings.running {
-                "⏸ Pause"
+                "Pause"
             } else {
-                "▶ Reprendre"
+                "Reprendre"
             };
             if ui.button(label).clicked() {
                 self.settings.running = !self.settings.running;
                 self.push(|_| {});
             }
-            if ui.button("↺ Relancer").clicked() {
+            if ui.button("Relancer").clicked() {
                 rebuild = true;
             }
         });
@@ -492,7 +492,7 @@ impl App {
         painter.text(
             rect.left_bottom() + Vec2::new(8.0, -8.0),
             egui::Align2::LEFT_BOTTOM,
-            format!("{name} : {lo} → {hi}   ·   {}   ·   t* = {:.1}", fr.label, fr.t_star),
+            format!("{name} : de {lo} à {hi}   ·   {}   ·   t* = {:.1}", fr.label, fr.t_star),
             egui::FontId::proportional(13.0),
             Color32::from_rgb(0x13, 0x20, 0x2a),
         );
