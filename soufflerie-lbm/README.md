@@ -35,9 +35,14 @@ Deux moteurs de calcul partagent le même modèle : un solveur **GPU**
   écoulement attaché), affichée sous les coefficients et en tirets sur la
   polaire.
 - **Visualisation** : vorticité, vitesse ou coefficient de pression Cp,
-  traceurs (lignes d'émission), force résultante moyenne et ses composantes,
-  trois cadrages (maquette, sillage, veine entière). Palettes adaptées au
-  thème clair ou sombre.
+  traceurs en lignes d'émission (filets) ou en **fronts** (lignes de temps :
+  particules lâchées ensemble, un front tous les ½ L, couleurs alternées ;
+  on y voit l'écoulement d'extrados atteindre le bord de fuite bien avant
+  celui d'intrados), force résultante moyenne et ses composantes. Trois
+  cadrages (maquette, sillage, veine entière) et **zoom manuel** : molette,
+  double-clic et glisser à la souris ; pincement à deux doigts, puis un doigt
+  pour se déplacer une fois zoomé ; boutons + / − / recadrer. Palettes
+  adaptées au thème clair ou sombre.
 - **Mesures** : moyennes glissantes calculées sur un nombre entier de
   périodes quand l'écoulement est périodique, amplitude des oscillations,
   Strouhal, état de convergence (transitoire, stationnaire, périodique).

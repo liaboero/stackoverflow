@@ -74,7 +74,7 @@ export function gradientCss(theme, map) {
   return `linear-gradient(90deg, ${stops.map(([p, c]) => `${c} ${(p * 100).toFixed(0)}%`).join(', ')})`;
 }
 
-const MAX_PARTICLES = 3200;
+const MAX_PARTICLES = 9600;
 
 /** Cadrages : [amont, aval, demi-hauteur] en multiples de L autour de la maquette. */
 export const VIEWS = {
@@ -82,6 +82,116 @@ export const VIEWS = {
   wake: { label: 'Sillage', box: [3, 13, 4] },
   full: { label: 'Veine', box: null },
 };
+
+/**
+ * Fronts de traceurs (lignes de temps) : FRONT_N particules réparties sur
+ * FRONT_SPAN L de hauteur, lâchées ensemble à FRONT_X L en amont de la
+ * maquette, un front tous les FRONT_DX L parcourus par l'écoulement amont.
+ */
+export const FRONT_N = 480;
+export const FRONT_SPAN = 4;
+export const FRONT_X = 3;
+export const FRONT_DX = 0.5;
+
+/**
+ * Longueur (mailles) au-delà de laquelle un segment de front est rompu : il
+ * enjamberait le corps ou la couche limite (particules voisines au départ
+ * mais séparées par la paroi ou par le fort cisaillement pariétal).
+ */
+export function frontMaxSeg(L) {
+  return Math.max(2, 0.25 * L);
+}
+
+/** Largeur minimale de la fenêtre (en L) : zoom maximal. */
+export const ZOOM_MIN_W = 0.4;
+
+/**
+ * Caméra 2D, relative à la maquette et en unités de L : centre (dx, dy)
+ * par rapport au point de référence, largeur w de la fenêtre.
+ */
+export function presetCamera(wt, mode) {
+  const box = (VIEWS[mode] ?? VIEWS.near).box;
+  const L = wt.L;
+  if (!box) {
+    return { dx: (wt.nx / 2 - (wt.x0 + 0.5)) / L, dy: (wt.ny / 2 - (wt.y0 + 0.5)) / L, w: wt.nx / L };
+  }
+  const [up, down] = box;
+  return { dx: (down - up) / 2, dy: 0, w: up + down };
+}
+
+/**
+ * Fenêtre affichée (mailles, réels) pour une caméra et un rapport hauteur /
+ * largeur du canevas ; la fenêtre reste dans la veine. Renvoie aussi la
+ * caméra effective (après butées).
+ */
+export function cameraWindow(wt, cam, aspect) {
+  const L = wt.L;
+  let ww = Math.min(wt.nx, Math.max(ZOOM_MIN_W * L, cam.w * L));
+  let wh = ww * aspect;
+  if (wh > wt.ny) {
+    wh = wt.ny;
+    ww = wh / aspect;
+  }
+  const cx = wt.x0 + 0.5 + cam.dx * L;
+  const cy = wt.y0 + 0.5 + cam.dy * L;
+  const wx = Math.max(0, Math.min(wt.nx - ww, cx - ww / 2));
+  const wy = Math.max(0, Math.min(wt.ny - wh, cy - wh / 2));
+  return {
+    wx,
+    wy,
+    ww,
+    wh,
+    cam: { dx: (wx + ww / 2 - wt.x0 - 0.5) / L, dy: (wy + wh / 2 - wt.y0 - 0.5) / L, w: ww / L },
+  };
+}
+
+/**
+ * Caméra de largeur w (en L) qui place le point (px, py) du réseau à la
+ * fraction (fx, fy) du canevas (depuis le coin haut gauche).
+ */
+export function anchoredCamera(wt, w, aspect, px, py, fx, fy) {
+  const L = wt.L;
+  const ww = w * L;
+  const wh = ww * aspect;
+  const cx = px - (fx - 0.5) * ww;
+  const cy = py + (fy - 0.5) * wh;
+  return cameraWindow(wt, { dx: (cx - wt.x0 - 0.5) / L, dy: (cy - wt.y0 - 0.5) / L, w }, aspect).cam;
+}
+
+/** Point du réseau sous la fraction (fx, fy) du canevas. */
+export function windowPoint(win, fx, fy) {
+  return [win.wx + fx * win.ww, win.wy + (1 - fy) * win.wh];
+}
+
+/** Ordonnées initiales des particules d'un front. */
+function frontY(wt, k) {
+  return wt.y0 - (FRONT_SPAN * wt.L) / 2 + (FRONT_SPAN * wt.L * (k + 0.5)) / FRONT_N;
+}
+
+/** Abscisse de lâcher des fronts. */
+function frontX(wt) {
+  return Math.max(2, wt.x0 - FRONT_X * wt.L);
+}
+
+/**
+ * Segment de front à tracer ? Deux particules vivantes, pas trop éloignées,
+ * et un segment qui ne traverse pas le corps (quatre points testés : un
+ * segment qui enjambe un profil mince est rompu).
+ */
+function frontSegment(wt, type, x0, y0, x1, y1, maxSeg) {
+  if (x0 < 0 || x1 < 0) return false;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  if (dx * dx + dy * dy > maxSeg * maxSeg) return false;
+  for (let t = 0.2; t < 0.9; t += 0.2) {
+    const mx = Math.round(x0 + t * dx);
+    const my = Math.round(y0 + t * dy);
+    if (mx >= 0 && my >= 0 && mx < wt.nx && my < wt.ny && type[my * wt.nx + mx] === SOLID) return false;
+  }
+  return true;
+}
+
+export { frontY, frontX };
 
 export class FlowView {
   constructor(canvas) {
@@ -94,6 +204,8 @@ export class FlowView {
     this.pCount = 0;
     this.pHead = 0;
     this.emitAcc = 0;
+    this.tracerMode = 'streak';
+    this.frontSlot = 0;
     this.theme = 'light';
     this.colors = { body: '#24313a', bodyEdge: '#0d161c', tracer: 'rgba(16,28,38,0.6)', accent: '#c8461c', lift: '#1f6f9c', ink: '#13202a' };
     this.setTheme('light', this.colors);
@@ -110,10 +222,30 @@ export class FlowView {
     this.bodyPixel = (255 << 24) | (b[2] << 16) | (b[1] << 8) | b[0];
   }
 
-  /** Fenêtre affichée (mailles) : x ∈ [wx, wx + ww[, y ∈ [wy, wy + wh[. */
+  /** Cadrage prédéfini (remplace le zoom manuel). */
   setView(mode) {
     this.viewMode = VIEWS[mode] ? mode : 'near';
-    if (this.wt) this.win = computeWindow(this.wt, this.viewMode);
+    this.cam = null;
+  }
+
+  /** Caméra manuelle (dx, dy, w en L), ou null pour le cadrage prédéfini. */
+  setCamera(cam) {
+    this.cam = cam;
+  }
+
+  /** Fenêtre courante (mailles) d'après la caméra et la forme du canevas. */
+  window() {
+    const wt = this.wt;
+    const aspect = this.canvas.clientHeight / Math.max(1, this.canvas.clientWidth) || 0.5;
+    const cam = this.cam ?? presetCamera(wt, this.viewMode);
+    return cameraWindow(wt, cam, aspect);
+  }
+
+  /** 'streak' : peigne continu (lignes d'émission) ; 'fronts' : lignes de temps. */
+  setTracerMode(mode) {
+    if (mode === this.tracerMode) return;
+    this.tracerMode = mode === 'fronts' ? 'fronts' : 'streak';
+    this.clearParticles();
   }
 
   attach(wt) {
@@ -122,15 +254,22 @@ export class FlowView {
     this.off.height = wt.ny;
     this.image = this.offCtx.createImageData(wt.nx, wt.ny);
     this.pix = new Uint32Array(this.image.data.buffer);
-    this.setView(this.viewMode ?? 'near');
+    this.viewMode = this.viewMode ?? 'near';
     this.clearParticles();
     this.resize();
   }
 
   clearParticles() {
-    this.pCount = 0;
     this.pHead = 0;
     this.emitAcc = 0;
+    this.frontSlot = 0;
+    if (this.tracerMode === 'fronts') {
+      // Emplacements fixes de FRONT_N particules, morts au départ.
+      this.px.fill(-1);
+      this.pCount = Math.floor(MAX_PARTICLES / FRONT_N) * FRONT_N;
+    } else {
+      this.pCount = 0;
+    }
   }
 
   resize() {
@@ -151,19 +290,35 @@ export class FlowView {
     const { nx, ny, lbm } = wt;
     const { ux, uy, type } = lbm;
     const U = wt.uIn;
-    // Émission : une particule tous les ~2.5 mailles parcourues, sur un peigne.
-    const seeds = 17;
-    const span = 5 * wt.L;
     this.emitAcc += steps * U;
-    const spacing = Math.max(2.5, wt.L / 6.4);
-    while (this.emitAcc >= spacing) {
-      this.emitAcc -= spacing;
-      for (let s = 0; s < seeds; s++) {
-        const y = wt.y0 - span / 2 + (span * (s + 0.5)) / seeds;
-        this._add(1 + this.emitAcc, y);
+    if (this.tracerMode === 'fronts') {
+      // Un front complet tous les FRONT_DX L parcourus.
+      const spacing = FRONT_DX * wt.L;
+      const slots = Math.floor(MAX_PARTICLES / FRONT_N);
+      const x0 = frontX(wt);
+      while (this.emitAcc >= spacing) {
+        this.emitAcc -= spacing;
+        const base = this.frontSlot * FRONT_N;
+        for (let k = 0; k < FRONT_N; k++) {
+          this.px[base + k] = x0 + this.emitAcc;
+          this.py[base + k] = frontY(wt, k);
+        }
+        this.frontSlot = (this.frontSlot + 1) % slots;
+      }
+    } else {
+      // Émission : une particule tous les ~2.5 mailles parcourues, sur un peigne.
+      const seeds = 17;
+      const span = 5 * wt.L;
+      const spacing = Math.max(2.5, wt.L / 6.4);
+      while (this.emitAcc >= spacing) {
+        this.emitAcc -= spacing;
+        for (let s = 0; s < seeds; s++) {
+          const y = wt.y0 - span / 2 + (span * (s + 0.5)) / seeds;
+          this._add(1 + this.emitAcc, y);
+        }
       }
     }
-    const nsub = Math.max(1, Math.ceil((steps * U * 2) / 0.8));
+    const nsub = Math.max(1, Math.ceil((steps * U * 2) / 0.5));
     const dt = steps / nsub;
     const px = this.px;
     const py = this.py;
@@ -227,15 +382,30 @@ export class FlowView {
     const lo = field.min;
     const k = n / (field.max - field.min);
     const body = this.bodyPixel;
-    const { wx, wy, ww, wh } = this.win;
+    const win = this.window();
+    this.win = win;
+    const { wx, wy, ww, wh } = win;
+    // Mailles couvrant la fenêtre (réelle) : bornes entières, avec une maille
+    // de marge pour l'interpolation de l'image.
+    const x0 = Math.max(0, Math.floor(wx) - 1);
+    const x1 = Math.min(nx, Math.ceil(wx + ww) + 1);
+    const y0 = Math.max(0, Math.floor(wy) - 1);
+    const y1 = Math.min(ny, Math.ceil(wy + wh) + 1);
 
-    for (let y = wy; y < wy + wh; y++) {
+    // Mailles solides en bordure du corps : couleur du fluide voisin. Le
+    // contour lisse de la maquette, tracé ensuite, recouvre l'intérieur ; ainsi
+    // l'escalier des mailles ne dépasse pas du contour quand on zoome.
+    const vals = this.vals && this.vals.length === lbm.N ? this.vals : (this.vals = new Float32Array(lbm.N));
+    const solids = [];
+    for (let y = y0; y < y1; y++) {
       const row = y * nx;
       const prow = (ny - 1 - y) * nx;
-      for (let x = wx; x < wx + ww; x++) {
+      for (let x = x0; x < x1; x++) {
         const idx = row + x;
         if (type[idx] === SOLID) {
           pix[prow + x] = body;
+          vals[idx] = NaN;
+          solids.push(idx);
           continue;
         }
         let v;
@@ -252,14 +422,34 @@ export class FlowView {
           const dudy = (ux[yu] - ux[yd]) / ((yu - yd) / nx || 1);
           v = ((dvdx - dudy) * L) / U;
         }
+        vals[idx] = v;
         let c = ((v - lo) * k) | 0;
         if (c < 0) c = 0;
         else if (c > n) c = n;
         pix[prow + x] = lut[c];
       }
     }
+    for (const idx of solids) {
+      const x = idx % nx;
+      const y = (idx - x) / nx;
+      let sum = 0;
+      let cnt = 0;
+      for (const j of [idx - 1, idx + 1, idx - nx, idx + nx]) {
+        if (j < 0 || j >= lbm.N) continue;
+        const v = vals[j];
+        if (v === v) {
+          sum += v;
+          cnt++;
+        }
+      }
+      if (!cnt) continue;
+      let c = ((sum / cnt - lo) * k) | 0;
+      if (c < 0) c = 0;
+      else if (c > n) c = n;
+      pix[(ny - 1 - y) * nx + x] = lut[c];
+    }
     const srcY = ny - wy - wh; // ligne image du haut de la fenêtre
-    this.offCtx.putImageData(this.image, 0, 0, wx, srcY, ww, wh);
+    this.offCtx.putImageData(this.image, 0, 0, x0, ny - y1, x1 - x0, y1 - y0);
 
     const ctx = this.ctx;
     const W = this.canvas.width;
@@ -274,7 +464,42 @@ export class FlowView {
     const toY = (y) => (ny - 0.5 - y - srcY) * sy;
 
     // Traceurs
-    if (o.tracers && this.pCount) {
+    if (o.tracers && this.pCount && this.tracerMode === 'fronts') {
+      const maxSeg = frontMaxSeg(L);
+      const px = this.px;
+      const py = this.py;
+      const r = Math.max(1, this.dpr);
+      ctx.lineWidth = Math.max(1, 1.3 * this.dpr);
+      ctx.lineJoin = 'round';
+      // Couleurs alternées d'un front à l'autre (même front suivi de part et
+      // d'autre du profil).
+      for (const parity of [0, 1]) {
+        const color = parity ? this.colors.accent : this.colors.tracer;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        const dots = [];
+        ctx.beginPath();
+        for (let base = parity * FRONT_N; base < this.pCount; base += 2 * FRONT_N) {
+          let pen = false;
+          for (let k = 0; k < FRONT_N - 1; k++) {
+            const a = base + k;
+            if (!frontSegment(wt, type, px[a], py[a], px[a + 1], py[a + 1], maxSeg)) {
+              // Particule isolée : point.
+              if (!pen && px[a] >= 0) dots.push(a);
+              pen = false;
+              continue;
+            }
+            if (!pen) ctx.moveTo(toX(px[a]), toY(py[a]));
+            ctx.lineTo(toX(px[a + 1]), toY(py[a + 1]));
+            pen = true;
+          }
+        }
+        ctx.stroke();
+        ctx.beginPath();
+        for (const a of dots) ctx.rect(toX(px[a]) - r / 2, toY(py[a]) - r / 2, r, r);
+        ctx.fill();
+      }
+    } else if (o.tracers && this.pCount) {
       ctx.fillStyle = this.colors.tracer;
       const r = Math.max(1, 1.1 * this.dpr);
       ctx.beginPath();
@@ -286,21 +511,8 @@ export class FlowView {
       ctx.fill();
     }
 
-    drawOverlay(ctx, wt, this.win, W, H, this.dpr, this.colors, o.force);
+    drawOverlay(ctx, wt, win, W, H, this.dpr, this.colors, o.force);
   }
-}
-
-/** Fenêtre affichée (mailles) pour un cadrage : x ∈ [wx, wx + ww[, y ∈ [wy, wy + wh[. */
-export function computeWindow(wt, mode) {
-  const box = (VIEWS[mode] ?? VIEWS.near).box;
-  if (!box) return { wx: 0, wy: 0, ww: wt.nx, wh: wt.ny };
-  const [up, down, half] = box;
-  const L = wt.L;
-  const ww = Math.min(wt.nx, Math.round((up + down) * L));
-  const wh = Math.min(wt.ny, Math.round(2 * half * L));
-  const wx = Math.max(0, Math.min(wt.nx - ww, Math.round(wt.x0 - up * L)));
-  const wy = Math.max(0, Math.min(wt.ny - wh, Math.round(wt.y0 + 0.5 - half * L)));
-  return { wx, wy, ww, wh };
 }
 
 /**

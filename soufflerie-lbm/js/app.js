@@ -4,7 +4,7 @@
 import { WindTunnel, RESOLUTIONS, RAMP_T, RE_WAKE_3D } from './sim.js';
 import { SHAPES, SHAPE_BY_ID, parseNaca, shapeIconPath } from './shapes.js';
 import { ForceHistory, analyze } from './stats.js';
-import { FlowView, FIELDS, VIEWS, gradientCss } from './render.js';
+import { FlowView, FIELDS, VIEWS, gradientCss, presetCamera, cameraWindow, anchoredCamera, windowPoint, ZOOM_MIN_W } from './render.js';
 import { drawHistory, drawPolar, drawWall } from './chart.js';
 import { GpuLBM, gpuSupported } from './lbm-gpu.js';
 import { GpuFlowView } from './render-gpu.js';
@@ -55,7 +55,8 @@ const DEFAULTS = {
   re: 100,
   res: 'standard',
   field: 'vort',
-  tracers: true,
+  tracerMode: 'streak',
+  cam: null,
   arrow: true,
   wall: 'bouzidi',
   les: 'auto',
@@ -97,6 +98,11 @@ if (!RE_VALUES.includes(state.re)) state.re = DEFAULTS.re;
 if (!U_VALUES.includes(state.u)) state.u = DEFAULTS.u;
 if (!FIELDS[state.field]) state.field = DEFAULTS.field;
 if (!VIEWS[state.view]) state.view = DEFAULTS.view;
+// Ancienne préférence booléenne « traceurs ».
+if (state.tracers === false && !state.tracerMode) state.tracerMode = 'off';
+delete state.tracers;
+if (!['off', 'streak', 'fronts'].includes(state.tracerMode)) state.tracerMode = DEFAULTS.tracerMode;
+if (!(state.cam && [state.cam.dx, state.cam.dy, state.cam.w].every(Number.isFinite) && state.cam.w > 0)) state.cam = null;
 if (!SPEEDS.includes(state.speed)) state.speed = DEFAULTS.speed;
 if (!FLUIDS[state.fluid]) state.fluid = DEFAULTS.fluid;
 if (!(state.chord > 0 && state.chord <= 100)) state.chord = DEFAULTS.chord;
@@ -1329,12 +1335,12 @@ function frame(ts) {
   const ok = diverged || wt.lbm.computeMacros();
   if (!ok) onDiverged();
   if (!diverged) {
-    if (state.tracers) view.advect(stepsSinceRender);
+    if (state.tracerMode !== 'off') view.advect(stepsSinceRender);
     stepsSinceRender = 0;
   }
   const a = analysis;
   const force = state.arrow && a && a.ready ? { cx: a.cx, cz: a.cz } : null;
-  view.draw({ field: state.field, tracers: state.tracers, force });
+  view.draw({ field: state.field, tracers: state.tracerMode !== 'off', force });
 
   const now = performance.now();
   if (now - lastUiUpdate > 250) {
@@ -1561,9 +1567,24 @@ function bind() {
       state.view = v;
       cpuView.setView(v);
       if (gpuView) gpuView.setView(v);
+      applyCamera(null);
+    },
+  );
+  segmented(
+    $('tracer-seg'),
+    [
+      { value: 'off', label: 'Aucun' },
+      { value: 'streak', label: 'Filets' },
+      { value: 'fronts', label: 'Fronts' },
+    ],
+    state.tracerMode,
+    (v) => {
+      state.tracerMode = v;
+      applyTracerMode();
       savePrefs();
     },
   );
+  bindZoom();
   segmented(
     $('wall-seg'),
     [
@@ -1640,12 +1661,6 @@ function bind() {
     },
   );
 
-  $('tracers').checked = state.tracers;
-  $('tracers').addEventListener('change', () => {
-    state.tracers = $('tracers').checked;
-    if (!state.tracers) view.clearParticles();
-    savePrefs();
-  });
   $('arrow').checked = state.arrow;
   $('arrow').addEventListener('change', () => {
     state.arrow = $('arrow').checked;
@@ -1688,6 +1703,152 @@ function syncTurbulence() {
   if ((mode === 'sa') !== !!wt.lbm.saActive) wt.lbm.setTurbulence(mode);
 }
 
+// ---------------------------------------------------------------- zoom et traceurs
+
+/** Rapport hauteur / largeur de la veine affichée. */
+function stageAspect() {
+  const c = $('flow');
+  return c.clientHeight / Math.max(1, c.clientWidth) || 0.5;
+}
+
+/** Fenêtre actuellement affichée (mailles). */
+function currentWindow() {
+  return cameraWindow(wt, state.cam ?? presetCamera(wt, state.view), stageAspect());
+}
+
+let camSaveTimer = 0;
+/** Caméra manuelle (dx, dy, w en L) ou null : cadrage prédéfini. */
+function applyCamera(cam) {
+  state.cam = cam;
+  cpuView.setCamera(cam);
+  gpuView?.setCamera(cam);
+  setSegValue($('view-seg'), cam ? null : state.view);
+  $('btn-zfit').hidden = !cam;
+  // Zoomé, un doigt déplace la vue ; au cadrage prédéfini, il fait défiler la page.
+  $('flow').style.touchAction = cam ? 'none' : 'pan-y';
+  clearTimeout(camSaveTimer);
+  camSaveTimer = setTimeout(savePrefs, 400);
+}
+
+/** Zoom de facteur `factor` autour de la fraction (fx, fy) du canevas. */
+function zoomAt(factor, fx = 0.5, fy = 0.5) {
+  if (!wt) return;
+  const win = currentWindow();
+  const [px, py] = windowPoint(win, fx, fy);
+  const w = Math.min(wt.nx / wt.L, Math.max(ZOOM_MIN_W, win.cam.w / factor));
+  applyCamera(anchoredCamera(wt, w, stageAspect(), px, py, fx, fy));
+}
+
+function bindZoom() {
+  const el = $('flow');
+  const frac = (e) => {
+    const r = el.getBoundingClientRect();
+    return [(e.clientX - r.left) / Math.max(1, r.width), (e.clientY - r.top) / Math.max(1, r.height)];
+  };
+  const ptrs = new Map();
+  let g = null;
+  // Geste : point du réseau tenu sous les doigts (ou la souris), largeur de départ.
+  const begin = () => {
+    const pts = [...ptrs.values()];
+    const win = currentWindow();
+    const mx = pts.reduce((s, p) => s + p.fx, 0) / pts.length;
+    const my = pts.reduce((s, p) => s + p.fy, 0) / pts.length;
+    const [px, py] = windowPoint(win, mx, my);
+    const d = pts.length > 1 ? Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) : 0;
+    g = { n: pts.length, px, py, w: win.cam.w, d, moved: false };
+  };
+  el.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const [fx, fy] = frac(e);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, fx, fy });
+    // Souris ou deux doigts : toujours ; un doigt : seulement une fois zoomé.
+    if (e.pointerType === 'mouse' || ptrs.size >= 2 || state.cam) {
+      el.setPointerCapture?.(e.pointerId);
+      begin();
+    }
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    const [fx, fy] = frac(e);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, fx, fy });
+    if (!g || !wt) return;
+    const pts = [...ptrs.values()];
+    if (pts.length !== g.n) {
+      begin();
+      return;
+    }
+    const mx = pts.reduce((s, p) => s + p.fx, 0) / pts.length;
+    const my = pts.reduce((s, p) => s + p.fy, 0) / pts.length;
+    let w = g.w;
+    if (pts.length > 1 && g.d > 8) {
+      const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      w = Math.min(wt.nx / wt.L, Math.max(ZOOM_MIN_W, (g.w * g.d) / Math.max(d, 1)));
+    }
+    g.moved = true;
+    applyCamera(anchoredCamera(wt, w, stageAspect(), g.px, g.py, mx, my));
+  });
+  const end = (e) => {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size && g) begin();
+    else g = null;
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      const [fx, fy] = frac(e);
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      zoomAt(Math.exp(-dy * 0.0015), fx, fy);
+    },
+    { passive: false },
+  );
+  el.addEventListener('dblclick', (e) => {
+    const [fx, fy] = frac(e);
+    zoomAt(e.shiftKey ? 0.5 : 2, fx, fy);
+  });
+  // Boutons : zoom centré sur la maquette si elle est visible, sinon sur la vue.
+  const bodyFrac = () => {
+    if (!wt) return [0.5, 0.5];
+    const win = currentWindow();
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const [x, y] of wt.body.outline) {
+      x0 = Math.min(x0, x);
+      x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y);
+      y1 = Math.max(y1, y);
+    }
+    const fx = (0.5 * (x0 + x1) + 0.5 - win.wx) / win.ww;
+    const fy = 1 - (0.5 * (y0 + y1) + 0.5 - win.wy) / win.wh;
+    return fx > 0 && fx < 1 && fy > 0 && fy < 1 ? [fx, fy] : [0.5, 0.5];
+  };
+  $('btn-zin').addEventListener('click', () => zoomAt(1.5, ...bodyFrac()));
+  $('btn-zout').addEventListener('click', () => zoomAt(1 / 1.5, ...bodyFrac()));
+  $('btn-zfit').addEventListener('click', () => applyCamera(null));
+}
+
+const TRACER_HINTS = {
+  off: '',
+  streak: 'Filets : lignes d’émission continues depuis un peigne amont.',
+  fronts:
+    'Fronts : particules lâchées ensemble, un front tous les ½ L, couleurs alternées pour suivre un même front. ' +
+    'Sur l’extrados, l’écoulement accéléré prend de l’avance : il atteint le bord de fuite bien avant la partie du même front ' +
+    'passée sous l’intrados (pas de « temps de transit égal »). Près de la paroi, la couche limite retient les particules.',
+};
+
+function applyTracerMode() {
+  const m = state.tracerMode === 'fronts' ? 'fronts' : 'streak';
+  cpuView.setTracerMode(m);
+  gpuView?.setTracerMode(m);
+  if (state.tracerMode === 'off') view?.clearParticles();
+  $('tracer-hint').textContent = TRACER_HINTS[state.tracerMode];
+  $('tracer-hint').hidden = state.tracerMode === 'off';
+}
+
 // ---------------------------------------------------------------- démarrage
 
 /** Résolutions proposées selon le moteur (48 et 64 mailles : GPU seulement). */
@@ -1708,8 +1869,12 @@ function buildResSeg() {
 function start() {
   cpuView = new FlowView($('flow'));
   cpuView.setView(state.view);
+  cpuView.setCamera(state.cam);
   initGpu();
-  if (gpuView) gpuView.setView(state.view);
+  if (gpuView) {
+    gpuView.setView(state.view);
+    gpuView.setCamera(state.cam);
+  }
   // Première visite avec GPU : résolution plus fine par défaut.
   if (!storageGet(PREFS_KEY) && gpuOk) state.res = 'tresfine';
   view = cpuView;
@@ -1746,6 +1911,8 @@ function start() {
   lab3d.init();
   for (const t of ['2d', 'wing', '3d']) $(`tabbtn-${t}`).addEventListener('click', () => setTab(t));
   buildSim();
+  applyTracerMode();
+  applyCamera(state.cam);
   syncShapeControls();
   applyTheme();
   renderTable();

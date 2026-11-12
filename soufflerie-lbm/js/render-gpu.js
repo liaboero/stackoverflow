@@ -5,7 +5,7 @@
  * un calque superposé, avec le même code que le rendu CPU.
  */
 import { createProgram, createTexture, createFramebuffer } from './lbm-gpu.js';
-import { FIELDS, PALETTES, VIEWS, buildLut, computeWindow, drawOverlay } from './render.js';
+import { FIELDS, PALETTES, VIEWS, buildLut, drawOverlay, presetCamera, cameraWindow, FRONT_N, FRONT_DX, frontMaxSeg, frontX, frontY } from './render.js';
 
 const PW = 128;
 const PH = 128;
@@ -111,9 +111,21 @@ void main() {
       wsum += w;
     }
   }
-  if (wsum < 0.5) {
-    o = uBody;
-    return;
+  if (wsum <= 0.0) {
+    // Maille solide en bordure : moyenne du fluide voisin (le contour lisse
+    // de la maquette recouvre l'intérieur), sinon couleur du corps.
+    for (int k = 0; k < 16; k++) {
+      ivec2 q = clamp(i0 + ivec2(k & 3, k >> 2) - 1, ivec2(0), uSize - 1);
+      float v = texelFetch(uS, q, 0).r;
+      if (v > -1e29) {
+        sum += v;
+        wsum += 1.0;
+      }
+    }
+    if (wsum <= 0.0) {
+      o = uBody;
+      return;
+    }
   }
   float t = clamp((sum / wsum - uMin) / (uMax - uMin), 0.0, 1.0);
   o = vec4(texture(uLut, vec2(t * (255.0 / 256.0) + 0.5 / 256.0, 0.5)).rgb, 1.0);
@@ -177,6 +189,55 @@ void main() {
   gl_PointSize = uPointSize;
 }`;
 
+// Fronts : segments entre particules voisines d'un même front ; un segment
+// rompu (particule morte, trop étiré, ou traversant le corps) est rejeté hors
+// champ par ses deux extrémités.
+const VS_FRONTS = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uP;
+uniform sampler2D uGeo;
+uniform ivec2 uSize;
+uniform vec4 uWin;
+uniform int uN;
+uniform float uMaxSeg;
+flat out int vOdd;
+vec4 part(int i) {
+  return texelFetch(uP, ivec2(i % ${PW}, i / ${PW}), 0);
+}
+void main() {
+  int seg = gl_VertexID / 2;
+  int slot = seg / (uN - 1);
+  int i = slot * uN + (seg - slot * (uN - 1));
+  vOdd = slot & 1;
+  vec4 a = part(i);
+  vec4 b = part(i + 1);
+  bool ok = a.z > 0.5 && b.z > 0.5 && distance(a.xy, b.xy) < uMaxSeg;
+  // Segment qui traverse le corps (quatre points testés) : rompu.
+  for (int t = 1; t <= 4 && ok; t++) {
+    vec2 q = mix(a.xy, b.xy, 0.2 * float(t));
+    ivec2 m = clamp(ivec2(floor(q + 0.5)), ivec2(0), uSize - 1);
+    if (int(texelFetch(uGeo, m, 0).r * 255.0 + 0.5) == 1) ok = false;
+  }
+  if (!ok) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec2 p = (gl_VertexID % 2 == 0) ? a.xy : b.xy;
+  gl_Position = vec4((p + 0.5 - uWin.xy) / uWin.zw * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FS_FRONTS = `#version 300 es
+precision highp float;
+uniform vec4 uColor;
+uniform vec4 uColor2;
+flat in int vOdd;
+out vec4 o;
+void main() {
+  o = vOdd == 1 ? uColor2 : uColor;
+}`;
+
 const FS_POINTS = `#version 300 es
 precision highp float;
 uniform vec4 uColor;
@@ -220,6 +281,9 @@ export class GpuFlowView {
     this.progDisplay = createProgram(gl, VS_QUAD, FS_DISPLAY);
     this.progUpdate = createProgram(gl, VS_QUAD, FS_PUPDATE);
     this.progPoints = createProgram(gl, VS_POINTS, FS_POINTS);
+    this.progFronts = createProgram(gl, VS_FRONTS, FS_FRONTS);
+    this.tracerMode = 'streak';
+    this.frontSlot = 0;
     this.lut = {
       diverging: createTexture(gl, 256, 1, gl.RGBA8, gl.LINEAR),
       sequential: createTexture(gl, 256, 1, gl.RGBA8, gl.LINEAR),
@@ -255,11 +319,28 @@ export class GpuFlowView {
     }
     this.bodyRgba = parseColor(this.colors.body);
     this.tracerRgba = parseColor(this.colors.tracer);
+    this.accentRgba = parseColor(this.colors.accent);
   }
 
   setView(mode) {
     this.viewMode = VIEWS[mode] ? mode : 'near';
-    if (this.wt) this.win = computeWindow(this.wt, this.viewMode);
+    this.cam = null;
+  }
+
+  setCamera(cam) {
+    this.cam = cam;
+  }
+
+  window() {
+    const wt = this.wt;
+    const aspect = this.canvas.clientHeight / Math.max(1, this.canvas.clientWidth) || 0.5;
+    return cameraWindow(wt, this.cam ?? presetCamera(wt, this.viewMode), aspect);
+  }
+
+  setTracerMode(mode) {
+    if (mode === this.tracerMode) return;
+    this.tracerMode = mode === 'fronts' ? 'fronts' : 'streak';
+    this.clearParticles();
   }
 
   attach(wt) {
@@ -279,7 +360,6 @@ export class GpuFlowView {
       this.size = [wt.nx, wt.ny];
     }
     this._macroTime = -1;
-    this.setView(this.viewMode);
     this.clearParticles();
     this.resize();
   }
@@ -314,6 +394,7 @@ export class GpuFlowView {
     }
     this.pHead = 0;
     this.emitAcc = 0;
+    this.frontSlot = 0;
   }
 
   resize() {
@@ -335,16 +416,58 @@ export class GpuFlowView {
     if (!wt || steps <= 0) return;
     const gl = this.gl;
     const U = wt.uIn;
-    const seeds = 17;
-    const span = 5 * wt.L;
-    const spacing = Math.max(2.5, wt.L / 6.4);
     this.emitAcc += steps * U;
-    const fresh = [];
-    while (this.emitAcc >= spacing && fresh.length < 2 * NP) {
-      this.emitAcc -= spacing;
-      for (let s = 0; s < seeds; s++) fresh.push(1 + this.emitAcc, wt.y0 - span / 2 + (span * (s + 0.5)) / seeds);
+    if (this.tracerMode === 'fronts') {
+      // Un front complet (FRONT_N particules contiguës) tous les FRONT_DX L.
+      const spacing = FRONT_DX * wt.L;
+      const slots = Math.floor(NP / FRONT_N);
+      const x0 = frontX(wt);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.pTex[this.pCur]);
+      let guard = 0;
+      while (this.emitAcc >= spacing && guard++ < slots) {
+        this.emitAcc -= spacing;
+        const data = new Float32Array(4 * FRONT_N);
+        for (let k = 0; k < FRONT_N; k++) {
+          data[4 * k] = x0 + this.emitAcc;
+          data[4 * k + 1] = frontY(wt, k);
+          data[4 * k + 2] = 1;
+        }
+        this._writeRing(this.frontSlot * FRONT_N, data, FRONT_N);
+        this.frontSlot = (this.frontSlot + 1) % slots;
+      }
+      this.emitAcc = Math.min(this.emitAcc, spacing);
+    } else {
+      const seeds = 17;
+      const span = 5 * wt.L;
+      const spacing = Math.max(2.5, wt.L / 6.4);
+      const fresh = [];
+      while (this.emitAcc >= spacing && fresh.length < 2 * NP) {
+        this.emitAcc -= spacing;
+        for (let s = 0; s < seeds; s++) fresh.push(1 + this.emitAcc, wt.y0 - span / 2 + (span * (s + 0.5)) / seeds);
+      }
+      this.emitAcc = Math.min(this.emitAcc, spacing);
+      this._emitStreak(fresh);
     }
-    this.emitAcc = Math.min(this.emitAcc, spacing);
+    this._advect(steps);
+  }
+
+  /** Écrit n particules à partir de l'indice start (anneau, par segments de lignes). */
+  _writeRing(start, data, n) {
+    const gl = this.gl;
+    let k = 0;
+    while (k < n) {
+      const idx = (start + k) % NP;
+      const x = idx % PW;
+      const y = Math.floor(idx / PW);
+      const len = Math.min(PW - x, n - k);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, len, 1, gl.RGBA, gl.FLOAT, data.subarray(4 * k, 4 * (k + len)));
+      k += len;
+    }
+  }
+
+  _emitStreak(fresh) {
+    const gl = this.gl;
     const n = fresh.length / 2;
     if (n) {
       // Écriture dans l'anneau, par segments de lignes contigus.
@@ -356,20 +479,18 @@ export class GpuFlowView {
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.pTex[this.pCur]);
-      let k = 0;
-      while (k < n) {
-        const idx = (this.pHead + k) % NP;
-        const x = idx % PW;
-        const y = Math.floor(idx / PW);
-        const len = Math.min(PW - x, n - k);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, len, 1, gl.RGBA, gl.FLOAT, data.subarray(4 * k, 4 * (k + len)));
-        k += len;
-      }
+      this._writeRing(this.pHead, data, n);
       this.pHead = (this.pHead + n) % NP;
     }
+  }
 
+  _advect(steps) {
+    const gl = this.gl;
+    const wt = this.wt;
+    const U = wt.uIn;
     this._macros();
-    const nsub = Math.min(64, Math.max(1, Math.ceil((steps * U * 2) / 0.8)));
+    // Sous-pas de ≈ ½ maille à 2U : les traceurs ne sautent pas par-dessus la paroi.
+    const nsub = Math.min(512, Math.max(1, Math.ceil((steps * U * 2) / 0.5)));
     const P = this.progUpdate;
     gl.bindVertexArray(this.vao);
     gl.useProgram(P.p);
@@ -409,7 +530,9 @@ export class GpuFlowView {
     if (!wt) return;
     const gl = this.gl;
     const field = FIELDS[o.field] ?? FIELDS.vort;
-    const { wx, wy, ww, wh } = this.win;
+    const win = this.window();
+    this.win = win;
+    const { wx, wy, ww, wh } = win;
     this._macros();
     gl.bindVertexArray(this.vao);
 
@@ -446,7 +569,39 @@ export class GpuFlowView {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // 3. Traceurs
-    if (o.tracers) {
+    if (o.tracers && this.tracerMode === 'fronts') {
+      P = this.progFronts;
+      gl.useProgram(P.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.pTex[this.pCur]);
+      gl.uniform1i(P.loc.uP, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, wt.lbm.geoTex);
+      gl.uniform1i(P.loc.uGeo, 1);
+      gl.uniform2i(P.loc.uSize, wt.nx, wt.ny);
+      gl.uniform4f(P.loc.uWin, wx, wy, ww, wh);
+      gl.uniform1i(P.loc.uN, FRONT_N);
+      gl.uniform1f(P.loc.uMaxSeg, frontMaxSeg(wt.L));
+      const [r, g, b, a0] = this.tracerRgba;
+      const a = Math.min(1, a0 * 1.4);
+      gl.uniform4f(P.loc.uColor, r * a, g * a, b * a, a);
+      const [r2, g2, b2] = this.accentRgba;
+      gl.uniform4f(P.loc.uColor2, r2 * 0.9, g2 * 0.9, b2 * 0.9, 0.9);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.LINES, 0, Math.floor(NP / FRONT_N) * (FRONT_N - 1) * 2);
+      // Particules en points fins : restent visibles là où le front est rompu.
+      const Q = this.progPoints;
+      gl.useProgram(Q.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.pTex[this.pCur]);
+      gl.uniform1i(Q.loc.uP, 0);
+      gl.uniform4f(Q.loc.uWin, wx, wy, ww, wh);
+      gl.uniform1f(Q.loc.uPointSize, Math.max(1, this.dpr));
+      gl.uniform4f(Q.loc.uColor, r * a0, g * a0, b * a0, a0);
+      gl.drawArrays(gl.POINTS, 0, Math.floor(NP / FRONT_N) * FRONT_N);
+      gl.disable(gl.BLEND);
+    } else if (o.tracers) {
       P = this.progPoints;
       gl.useProgram(P.p);
       gl.activeTexture(gl.TEXTURE0);
@@ -465,14 +620,14 @@ export class GpuFlowView {
     // 4. Calque 2D : maquette, point de réduction, force
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    drawOverlay(ctx, wt, this.win, this.canvas.width, this.canvas.height, this.dpr, this.colors, o.force);
+    drawOverlay(ctx, wt, win, this.canvas.width, this.canvas.height, this.dpr, this.colors, o.force);
   }
 
   dispose() {
     const gl = this.gl;
     [this.scalarTex, this.macroTex, this.lut.diverging, this.lut.sequential, ...this.pTex].forEach((t) => t && gl.deleteTexture(t));
     [this.scalarFbo, this.macroFbo, ...this.pFbo].forEach((f) => f && gl.deleteFramebuffer(f));
-    [this.progMacro, this.progScalar, this.progDisplay, this.progUpdate, this.progPoints].forEach((p) => gl.deleteProgram(p.p));
+    [this.progMacro, this.progScalar, this.progDisplay, this.progUpdate, this.progPoints, this.progFronts].forEach((p) => gl.deleteProgram(p.p));
     gl.deleteVertexArray(this.vao);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }

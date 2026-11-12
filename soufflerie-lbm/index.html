@@ -55,6 +55,17 @@
           <span class="num" id="cb-max">5</span>
         </div>
       </div>
+      <div class="hud hud-mr">
+        <button id="btn-zin" class="icon-btn small" type="button" aria-label="Zoomer" title="Zoomer (molette, pincement)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button id="btn-zout" class="icon-btn small" type="button" aria-label="Dézoomer" title="Dézoomer">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button id="btn-zfit" class="icon-btn small" type="button" aria-label="Revenir au cadrage" title="Revenir au cadrage" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
       <div class="hud hud-br">
         <button id="btn-reset" class="icon-btn" type="button" aria-label="Relancer le calcul">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.3-5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3.5v4.4h4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -182,8 +193,10 @@
         <span class="label" id="lbl-field">Affichage</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-field" id="field-seg"></div>
         <div class="seg" role="radiogroup" aria-label="Cadrage" id="view-seg"></div>
+        <span class="label" id="lbl-tracers">Traceurs</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-tracers" id="tracer-seg"></div>
+        <p class="hint" id="tracer-hint"></p>
         <div class="switches">
-          <label class="switch"><input type="checkbox" id="tracers" checked> Traceurs</label>
           <label class="switch"><input type="checkbox" id="arrow" checked> Force résultante</label>
         </div>
       </div>
