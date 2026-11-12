@@ -596,6 +596,14 @@ GitHub Actions*. L'application est alors servie à
 Tout autre hébergement statique en HTTPS convient (Netlify, Cloudflare
 Pages…) ; le service worker exige HTTPS, sauf sur `localhost`.
 
+## Version native (Rust)
+
+Le dossier [`soufflerie-rs`](../soufflerie-rs) contient un fork natif pour
+ordinateur : même moteur 2D (mêmes résultats à 10⁻³ près), compilé,
+vectorisé et réparti sur tous les cœurs (×14 à ×19 par rapport au moteur
+CPU JavaScript sur 4 cœurs), moteur GPU natif (wgpu), interface graphique
+(egui) et commandes de calcul et de polaires.
+
 ## Pistes
 
 - Raffinement local de maillage près de la maquette (étape B), qui

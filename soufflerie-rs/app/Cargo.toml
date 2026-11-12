@@ -1,0 +1,17 @@
+[package]
+name = "soufflerie"
+description = "Soufflerie de poche, version native : interface graphique et ligne de commande"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["gui", "gpu"]
+gui = ["dep:eframe", "dep:egui_plot"]
+gpu = ["lbm/gpu"]
+
+[dependencies]
+lbm = { path = "../lbm", default-features = false }
+rayon = "1"
+eframe = { version = "0.37", optional = true, features = ["glow", "wgpu"] }
+egui_plot = { version = "0.38", optional = true }
