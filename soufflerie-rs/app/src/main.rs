@@ -23,6 +23,8 @@ use rayon::prelude::*;
 #[cfg(feature = "gui")]
 mod gui;
 #[cfg(feature = "gui")]
+mod launch;
+#[cfg(feature = "gui")]
 mod worker;
 
 fn usage() -> ! {
@@ -38,14 +40,15 @@ fn usage() -> ! {
          \x20         --collision rr|bgk --les auto|on|off --u 0.1\n\
          \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
-         \x20         --mach 0.3 (panel : correction de compressibilité)"
+         \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
     );
     std::process::exit(2)
 }
 
-struct Args {
+pub struct Args {
     cmd: String,
-    opts: HashMap<String, String>,
+    pub opts: HashMap<String, String>,
 }
 
 impl Args {
@@ -74,7 +77,7 @@ impl Args {
         }
     }
 
-    fn config(&self) -> TunnelConfig {
+    pub fn config(&self) -> TunnelConfig {
         let shape = ShapeKind::from_id(&self.get("shape", "cylinder".to_string())).unwrap_or_else(|| usage());
         let naca = Naca::parse(&self.get("naca", "0012".to_string())).unwrap_or_else(|| usage());
         let engine = match self.get("engine", "cpu".to_string()).as_str() {
@@ -468,19 +471,8 @@ fn main() {
         "panel" => cmd_panel(&a),
         "bench" => cmd_bench(&a),
         "" => {
-            // Options sans sous-commande : réglages initiaux de l'interface.
             #[cfg(feature = "gui")]
-            gui::main(gui::Start {
-                cfg: a.opts.keys().any(|k| k != "field" && k != "graph").then(|| {
-                    let mut c = a.config();
-                    if !a.opts.contains_key("l") {
-                        c.l = 32;
-                    }
-                    c
-                }),
-                field: a.opts.get("field").cloned(),
-                graph: a.opts.get("graph").cloned(),
-            });
+            launch::gui(&a);
             #[cfg(not(feature = "gui"))]
             usage();
         }

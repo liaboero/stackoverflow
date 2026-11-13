@@ -134,9 +134,14 @@ vorticity|speed|pressure|eddy` et `--graph history|cp|cf`.
 les transitions, le décollement et le Cp minimal, toutes incidences en
 quelques millisecondes.
 
+L'interface tourne dans un processus enfant surveillé : si un pilote
+graphique la fait planter (souvent sans aucun message), le code d'erreur est
+expliqué et un autre rendu est essayé (Windows : wgpu sur DirectX 12, puis
+OpenGL, puis wgpu avec tous les pilotes ; ailleurs : wgpu puis OpenGL).
+`--rendu glow|dx12|vulkan|wgpu` en impose un.
+
 Linux : l'interface demande `libxkbcommon-x11` et un pilote Vulkan ou
-OpenGL (rendu wgpu, repli OpenGL automatique ; `SOUFFLERIE_RENDU=glow`
-force OpenGL). Sans interface :
+OpenGL. Sans interface :
 `cargo build --release --no-default-features --features gpu`.
 
 ## Structure

@@ -29,13 +29,13 @@ pub struct Start {
     pub graph: Option<String>,
 }
 
-pub fn main(start: Start) {
-    // Rendu wgpu par défaut, OpenGL (glow) en repli ; SOUFFLERIE_RENDU=glow le force.
-    let forced_glow = std::env::var("SOUFFLERIE_RENDU").map(|v| v == "glow").unwrap_or(false);
-    let renderers: &[eframe::Renderer] = if forced_glow {
-        &[eframe::Renderer::Glow]
-    } else {
-        &[eframe::Renderer::Wgpu, eframe::Renderer::Glow]
+/// Ouvre l'interface ; false si aucun rendu n'a pu être créé.
+/// Rendu wgpu par défaut, OpenGL (glow) en repli ; SOUFFLERIE_RENDU=glow|wgpu en impose un.
+pub fn main(start: Start) -> bool {
+    let renderers: &[eframe::Renderer] = match std::env::var("SOUFFLERIE_RENDU").as_deref() {
+        Ok("glow") => &[eframe::Renderer::Glow],
+        Ok("wgpu") => &[eframe::Renderer::Wgpu],
+        _ => &[eframe::Renderer::Wgpu, eframe::Renderer::Glow],
     };
     for (k, &renderer) in renderers.iter().enumerate() {
         let opts = eframe::NativeOptions {
@@ -52,11 +52,12 @@ pub fn main(start: Start) {
             opts,
             Box::new(move |cc| Ok(Box::new(App::new(cc, st)))),
         ) {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(e) if k + 1 < renderers.len() => eprintln!("Rendu {renderer:?} indisponible ({e}) : essai suivant."),
-            Err(e) => eprintln!("Interface graphique indisponible : {e}\nUtilisez les commandes run, polar ou bench."),
+            Err(e) => eprintln!("Rendu {renderer:?} indisponible : {e}"),
         }
     }
+    false
 }
 
 struct App {
@@ -82,6 +83,13 @@ enum Bottom {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start: Start) -> App {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        match &cc.wgpu_render_state {
+            Some(rs) => {
+                let i = rs.adapter.get_info();
+                eprintln!("Fenêtre ouverte : rendu wgpu, {} ({:?}).", i.name, i.backend);
+            }
+            None => eprintln!("Fenêtre ouverte : rendu OpenGL."),
+        }
         let cfg = start.cfg.unwrap_or(TunnelConfig {
             l: 32,
             re: 1000.0,
