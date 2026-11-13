@@ -83,6 +83,8 @@ valeurs à 10⁻³ près.
 | Panneaux, NACA 0012 non visqueux, α = 4° | Cz = 0,4797 | 0,4797 |
 | Panneaux + couche limite, Re = 6·10⁶ turbulent : α = 0, α = 10° | Cx = 0,00816 ; Cz = 1,168, Cx = 0,01285 | identiques |
 | Cylindre, Re = 40 : Cp au point d'arrêt | 1,145 | (≈ 1,14 publié) |
+| Aile finie A = 6, profil 2π, α = 4° | CL = 0,29376, e = 0,9955 | identiques |
+| Aile NACA 2412, A = 8, λ = 0,5, Re = 10⁶, α = 4° / 12° / 16° | CL = 0,5056 / 1,1236 / 1,3659 | identiques |
 
 Le moteur GPU donne les mêmes efforts que le processeur avec Spalart–Allmaras
 (écart ≤ 7·10⁻⁵ sur un profil à Re = 10⁶ et un cylindre tournant à 10⁵).
@@ -94,7 +96,13 @@ qualitatifs à ces résolutions, et la traînée LBM d'un profil mince reste
 approximative : la référence « panneaux + couche limite » est la bonne
 valeur de traînée en écoulement attaché.
 
-Pas encore porté : aile finie, soufflerie 3D, balayage automatique dans
+L'aile finie (onglet « Aile finie », commande `wing`) reprend la surface
+portante de Weissinger non linéaire de l'application web : polaires de
+section par la méthode des panneaux au Reynolds local (emplanture et bout,
+interpolées en log Re), décambrage, traînée induite dans le plan de Trefftz ;
+flèche, dièdre, effilement et vrillage. Une polaire complète prend 0,3 s.
+
+Pas encore porté : soufflerie 3D, balayage automatique dans
 l'interface (les commandes `polar` et `panel` le remplacent), unités
 physiques (fluide, corde, vitesse) et Mach réel dans l'interface.
 
@@ -109,6 +117,9 @@ cargo run --release -- run --shape naca --naca 2412 --alpha 6 --re 1000 --l 32
 cargo run --release -- run --shape naca --naca 0012 --alpha 4 --re 1e6 --l 32 --turb sa
 cargo run --release -- polar --shape naca --naca 0012 --re 2000 --l 24 --alpha -4:12:2 > polaire.csv
 cargo run --release -- panel --naca 2412 --re 3e6 --alpha -4:18:1 > panneaux.csv   # instantané
+cargo run --release -- wing --naca 2412 --ar 8 --taper 0.5 --re 1e6 --alpha -6:20:1 > aile.csv
+cargo run --release -- wing --alpha 12 --span 1      # répartition en envergure
+cargo run --release -- --tab wing       # interface, onglet aile finie
 cargo run --release -- bench --l 32     # vitesse des moteurs
 cargo test --release                    # validation
 ```
@@ -134,6 +145,17 @@ vorticity|speed|pressure|eddy` et `--graph history|cp|cf`.
 les transitions, le décollement et le Cp minimal, toutes incidences en
 quelques millisecondes.
 
+`wing` : `--naca`, `--ar` (allongement), `--taper` (effilement), `--sweep`
+(flèche du quart de corde, °), `--dihedral`, `--twist` (vrillage en bout, °),
+`--re` (rapporté à la corde moyenne), `--transition free|turb`, `--strips 40`
+(bandes par demi-aile) ; CL, CD, CDi, CDp, Cm, Oswald e et finesse par
+incidence, ou avec `--span 1` le Cl local, le Cl max et la charge le long de
+l'envergure.
+
+Windows avec la chaîne GNU de Rust : si la compilation réclame `dlltool`,
+mettre dans le PATH un dossier contenant `dlltool.exe` et `as.exe` de MinGW
+(binutils), sans `gcc`, pour que Rust garde son propre éditeur de liens.
+
 L'interface tourne dans un processus enfant surveillé : si un pilote
 graphique la fait planter (souvent sans aucun message), le code d'erreur est
 expliqué et un autre rendu est essayé (Windows : wgpu sur DirectX 12, puis
@@ -155,21 +177,22 @@ soufflerie-rs/
 │   ├── src/sa.rs       Spalart–Allmaras, loi de paroi de Spalding
 │   ├── src/panel.rs    méthode des panneaux, couche limite intégrale, Kirchhoff
 │   ├── src/wall.rs     distributions pariétales Cp, Cf
+│   ├── src/wing.rs     aile finie : surface portante non linéaire, Trefftz, polaires de section
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
-│   └── tests/          validation, panneaux, comparaison GPU/CPU
+│   └── tests/          validation, panneaux, aile finie, comparaison GPU/CPU
 └── app/                application : interface (egui) et commandes
-    ├── src/main.rs     ligne de commande (run, polar, panel, bench)
-    ├── src/gui.rs      interface graphique
+    ├── src/main.rs     ligne de commande (run, polar, panel, wing, bench)
+    ├── src/gui.rs      interface graphique, onglets
+    ├── src/wing_tab.rs onglet aile finie (vue 3D, envergure, polaire)
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
 ## Pistes
 
-- Porter l'aile finie (la méthode des panneaux, déjà portée, fournit les
-  polaires de section) et la 3D (le solveur WGSL 3D de l'application web se
+- Porter la soufflerie 3D (le solveur WGSL 3D de l'application web se
   transpose presque tel quel).
 - Stockage en demi-précision et propagation en place sur GPU (deux à quatre
   fois moins de mémoire), raffinement local de maillage.
