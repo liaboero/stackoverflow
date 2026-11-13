@@ -12,6 +12,7 @@ use lbm::tunnel::RE_PANEL_MIN;
 use lbm::wall::WallAxis;
 use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence};
 
+use crate::wing_tab::WingTab;
 use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers, BODY_RGB};
 
 const RES: [usize; 9] = [12, 16, 24, 32, 48, 64, 96, 128, 192];
@@ -27,6 +28,8 @@ pub struct Start {
     pub field: Option<String>,
     /// history | cp | cf
     pub graph: Option<String>,
+    /// Onglet initial : tunnel | wing
+    pub tab: Option<String>,
 }
 
 /// Ouvre l'interface ; false si aucun rendu n'a pu être créé.
@@ -70,6 +73,17 @@ struct App {
     view: Option<(Pos2, f32)>,
     show_force: bool,
     bottom: Bottom,
+    tab: Tab,
+    wing: WingTab,
+    /// État de marche de la soufflerie 2D avant le passage à l'aile finie.
+    resume_tunnel: bool,
+}
+
+/// Onglet affiché.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Tunnel,
+    Wing,
 }
 
 /// Graphique du bas.
@@ -113,11 +127,17 @@ impl App {
             _ => Bottom::History,
         };
         let naca_text = cfg.params.naca.code();
+        let tab = if start.tab.as_deref() == Some("wing") {
+            Tab::Wing
+        } else {
+            Tab::Tunnel
+        };
         let settings = Settings {
             cfg,
             field,
             tracers: Tracers::Fronts,
-            running: true,
+            // Sur l'onglet aile finie, la soufflerie 2D attend.
+            running: tab == Tab::Tunnel,
         };
         let shared = Arc::new(Mutex::new(Shared {
             settings: settings.clone(),
@@ -135,7 +155,25 @@ impl App {
             view: None,
             show_force: true,
             bottom,
+            tab,
+            wing: WingTab::new(),
+            resume_tunnel: true,
         }
+    }
+
+    /// Change d'onglet ; la soufflerie 2D est mise en pause pendant l'aile finie.
+    fn set_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        if tab == Tab::Wing {
+            self.resume_tunnel = self.settings.running;
+            self.settings.running = false;
+        } else {
+            self.settings.running = self.resume_tunnel;
+        }
+        self.tab = tab;
+        self.push(|_| {});
     }
 
     /// Transmet les réglages et une demande au fil de calcul.
@@ -784,6 +822,18 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let mut tab = self.tab;
+        egui::Panel::top("onglets").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut tab, Tab::Tunnel, "Soufflerie 2D");
+                ui.selectable_value(&mut tab, Tab::Wing, "Aile finie");
+            });
+        });
+        self.set_tab(tab);
+        if self.tab == Tab::Wing {
+            self.wing.ui(ui);
+            return;
+        }
         let fr = self.shared.lock().unwrap().frame.clone();
         egui::Panel::left("reglages")
             .default_size(340.0)
@@ -800,7 +850,7 @@ impl eframe::App for App {
 }
 
 /// Reynolds lisible : 20 000, 2·10⁵, 10⁶…
-fn fmt_re(v: f64) -> String {
+pub(crate) fn fmt_re(v: f64) -> String {
     if v < 1e5 {
         let r = if v < 100.0 {
             v.round()

@@ -5,6 +5,7 @@
 //!   soufflerie polar  --alpha a:b:pas    polaire (incidences calculées en parallèle), CSV
 //!   soufflerie panel  --alpha a:b:pas    polaire instantanée : panneaux + couche limite, CSV
 //!   soufflerie bench  [--l 32]           vitesse des moteurs (millions de mailles par seconde)
+//!   soufflerie wing   --alpha a:b:pas    aile finie : surface portante + polaires 2D, CSV
 //!
 //! Options : --shape cylinder|square|ellipse|plate|naca|triangle  --naca 2412
 //!           --alpha 4  --re 1000  --l 32  --t 40  --avg 15  --engine cpu|gpu
@@ -17,6 +18,7 @@ use std::time::Instant;
 use lbm::cpu::{Collision, LesMode};
 use lbm::panel::{compressible_correction, panel_solve, section_coefficients, PanelOptions, PanelResult, PanelShape};
 use lbm::stats::{analyze, Analysis};
+use lbm::wing::{wing_polar, PolarTable, Sections, Wing, WingParams};
 use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence, WindTunnel};
 use rayon::prelude::*;
 
@@ -24,6 +26,8 @@ use rayon::prelude::*;
 mod gui;
 #[cfg(feature = "gui")]
 mod launch;
+#[cfg(feature = "gui")]
+mod wing_tab;
 #[cfg(feature = "gui")]
 mod worker;
 
@@ -34,7 +38,9 @@ fn usage() -> ! {
          soufflerie run   [options]       un calcul\n\
          soufflerie polar --alpha -4:12:2 [options]   polaire, CSV\n\
          soufflerie panel --alpha -4:16:1 [options]   polaire panneaux + couche limite, CSV\n\
-         soufflerie bench [--l 32] [--steps 400]       vitesse des moteurs\n\n\
+         soufflerie bench [--l 32] [--steps 400]       vitesse des moteurs\n\
+         soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
+         \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
          \x20         --collision rr|bgk --les auto|on|off --u 0.1\n\
@@ -348,6 +354,87 @@ fn cmd_panel(a: &Args) {
     }
 }
 
+/// Géométrie de l'aile finie lue sur la ligne de commande.
+fn wing_params(a: &Args) -> WingParams {
+    let d = WingParams::default();
+    WingParams {
+        ar: a.get("ar", d.ar),
+        taper: a.get("taper", d.taper),
+        sweep: a.get("sweep", d.sweep),
+        dihedral: a.get("dihedral", d.dihedral),
+        twist: a.get("twist", d.twist),
+        n: a.get("strips", d.n),
+    }
+}
+
+fn cmd_wing(a: &Args) {
+    let p = wing_params(a);
+    if !(p.ar >= 1.0 && p.ar <= 40.0 && p.taper > 0.0 && p.taper <= 1.0 && p.n >= 2) {
+        eprintln!("Géométrie invalide : 1 ≤ --ar ≤ 40, 0 < --taper ≤ 1, --strips ≥ 2.");
+        std::process::exit(2);
+    }
+    let naca = Naca::parse(&a.get("naca", "2412".to_string())).unwrap_or_else(|| usage());
+    let re = a.get("re", 1e6f64);
+    let tripped = a.get("transition", "free".to_string()) == "turb";
+    let alphas = alpha_range(a, "-6:20:1");
+    let t0 = Instant::now();
+    let w = Wing::new(p);
+    let (rr, rt) = Sections::reynolds(&w, re);
+    let sec = Sections::new(
+        &w,
+        re,
+        PolarTable::naca(naca, rr, tripped),
+        rt.map(|r| PolarTable::naca(naca, r, tripped)),
+    );
+    eprintln!(
+        "Aile NACA {} · A = {} · λ = {} · flèche {}° · dièdre {}° · vrillage {}° · Re = {re} (corde moyenne) · transition {}",
+        naca.code(),
+        p.ar,
+        p.taper,
+        p.sweep,
+        p.dihedral,
+        p.twist,
+        if tripped { "au bord d'attaque" } else { "libre" }
+    );
+    let polar = wing_polar(&w, &sec, &alphas);
+    if a.opts.contains_key("span") {
+        // Répartition en envergure à une incidence.
+        let r = polar.last().unwrap();
+        println!("eta,corde,Cl,Cl_max,cCl,alpha_eff_deg,Cd");
+        for (s, cm) in r.strips.iter().zip(&sec.clmax) {
+            println!(
+                "{:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.5}",
+                s.eta, s.c, s.cl, cm, s.ccl, s.alpha, s.cd
+            );
+        }
+        eprintln!(
+            "α = {}° : CL = {:.4}, CD = {:.5}, e = {:.3}",
+            r.alpha, r.cl, r.cd, r.e
+        );
+    } else {
+        println!("alpha_deg,CL,CD,CDi,CDp,Cm,e,L_D,converge");
+        for r in &polar {
+            println!(
+                "{},{:.4},{:.5},{:.5},{:.5},{:.4},{},{:.2},{}",
+                r.alpha,
+                r.cl,
+                r.cd,
+                r.cdi,
+                r.cdv,
+                r.cm,
+                if r.cl.abs() > 0.05 && r.e.is_finite() {
+                    format!("{:.3}", r.e)
+                } else {
+                    String::new()
+                },
+                r.cl / r.cd,
+                r.converged as u8
+            );
+        }
+    }
+    eprintln!("{:.2} s", t0.elapsed().as_secs_f64());
+}
+
 fn cmd_polar(a: &Args) {
     let alphas = alpha_range(a, "-4:12:2");
     let base = a.config();
@@ -470,6 +557,7 @@ fn main() {
         "polar" => cmd_polar(&a),
         "panel" => cmd_panel(&a),
         "bench" => cmd_bench(&a),
+        "wing" => cmd_wing(&a),
         "" => {
             #[cfg(feature = "gui")]
             launch::gui(&a);

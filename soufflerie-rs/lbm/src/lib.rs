@@ -28,6 +28,7 @@ pub mod shapes;
 pub mod stats;
 pub mod tunnel;
 pub mod wall;
+pub mod wing;
 
 pub use shapes::{Naca, ShapeKind, ShapeParams};
 pub use tunnel::{Coefficients, EngineKind, Transition, TunnelConfig, Turbulence, WindTunnel};
