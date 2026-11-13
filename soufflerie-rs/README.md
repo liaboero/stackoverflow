@@ -1,8 +1,9 @@
 # Soufflerie de poche — version native (Rust)
 
 Fork natif de l'application web [`soufflerie-lbm`](../soufflerie-lbm) : même
-soufflerie numérique 2D Lattice Boltzmann (D2Q9), en Rust, pour ordinateur
-(Linux, Windows, macOS). Interface graphique et ligne de commande.
+soufflerie numérique 2D Lattice Boltzmann (D2Q9), aile finie et soufflerie
+3D (D3Q19 sur GPU), en Rust, pour ordinateur (Linux, Windows, macOS).
+Interface graphique et ligne de commande.
 
 ![Interface : NACA 2412 à 6°, Re = 1000, fronts de traceurs](capture.png)
 
@@ -85,6 +86,8 @@ valeurs à 10⁻³ près.
 | Cylindre, Re = 40 : Cp au point d'arrêt | 1,145 | (≈ 1,14 publié) |
 | Aile finie A = 6, profil 2π, α = 4° | CL = 0,29376, e = 0,9955 | identiques |
 | Aile NACA 2412, A = 8, λ = 0,5, Re = 10⁶, α = 4° / 12° / 16° | CL = 0,5056 / 1,1236 / 1,3659 | identiques |
+| 3D, sphère Re = 100, D = 8 / 12 mailles | Cx = 1,259 / 1,175 | 1,26 / 1,18 |
+| 3D, sphère Re = 100, D = 12, simple / demi-précision | Cx = 1,178 / 1,175 | écart 0,3 % |
 
 Le moteur GPU donne les mêmes efforts que le processeur avec Spalart–Allmaras
 (écart ≤ 7·10⁻⁵ sur un profil à Re = 10⁶ et un cylindre tournant à 10⁵).
@@ -102,7 +105,22 @@ section par la méthode des panneaux au Reynolds local (emplanture et bout,
 interpolées en log Re), décambrage, traînée induite dans le plan de Trefftz ;
 flèche, dièdre, effilement et vrillage. Une polaire complète prend 0,3 s.
 
-Pas encore porté : soufflerie 3D, balayage automatique dans
+La soufflerie 3D (onglet « Soufflerie 3D », commande `run3d`) reprend le
+solveur D3Q19 WebGPU de l'application web : le WGSL est engendré à
+l'identique (propagation et collision fusionnées, collision régularisée,
+populations en demi-précision, rebond de Bouzidi, efforts accumulés sur le
+GPU) ; sphère, cube, cylindre, aile NACA 0012 d'allongement 4, de 8 à
+32 mailles par longueur de référence. Sur une GTX 1070 non bridée : environ
+850 millions de mailles par seconde (sphère, 0,75 M mailles), soit 30 t* en
+5 s. Le calcul 3D préfère Vulkan (ou Metal) : sous DirectX 12, ce gros shader
+est environ 100 fois plus lent ; `SOUFFLERIE_GPU3D=dx12|vulkan|gl` impose un
+pilote. Les soumissions sont courtes (≈ 3·10⁷ mises à jour de maille) pour
+ne pas déclencher la réinitialisation du pilote Windows (2 s). Affichage :
+plan de coupe (vitesse, vorticité normale au plan, critère Q) calculé sur le
+GPU ; les isosurfaces 3D par lancer de rayons de la version web ne sont pas
+portées.
+
+Pas encore porté : isosurfaces et vue 3D de la soufflerie 3D, balayage automatique dans
 l'interface (les commandes `polar` et `panel` le remplacent), unités
 physiques (fluide, corde, vitesse) et Mach réel dans l'interface.
 
@@ -120,6 +138,8 @@ cargo run --release -- panel --naca 2412 --re 3e6 --alpha -4:18:1 > panneaux.csv
 cargo run --release -- wing --naca 2412 --ar 8 --taper 0.5 --re 1e6 --alpha -6:20:1 > aile.csv
 cargo run --release -- wing --alpha 12 --span 1      # répartition en envergure
 cargo run --release -- --tab wing       # interface, onglet aile finie
+cargo run --release -- run3d --shape sphere --re 300 --l 16 --t 40 --coupe sillage.ppm
+cargo run --release -- --tab 3d         # interface, onglet soufflerie 3D
 cargo run --release -- bench --l 32     # vitesse des moteurs
 cargo test --release                    # validation
 ```
@@ -152,6 +172,13 @@ quelques millisecondes.
 incidence, ou avec `--span 1` le Cl local, le Cl max et la charge le long de
 l'envergure.
 
+`run3d` : `--shape sphere|cube|cylinder|wing`, `--re` (10 à 2000 environ),
+`--l 12` (mailles par longueur de référence), `--alpha` (cube, aile), `--t 40`
+et `--avg 15` (temps convectifs), `--fp32 1` (simple précision), `--coupe
+fichier.ppm` (vorticité ωy dans le plan de symétrie). Affiche Cx, Cz, Cy
+(latéral), le Strouhal si l'écoulement est périodique, et la référence de
+Schiller–Naumann pour la sphère.
+
 Windows avec la chaîne GNU de Rust : si la compilation réclame `dlltool`,
 mettre dans le PATH un dossier contenant `dlltool.exe` et `as.exe` de MinGW
 (binutils), sans `gcc`, pour que Rust garde son propre éditeur de liens.
@@ -178,22 +205,25 @@ soufflerie-rs/
 │   ├── src/panel.rs    méthode des panneaux, couche limite intégrale, Kirchhoff
 │   ├── src/wall.rs     distributions pariétales Cp, Cf
 │   ├── src/wing.rs     aile finie : surface portante non linéaire, Trefftz, polaires de section
+│   ├── src/gpu3d.rs    soufflerie 3D : D3Q19 sur GPU (WGSL engendré), voxelisation, coupes
+│   ├── src/bodies3d.rs maquettes 3D (sphère, cube, cylindre, aile)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
-│   └── tests/          validation, panneaux, aile finie, comparaison GPU/CPU
+│   └── tests/          validation, panneaux, aile finie, 3D, comparaison GPU/CPU
 └── app/                application : interface (egui) et commandes
-    ├── src/main.rs     ligne de commande (run, polar, panel, wing, bench)
+    ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, bench)
     ├── src/gui.rs      interface graphique, onglets
     ├── src/wing_tab.rs onglet aile finie (vue 3D, envergure, polaire)
+    ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, coupe, efforts)
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
 ## Pistes
 
-- Porter la soufflerie 3D (le solveur WGSL 3D de l'application web se
-  transpose presque tel quel).
+- Soufflerie 3D : vue 3D orbitale et isosurfaces du critère Q (lancer de
+  rayons du `render3d.js` web), en rendu wgpu dans la fenêtre.
 - Stockage en demi-précision et propagation en place sur GPU (deux à quatre
   fois moins de mémoire), raffinement local de maillage.
 - Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter

@@ -12,6 +12,7 @@ use lbm::tunnel::RE_PANEL_MIN;
 use lbm::wall::WallAxis;
 use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence};
 
+use crate::tab3d::Tab3D;
 use crate::wing_tab::WingTab;
 use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers, BODY_RGB};
 
@@ -75,7 +76,8 @@ struct App {
     bottom: Bottom,
     tab: Tab,
     wing: WingTab,
-    /// État de marche de la soufflerie 2D avant le passage à l'aile finie.
+    tab3d: Tab3D,
+    /// État de marche de la soufflerie 2D avant le passage à un autre onglet.
     resume_tunnel: bool,
 }
 
@@ -84,6 +86,7 @@ struct App {
 enum Tab {
     Tunnel,
     Wing,
+    Tunnel3D,
 }
 
 /// Graphique du bas.
@@ -127,16 +130,16 @@ impl App {
             _ => Bottom::History,
         };
         let naca_text = cfg.params.naca.code();
-        let tab = if start.tab.as_deref() == Some("wing") {
-            Tab::Wing
-        } else {
-            Tab::Tunnel
+        let tab = match start.tab.as_deref() {
+            Some("wing") => Tab::Wing,
+            Some("3d") => Tab::Tunnel3D,
+            _ => Tab::Tunnel,
         };
         let settings = Settings {
             cfg,
             field,
             tracers: Tracers::Fronts,
-            // Sur l'onglet aile finie, la soufflerie 2D attend.
+            // Sur les autres onglets, la soufflerie 2D attend.
             running: tab == Tab::Tunnel,
         };
         let shared = Arc::new(Mutex::new(Shared {
@@ -146,6 +149,10 @@ impl App {
         }));
         let ctx = cc.egui_ctx.clone();
         worker::spawn(shared.clone(), move || ctx.request_repaint());
+        let mut tab3d = Tab3D::new();
+        if tab == Tab::Tunnel3D {
+            tab3d.set_active(true, &cc.egui_ctx);
+        }
         App {
             shared,
             settings,
@@ -157,21 +164,23 @@ impl App {
             bottom,
             tab,
             wing: WingTab::new(),
+            tab3d,
             resume_tunnel: true,
         }
     }
 
-    /// Change d'onglet ; la soufflerie 2D est mise en pause pendant l'aile finie.
-    fn set_tab(&mut self, tab: Tab) {
+    /// Change d'onglet ; seul le calcul de l'onglet affiché tourne.
+    fn set_tab(&mut self, tab: Tab, ctx: &egui::Context) {
         if tab == self.tab {
             return;
         }
-        if tab == Tab::Wing {
+        if self.tab == Tab::Tunnel {
             self.resume_tunnel = self.settings.running;
             self.settings.running = false;
-        } else {
+        } else if tab == Tab::Tunnel {
             self.settings.running = self.resume_tunnel;
         }
+        self.tab3d.set_active(tab == Tab::Tunnel3D, ctx);
         self.tab = tab;
         self.push(|_| {});
     }
@@ -827,12 +836,15 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, Tab::Tunnel, "Soufflerie 2D");
                 ui.selectable_value(&mut tab, Tab::Wing, "Aile finie");
+                ui.selectable_value(&mut tab, Tab::Tunnel3D, "Soufflerie 3D");
             });
         });
-        self.set_tab(tab);
-        if self.tab == Tab::Wing {
-            self.wing.ui(ui);
-            return;
+        let ctx = ui.ctx().clone();
+        self.set_tab(tab, &ctx);
+        match self.tab {
+            Tab::Wing => return self.wing.ui(ui),
+            Tab::Tunnel3D => return self.tab3d.ui(ui),
+            Tab::Tunnel => {}
         }
         let fr = self.shared.lock().unwrap().frame.clone();
         egui::Panel::left("reglages")

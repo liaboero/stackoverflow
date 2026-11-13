@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["gui", "gpu"]
-gui = ["dep:eframe", "dep:egui_plot"]
+gui = ["dep:eframe", "dep:egui_plot", "gpu"]
 gpu = ["lbm/gpu"]
 
 [dependencies]

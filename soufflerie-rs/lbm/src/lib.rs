@@ -17,11 +17,14 @@
 // `!(a > 0.0)` : traite aussi NaN comme invalide.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod bodies3d;
 pub mod cpu;
 pub mod d2q9;
 pub mod geometry;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "gpu")]
+pub mod gpu3d;
 pub mod panel;
 pub mod sa;
 pub mod shapes;

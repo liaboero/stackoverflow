@@ -6,6 +6,7 @@
 //!   soufflerie panel  --alpha a:b:pas    polaire instantanée : panneaux + couche limite, CSV
 //!   soufflerie bench  [--l 32]           vitesse des moteurs (millions de mailles par seconde)
 //!   soufflerie wing   --alpha a:b:pas    aile finie : surface portante + polaires 2D, CSV
+//!   soufflerie run3d  [options]          soufflerie 3D D3Q19 sur GPU : efforts moyens
 //!
 //! Options : --shape cylinder|square|ellipse|plate|naca|triangle  --naca 2412
 //!           --alpha 4  --re 1000  --l 32  --t 40  --avg 15  --engine cpu|gpu
@@ -29,6 +30,8 @@ mod launch;
 #[cfg(feature = "gui")]
 mod wing_tab;
 #[cfg(feature = "gui")]
+mod tab3d;
+#[cfg(feature = "gui")]
 mod worker;
 
 fn usage() -> ! {
@@ -40,6 +43,8 @@ fn usage() -> ! {
          soufflerie panel --alpha -4:16:1 [options]   polaire panneaux + couche limite, CSV\n\
          soufflerie bench [--l 32] [--steps 400]       vitesse des moteurs\n\
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
+         soufflerie run3d --shape sphere|cube|cylinder|wing --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
+         \x20                                  soufflerie 3D (D3Q19, GPU)\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
@@ -435,6 +440,135 @@ fn cmd_wing(a: &Args) {
     eprintln!("{:.2} s", t0.elapsed().as_secs_f64());
 }
 
+/// Coefficients de référence 3D : Schiller–Naumann et Clift pour la sphère.
+pub fn sphere_cd(re: f64) -> f64 {
+    24.0 / re * (1.0 + 0.15 * re.powf(0.687)) + 0.42 / (1.0 + 42500.0 * re.powf(-1.16))
+}
+
+#[cfg(feature = "gpu")]
+fn cmd_run3d(a: &Args) {
+    use lbm::bodies3d::{Body3D, Shape3D};
+    use lbm::cpu::Ramp;
+    use lbm::gpu3d::Gpu3D;
+    const U: f32 = 0.1;
+    const RAMP_T: f64 = 4.0;
+    let shape = Shape3D::from_id(&a.get("shape", "sphere".to_string())).unwrap_or_else(|| {
+        eprintln!("--shape sphere|cube|cylinder|wing");
+        std::process::exit(2)
+    });
+    let l = a.get("l", 12usize);
+    let re = a.get("re", 100.0f64);
+    let t_end = a.get("t", 40.0f64);
+    let avg = a.get("avg", 15.0f64);
+    let fp16 = a.get("fp32", 0u8) == 0;
+    let body = Body3D::new(shape, l, a.get("alpha", 0.0f64));
+    let nu = U as f64 * l as f64 / re;
+    let t0 = Instant::now();
+    let mut sim = match Gpu3D::new(&body, nu, U, fp16) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Calcul 3D impossible : {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!(
+        "{} · Re = {re} · L = {l} mailles ({}) · grille {}×{}×{} = {:.2} M mailles · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {}",
+        shape.label(),
+        shape.reference(),
+        sim.nx,
+        sim.ny,
+        sim.nz,
+        sim.n as f64 / 1e6,
+        sim.wall_count,
+        sim.tau0,
+        if sim.les { "active" } else { "inactive" },
+        if fp16 { "demi-précision" } else { "simple précision" },
+        sim.adapter_name()
+    );
+    let spt = l as f64 / U as f64;
+    let ramp = Ramp {
+        steps: (RAMP_T * spt).round() as u64,
+        u: U,
+    };
+    let q = 0.5 * (U as f64).powi(2) * body.area;
+    let chunk = (0.25 * spt).round().max(1.0) as usize;
+    let total = (t_end * spt).round() as u64;
+    let (mut ts, mut cx, mut cz, mut cy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let t_run = Instant::now();
+    let mut next_print = 5.0;
+    while sim.time < total {
+        sim.run(chunk, &ramp);
+        let f = sim.take_forces();
+        if sim.lost {
+            eprintln!("Le GPU ne répond plus à t* = {:.1} (pilote réinitialisé ?)", sim.time as f64 / spt);
+            std::process::exit(1);
+        }
+        if !sim.is_finite(&f) {
+            eprintln!("Divergence à t* = {:.1}", sim.time as f64 / spt);
+            std::process::exit(1);
+        }
+        let t = sim.time as f64 / spt;
+        ts.push(t);
+        cx.push(f.fx / q);
+        cz.push(f.fz / q);
+        cy.push(f.fy / q);
+        if t >= next_print {
+            eprintln!("  t* = {t:5.1}  Cx = {:8.4}  Cz = {:8.4}  Cy = {:8.4}", f.fx / q, f.fz / q, f.fy / q);
+            next_print += 5.0;
+        }
+    }
+    let secs = t_run.elapsed().as_secs_f64();
+    let from = ts.iter().position(|&t| t >= t_end - avg).unwrap_or(0);
+    let r = analyze(&ts[from..], &cx[from..], &cz[from..], &cy[from..]);
+    println!(
+        "Cx = {:.4}  Cz = {:.4}  Cy = {:.4}{}",
+        r.cx,
+        r.cz,
+        r.cm,
+        if r.periodic {
+            format!("  St = {:.4}  Cz' = ±{:.4}", r.st, r.cz_amp)
+        } else {
+            String::new()
+        }
+    );
+    if shape == Shape3D::Sphere {
+        println!("Référence sphère (Schiller–Naumann, Clift) : Cx ≈ {:.3}", sphere_cd(re));
+    }
+    // Coupe longitudinale de la vorticité ωy au centre, en image PPM.
+    if let Some(path) = a.opts.get("coupe") {
+        use lbm::gpu3d::SliceField;
+        let s = sim.slice(1, body.center[1].round() as usize, SliceField::Vorticity, l as f64);
+        let mut img = format!("P6 {} {} 255\n", s.w, s.h).into_bytes();
+        for j in (0..s.h).rev() {
+            for i in 0..s.w {
+                let v = s.data[i + s.w * j];
+                let c = if v > 1e29 {
+                    [0x24, 0x31, 0x3a]
+                } else {
+                    let t = (v / 4.0).clamp(-1.0, 1.0);
+                    let k = |a: f32, b: f32| (a + (b - a) * t.abs()) as u8;
+                    if t >= 0.0 {
+                        [k(243.0, 140.0), k(246.0, 36.0), k(247.0, 16.0)]
+                    } else {
+                        [k(243.0, 18.0), k(246.0, 63.0), k(247.0, 102.0)]
+                    }
+                };
+                img.extend_from_slice(&c);
+            }
+        }
+        match std::fs::write(path, img) {
+            Ok(()) => eprintln!("Coupe ωy écrite dans {path}"),
+            Err(e) => eprintln!("Écriture de {path} impossible : {e}"),
+        }
+    }
+    println!(
+        "{:.0} millions de mailles par seconde · {:.1} s (dont préparation {:.1} s)",
+        sim.n as f64 * sim.time as f64 / secs / 1e6,
+        t0.elapsed().as_secs_f64(),
+        t0.elapsed().as_secs_f64() - secs
+    );
+}
+
 fn cmd_polar(a: &Args) {
     let alphas = alpha_range(a, "-4:12:2");
     let base = a.config();
@@ -558,6 +692,8 @@ fn main() {
         "panel" => cmd_panel(&a),
         "bench" => cmd_bench(&a),
         "wing" => cmd_wing(&a),
+        #[cfg(feature = "gpu")]
+        "run3d" => cmd_run3d(&a),
         "" => {
             #[cfg(feature = "gui")]
             launch::gui(&a);
