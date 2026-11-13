@@ -30,6 +30,8 @@ mod launch;
 #[cfg(feature = "gui")]
 mod wing_tab;
 #[cfg(feature = "gui")]
+mod sweep;
+#[cfg(feature = "gui")]
 mod tab3d;
 #[cfg(feature = "gui")]
 mod worker;

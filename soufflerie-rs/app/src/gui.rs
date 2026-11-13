@@ -12,6 +12,7 @@ use lbm::tunnel::RE_PANEL_MIN;
 use lbm::wall::WallAxis;
 use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence};
 
+use crate::sweep::{Sweep, SweepVar};
 use crate::tab3d::Tab3D;
 use crate::wing_tab::WingTab;
 use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers, BODY_RGB};
@@ -77,6 +78,11 @@ struct App {
     tab: Tab,
     wing: WingTab,
     tab3d: Tab3D,
+    /// Polaire automatique et points enregistrés.
+    sweep: Sweep,
+    /// Échelle physique : fluide et longueur de référence (m).
+    fluid: Fluid,
+    chord: f64,
     /// État de marche de la soufflerie 2D avant le passage à un autre onglet.
     resume_tunnel: bool,
 }
@@ -95,6 +101,62 @@ enum Bottom {
     History,
     Cp,
     Cf,
+    Polar,
+}
+
+/// Fluide de l'échelle physique.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fluid {
+    Air,
+    Water,
+}
+
+impl Fluid {
+    fn label(self) -> &'static str {
+        match self {
+            Fluid::Air => "Air 15 °C",
+            Fluid::Water => "Eau 20 °C",
+        }
+    }
+    /// Viscosité cinématique (m²/s) et masse volumique (kg/m³).
+    fn props(self) -> (f64, f64) {
+        match self {
+            Fluid::Air => (1.46e-5, 1.225),
+            Fluid::Water => (1.0e-6, 998.0),
+        }
+    }
+}
+
+/// Nombre lisible à trois chiffres significatifs.
+fn sig3(v: f64) -> String {
+    if !v.is_finite() {
+        return "—".into();
+    }
+    let a = v.abs();
+    if a >= 1e4 || (a > 0.0 && a < 1e-3) {
+        return format!("{v:.2e}").replace('e', "·10^");
+    }
+    let d = if a >= 100.0 {
+        0
+    } else if a >= 10.0 {
+        1
+    } else {
+        2
+    };
+    format!("{v:.d$}").replace('.', ",")
+}
+
+/// Durée lisible.
+fn duration(sec: f64) -> String {
+    if !sec.is_finite() {
+        "—".into()
+    } else if sec < 60.0 {
+        format!("{} s", sig3(sec))
+    } else if sec < 3600.0 {
+        format!("{} min {:02} s", (sec / 60.0).floor(), (sec % 60.0).round())
+    } else {
+        format!("{:.1} h", sec / 3600.0).replace('.', ",")
+    }
 }
 
 impl App {
@@ -165,6 +227,9 @@ impl App {
             tab,
             wing: WingTab::new(),
             tab3d,
+            sweep: Sweep::new(),
+            fluid: Fluid::Air,
+            chord: 0.2,
             resume_tunnel: true,
         }
     }
@@ -193,148 +258,154 @@ impl App {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui, fr: &Frame) {
-        ui.heading("Maquette");
-        let mut shape = self.settings.cfg.shape;
-        egui::ComboBox::from_id_salt("shape")
-            .selected_text(shape.label())
-            .show_ui(ui, |ui| {
-                for k in ShapeKind::ALL {
-                    ui.selectable_value(&mut shape, k, k.label());
-                }
-            });
-        let mut body_changed = shape != self.settings.cfg.shape;
-        self.settings.cfg.shape = shape;
-        if shape == ShapeKind::Naca {
-            ui.horizontal(|ui| {
-                ui.label("NACA");
-                let r = ui.add(egui::TextEdit::singleline(&mut self.naca_text).desired_width(60.0));
-                if r.changed() {
-                    if let Some(n) = Naca::parse(&self.naca_text) {
-                        self.settings.cfg.params.naca = n;
-                        body_changed = true;
+        self.sweep_tick(fr);
+        let sweeping = self.sweep.active();
+        ui.add_enabled_ui(!sweeping, |ui| {
+            ui.heading("Maquette");
+            let mut shape = self.settings.cfg.shape;
+            egui::ComboBox::from_id_salt("shape")
+                .selected_text(shape.label())
+                .show_ui(ui, |ui| {
+                    for k in ShapeKind::ALL {
+                        ui.selectable_value(&mut shape, k, k.label());
                     }
-                }
-                for code in ["0012", "2412", "4412"] {
-                    if ui.small_button(code).clicked() {
-                        self.naca_text = code.into();
-                        self.settings.cfg.params.naca = Naca::parse(code).unwrap();
-                        body_changed = true;
+                });
+            let mut body_changed = shape != self.settings.cfg.shape;
+            self.settings.cfg.shape = shape;
+            if shape == ShapeKind::Naca {
+                ui.horizontal(|ui| {
+                    ui.label("NACA");
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.naca_text).desired_width(60.0));
+                    if r.changed() {
+                        if let Some(n) = Naca::parse(&self.naca_text) {
+                            self.settings.cfg.params.naca = n;
+                            body_changed = true;
+                        }
                     }
-                }
-            });
-        }
-        if let Some((lo, hi)) = shape.alpha_range() {
-            let r = ui.add(
-                egui::Slider::new(&mut self.settings.cfg.params.alpha_deg, lo..=hi)
-                    .step_by(0.5)
-                    .text("incidence α (°)"),
-            );
-            body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
-        }
-        if shape == ShapeKind::Ellipse {
-            let r = ui.add(egui::Slider::new(&mut self.settings.cfg.params.thickness, 0.1..=1.0).text("épaisseur e/c"));
-            body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
-        }
-        if shape == ShapeKind::Cylinder {
-            let r = ui.add(
-                egui::Slider::new(&mut self.settings.cfg.params.spin_ratio, -3.0..=3.0)
-                    .step_by(0.25)
-                    .text("rotation ΩR/U"),
-            );
-            body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
-        }
-        if body_changed {
-            self.push(|r| r.body = true);
-        }
-
-        ui.separator();
-        ui.heading("Écoulement");
-        let r = ui.add(
-            egui::Slider::new(&mut self.settings.cfg.re, 10.0..=1e7)
-                .logarithmic(true)
-                .custom_formatter(|v, _| fmt_re(v))
-                .text("Reynolds"),
-        );
-        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-            self.push(|q| q.reynolds = true);
-        }
-        let t0 = (self.settings.cfg.turbulence, self.settings.cfg.transition);
-        ui.horizontal(|ui| {
-            ui.label("Turbulence");
-            let t = &mut self.settings.cfg.turbulence;
-            ui.selectable_value(t, Turbulence::Auto, "auto")
-                .on_hover_text("Spalart–Allmaras avec loi de paroi dès Re = 5·10⁴, aucun modèle en dessous");
-            ui.selectable_value(t, Turbulence::Sa, "Spalart–Allmaras");
-            ui.selectable_value(t, Turbulence::Off, "aucune");
-        });
-        let profiled = PanelShape::from_shape(shape, &self.settings.cfg.params).is_some();
-        if fr.sa && profiled {
-            ui.horizontal(|ui| {
-                ui.label("Transition");
-                let t = &mut self.settings.cfg.transition;
-                ui.selectable_value(t, Transition::Free, "libre").on_hover_text(
-                    "Position prédite par la méthode des panneaux et la couche limite intégrale (critère e^N, N = 9) ; \
-                     paroi laminaire en amont",
+                    for code in ["0012", "2412", "4412"] {
+                        if ui.small_button(code).clicked() {
+                            self.naca_text = code.into();
+                            self.settings.cfg.params.naca = Naca::parse(code).unwrap();
+                            body_changed = true;
+                        }
+                    }
+                });
+            }
+            if let Some((lo, hi)) = shape.alpha_range() {
+                let r = ui.add(
+                    egui::Slider::new(&mut self.settings.cfg.params.alpha_deg, lo..=hi)
+                        .step_by(0.5)
+                        .text("incidence α (°)"),
                 );
-                ui.selectable_value(t, Transition::Turbulent, "bord d'attaque")
-                    .on_hover_text("Couche limite turbulente partout");
+                body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+            }
+            if shape == ShapeKind::Ellipse {
+                let r = ui.add(egui::Slider::new(&mut self.settings.cfg.params.thickness, 0.1..=1.0).text("épaisseur e/c"));
+                body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+            }
+            if shape == ShapeKind::Cylinder {
+                let r = ui.add(
+                    egui::Slider::new(&mut self.settings.cfg.params.spin_ratio, -3.0..=3.0)
+                        .step_by(0.25)
+                        .text("rotation ΩR/U"),
+                );
+                body_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+            }
+            if body_changed {
+                self.push(|r| r.body = true);
+            }
+
+            ui.separator();
+            ui.heading("Écoulement");
+            let r = ui.add(
+                egui::Slider::new(&mut self.settings.cfg.re, 10.0..=1e7)
+                    .logarithmic(true)
+                    .custom_formatter(|v, _| fmt_re(v))
+                    .text("Reynolds"),
+            );
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.push(|q| q.reynolds = true);
+            }
+            let t0 = (self.settings.cfg.turbulence, self.settings.cfg.transition);
+            ui.horizontal(|ui| {
+                ui.label("Turbulence");
+                let t = &mut self.settings.cfg.turbulence;
+                ui.selectable_value(t, Turbulence::Auto, "auto")
+                    .on_hover_text("Spalart–Allmaras avec loi de paroi dès Re = 5·10⁴, aucun modèle en dessous");
+                ui.selectable_value(t, Turbulence::Sa, "Spalart–Allmaras");
+                ui.selectable_value(t, Turbulence::Off, "aucune");
             });
-        }
-        if (self.settings.cfg.turbulence, self.settings.cfg.transition) != t0 {
-            self.push(|q| q.turbulence = true);
-        }
-        let mut rebuild = false;
-        let l0 = self.settings.cfg.l;
-        egui::ComboBox::from_label("mailles par longueur L")
-            .selected_text(format!("{l0}"))
-            .show_ui(ui, |ui| {
-                for l in RES {
-                    let cells = 24 * l * 12 * l;
-                    ui.selectable_value(
-                        &mut self.settings.cfg.l,
-                        l,
-                        format!("{l}  ({:.2} M mailles)", cells as f64 / 1e6),
+            let profiled = PanelShape::from_shape(shape, &self.settings.cfg.params).is_some();
+            if fr.sa && profiled {
+                ui.horizontal(|ui| {
+                    ui.label("Transition");
+                    let t = &mut self.settings.cfg.transition;
+                    ui.selectable_value(t, Transition::Free, "libre").on_hover_text(
+                        "Position prédite par la méthode des panneaux et la couche limite intégrale (critère e^N, N = 9) ; \
+                         paroi laminaire en amont",
                     );
+                    ui.selectable_value(t, Transition::Turbulent, "bord d'attaque")
+                        .on_hover_text("Couche limite turbulente partout");
+                });
+            }
+            if (self.settings.cfg.turbulence, self.settings.cfg.transition) != t0 {
+                self.push(|q| q.turbulence = true);
+            }
+            let mut rebuild = false;
+            let l0 = self.settings.cfg.l;
+            egui::ComboBox::from_label("mailles par longueur L")
+                .selected_text(format!("{l0}"))
+                .show_ui(ui, |ui| {
+                    for l in RES {
+                        let cells = 24 * l * 12 * l;
+                        ui.selectable_value(
+                            &mut self.settings.cfg.l,
+                            l,
+                            format!("{l}  ({:.2} M mailles)", cells as f64 / 1e6),
+                        );
+                    }
+                });
+            rebuild |= self.settings.cfg.l != l0;
+            let e0 = self.settings.cfg.engine;
+            ui.horizontal(|ui| {
+                ui.label("Moteur");
+                let cpu = EngineKind::Cpu { threads: 0 };
+                ui.selectable_value(&mut self.settings.cfg.engine, cpu, "CPU (tous les cœurs)");
+                if cfg!(feature = "gpu") {
+                    ui.selectable_value(&mut self.settings.cfg.engine, EngineKind::Gpu, "GPU");
                 }
             });
-        rebuild |= self.settings.cfg.l != l0;
-        let e0 = self.settings.cfg.engine;
-        ui.horizontal(|ui| {
-            ui.label("Moteur");
-            let cpu = EngineKind::Cpu { threads: 0 };
-            ui.selectable_value(&mut self.settings.cfg.engine, cpu, "CPU (tous les cœurs)");
-            if cfg!(feature = "gpu") {
-                ui.selectable_value(&mut self.settings.cfg.engine, EngineKind::Gpu, "GPU");
+            rebuild |= self.settings.cfg.engine != e0;
+            let c0 = (self.settings.cfg.collision, self.settings.cfg.les);
+            ui.horizontal(|ui| {
+                ui.label("Collision");
+                ui.selectable_value(&mut self.settings.cfg.collision, Collision::Rr, "régularisée");
+                ui.selectable_value(&mut self.settings.cfg.collision, Collision::Bgk, "BGK");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Sous-maille");
+                ui.selectable_value(&mut self.settings.cfg.les, LesMode::Auto, "auto");
+                ui.selectable_value(&mut self.settings.cfg.les, LesMode::On, "oui");
+                ui.selectable_value(&mut self.settings.cfg.les, LesMode::Off, "non");
+            });
+            rebuild |= (self.settings.cfg.collision, self.settings.cfg.les) != c0;
+            ui.horizontal(|ui| {
+                let label = if self.settings.running { "Pause" } else { "Reprendre" };
+                if ui.button(label).clicked() {
+                    self.settings.running = !self.settings.running;
+                    self.push(|_| {});
+                }
+                if ui.button("Relancer").clicked() {
+                    rebuild = true;
+                }
+            });
+            if rebuild {
+                self.push(|r| r.rebuild = true);
             }
-        });
-        rebuild |= self.settings.cfg.engine != e0;
-        let c0 = (self.settings.cfg.collision, self.settings.cfg.les);
-        ui.horizontal(|ui| {
-            ui.label("Collision");
-            ui.selectable_value(&mut self.settings.cfg.collision, Collision::Rr, "régularisée");
-            ui.selectable_value(&mut self.settings.cfg.collision, Collision::Bgk, "BGK");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Sous-maille");
-            ui.selectable_value(&mut self.settings.cfg.les, LesMode::Auto, "auto");
-            ui.selectable_value(&mut self.settings.cfg.les, LesMode::On, "oui");
-            ui.selectable_value(&mut self.settings.cfg.les, LesMode::Off, "non");
-        });
-        rebuild |= (self.settings.cfg.collision, self.settings.cfg.les) != c0;
-        ui.horizontal(|ui| {
-            let label = if self.settings.running { "Pause" } else { "Reprendre" };
-            if ui.button(label).clicked() {
-                self.settings.running = !self.settings.running;
-                self.push(|_| {});
-            }
-            if ui.button("Relancer").clicked() {
-                rebuild = true;
-            }
-        });
-        if rebuild {
-            self.push(|r| r.rebuild = true);
-        }
 
+        });
+        self.sweep_panel(ui, fr);
+        self.physical(ui, fr);
         ui.separator();
         ui.heading("Affichage");
         let f0 = (self.settings.field, self.settings.tracers);
@@ -427,6 +498,11 @@ impl App {
                 ui.end_row();
             });
         self.panel_reference(ui, fr);
+        if fr.ready && !self.sweep.active() && ui.button("Ajouter à la polaire").clicked() {
+            let (var, value) = self.sweep_var();
+            self.sweep.add_current(fr, var, value, self.settings.cfg.re, self.settings.cfg.l);
+            self.bottom = Bottom::Polar;
+        }
         if fr.ready && ui.button("Copier (CSV)").clicked() {
             let c = &self.settings.cfg;
             ui.ctx().copy_text(format!(
@@ -493,6 +569,200 @@ impl App {
         }
         if let Some(e) = &fr.error {
             ui.colored_label(Color32::RED, e);
+        }
+    }
+
+    /// Variable de polaire de la maquette et sa valeur courante.
+    fn sweep_var(&self) -> (SweepVar, f64) {
+        let p = &self.settings.cfg.params;
+        if self.settings.cfg.shape.alpha_range().is_some() {
+            (SweepVar::Alpha, p.alpha_deg)
+        } else {
+            (SweepVar::Spin, p.spin_ratio)
+        }
+    }
+
+    /// Impose une valeur de la variable balayée.
+    fn set_sweep_value(&mut self, v: f64) {
+        match self.sweep_var().0 {
+            SweepVar::Alpha => self.settings.cfg.params.alpha_deg = v,
+            SweepVar::Spin => self.settings.cfg.params.spin_ratio = v,
+        }
+        if !self.settings.running {
+            self.settings.running = true;
+        }
+        self.push(|r| r.body = true);
+    }
+
+    fn sweep_tick(&mut self, fr: &Frame) {
+        if let Some(v) = self.sweep.tick(fr, self.settings.cfg.re, self.settings.cfg.l) {
+            self.set_sweep_value(v);
+        }
+    }
+
+    /// Polaire automatique : bornes, lancement, avancement.
+    fn sweep_panel(&mut self, ui: &mut egui::Ui, fr: &Frame) {
+        ui.separator();
+        let (var, _) = self.sweep_var();
+        ui.heading(match var {
+            SweepVar::Alpha => "Polaire automatique (incidence)",
+            SweepVar::Spin => "Polaire automatique (rotation)",
+        });
+        let sweeping = self.sweep.active();
+        ui.add_enabled_ui(!sweeping, |ui| {
+            ui.horizontal(|ui| {
+                let unit = if var == SweepVar::Alpha { "°" } else { "" };
+                ui.label("de");
+                ui.add(egui::DragValue::new(&mut self.sweep.from).speed(0.5).suffix(unit));
+                ui.label("à");
+                ui.add(egui::DragValue::new(&mut self.sweep.to).speed(0.5).suffix(unit));
+                ui.label("pas");
+                ui.add(egui::DragValue::new(&mut self.sweep.step).speed(0.1).range(0.05..=45.0).suffix(unit));
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.button(if sweeping { "Arrêter" } else { "Lancer" }).clicked() {
+                if sweeping {
+                    self.sweep.stop("Polaire interrompue.");
+                } else {
+                    let lim = self.settings.cfg.shape.alpha_range().unwrap_or((-3.0, 3.0));
+                    if let Some(v) = self.sweep.start(var, lim, fr.t_star) {
+                        self.set_sweep_value(v);
+                        self.bottom = Bottom::Polar;
+                    }
+                }
+            }
+            if !self.sweep.points.is_empty() && !sweeping {
+                ui.label(egui::RichText::new(format!("{} points", self.sweep.points.len())).weak());
+            }
+        });
+        if let Some((frac, text)) = self.sweep.progress(fr) {
+            ui.add(egui::ProgressBar::new(frac).text(text));
+        } else if !self.sweep.message.is_empty() {
+            ui.label(egui::RichText::new(&self.sweep.message).small());
+        }
+        ui.label(
+            egui::RichText::new(
+                "Chaque point : stabilisation (5 à 12 t*), puis mesure (6 à 15 t*, ou trois périodes). \
+                 Les autres réglages sont verrouillés pendant la polaire.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    /// Échelle physique : vitesse, durées, efforts par mètre d'envergure, Mach réel.
+    fn physical(&mut self, ui: &mut egui::Ui, fr: &Frame) {
+        ui.separator();
+        ui.heading("Échelle physique");
+        ui.horizontal(|ui| {
+            for f in [Fluid::Air, Fluid::Water] {
+                ui.selectable_value(&mut self.fluid, f, f.label());
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Longueur de référence L (corde, diamètre)");
+            ui.add(egui::DragValue::new(&mut self.chord).range(0.001..=50.0).speed(0.01).suffix(" m"));
+        });
+        let (nu, rho) = self.fluid.props();
+        let re = self.settings.cfg.re;
+        let v = re * nu / self.chord;
+        let t_star = self.chord / v;
+        // Pas de calcul par temps convectif : L / U (réseau).
+        let steps = fr.l / self.settings.cfg.u_in as f64;
+        let mut parts = vec![
+            format!("V = {} m/s ({} km/h)", sig3(v), sig3(v * 3.6)),
+            format!("1 t* = L/V = {}", duration(t_star)),
+            format!("1 pas = {} s", sig3(t_star / steps)),
+        ];
+        if fr.ready {
+            let q = 0.5 * rho * v * v * self.chord;
+            parts.push(format!(
+                "traînée {} N/m, portance {} N/m d'envergure",
+                sig3(fr.analysis.cx * q),
+                sig3(fr.analysis.cz * q)
+            ));
+            if fr.t_star > 0.0 {
+                parts.push(format!("temps simulé {}", duration(fr.t_star * t_star)));
+            }
+        }
+        ui.label(egui::RichText::new(parts.join(" · ")).small());
+        let mach = if self.fluid == Fluid::Air { v / 340.0 } else { 0.0 };
+        if mach > 0.3 {
+            ui.colored_label(
+                Color32::from_rgb(0x93, 0x65, 0x0f),
+                egui::RichText::new(format!(
+                    "Mach réel ≈ {} : compressibilité non représentée par le calcul (incompressible). \
+                     La référence des panneaux peut être corrigée : soufflerie panel --mach {:.2}.",
+                    sig3(mach),
+                    mach.min(0.85)
+                ))
+                .small(),
+            );
+        }
+    }
+
+    /// Polaire enregistrée : Cz et Cx selon la variable, Cz(Cx), points des panneaux.
+    fn polar_chart(&mut self, ui: &mut egui::Ui) {
+        let pts = &self.sweep.points;
+        let (var, _) = self.sweep_var();
+        let mut copy = false;
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            copy = ui.button("Copier (CSV)").clicked();
+            clear = ui.button("Effacer").clicked();
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} points · ronds : LBM ; tirets : panneaux + couche limite (profils, Re ≥ 2·10⁴)",
+                    pts.len()
+                ))
+                .small()
+                .weak(),
+            );
+        });
+        if copy {
+            ui.ctx().copy_text(self.sweep.csv());
+        }
+        let mut sel: Vec<&crate::sweep::PolarPoint> = pts.iter().filter(|p| p.var == var).collect();
+        sel.sort_by(|a, b| a.value.total_cmp(&b.value));
+        let xs = |f: &dyn Fn(&crate::sweep::PolarPoint) -> Option<f64>| -> Vec<[f64; 2]> {
+            sel.iter().filter_map(|p| f(p).map(|y| [p.value, y])).collect()
+        };
+        let cz = xs(&|p| Some(p.cz));
+        let cx = xs(&|p| Some(p.cx));
+        let pcz = xs(&|p| p.panel.map(|q| q.1));
+        let pcx = xs(&|p| p.panel.map(|q| q.0));
+        let eiffel: Vec<[f64; 2]> = sel.iter().map(|p| [p.cx, p.cz]).collect();
+        let x_name = if var == SweepVar::Alpha { "α (°)" } else { "ΩR/U" };
+        ui.columns(2, |cols| {
+            Plot::new("polaire_var")
+                .height(cols[0].available_height().max(80.0))
+                .legend(Legend::default())
+                .allow_scroll(false)
+                .x_axis_label(x_name)
+                .show(&mut cols[0], |p| {
+                    let dash = LineStyle::dashed_dense();
+                    p.line(Line::new("Cz", PlotPoints::from(cz.clone())).color(LIFT));
+                    p.points(Points::new("Cz", PlotPoints::from(cz)).color(LIFT).radius(3.0));
+                    p.line(Line::new("Cx", PlotPoints::from(cx.clone())).color(ACCENT));
+                    p.points(Points::new("Cx", PlotPoints::from(cx)).color(ACCENT).radius(3.0));
+                    if !pcz.is_empty() {
+                        p.line(Line::new("Cz panneaux", PlotPoints::from(pcz)).color(LIFT).style(dash));
+                        p.line(Line::new("Cx panneaux", PlotPoints::from(pcx)).color(ACCENT).style(dash));
+                    }
+                });
+            Plot::new("polaire_eiffel")
+                .height(cols[1].available_height().max(80.0))
+                .allow_scroll(false)
+                .x_axis_label("Cx")
+                .y_axis_label("Cz")
+                .show(&mut cols[1], |p| {
+                    p.line(Line::new("Cz(Cx)", PlotPoints::from(eiffel.clone())).color(LIFT));
+                    p.points(Points::new("Cz(Cx)", PlotPoints::from(eiffel)).color(LIFT).radius(3.0));
+                });
+        });
+        if clear {
+            self.sweep.points.clear();
         }
     }
 
@@ -569,8 +839,10 @@ impl App {
                 ui.selectable_value(&mut self.bottom, Bottom::Cp, "Pression pariétale Cp");
                 ui.selectable_value(&mut self.bottom, Bottom::Cf, "Frottement Cf");
             }
+            ui.selectable_value(&mut self.bottom, Bottom::Polar, format!("Polaire ({})", self.sweep.points.len()));
         });
         match self.bottom {
+            Bottom::Polar => self.polar_chart(ui),
             Bottom::Cp | Bottom::Cf if fr.wall.is_some() => self.wall_chart(ui, fr),
             _ => self.history(ui, fr),
         }
