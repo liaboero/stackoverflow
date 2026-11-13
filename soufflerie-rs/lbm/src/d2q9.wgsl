@@ -2,11 +2,16 @@
 // Disposition : f[i * n + y * nx + x]. Type de maille dans les 2 bits de poids
 // faible de `kind` (0 fluide, 1 solide, 2 voisin de paroi), indice de maille
 // pariétale + 1 au-dessus (efforts).
+//
+// Spalart–Allmaras (flags & 8) : `sa` = (u_x, u_y avant collision, u_τ, ν̃)
+// par maille ; ν_t s'ajoute au temps de relaxation et la paroi glisse selon
+// la loi de Spalding (sa.rs). Le transport de ν̃ est la passe `sa_step`.
 
 struct Params {
   nx: u32, ny: u32, n: u32, flags: u32,
   u_in: f32, accel: f32, c18: f32, spin: f32,
   rot_x: f32, rot_y: f32, ref_x: f32, ref_y: f32,
+  nu: f32, pad0: f32, pad1: f32, pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -15,8 +20,49 @@ struct Params {
 @group(0) @binding(3) var<storage, read> kind: array<u32>;
 @group(0) @binding(4) var<storage, read> wq: array<f32>;
 @group(0) @binding(5) var<storage, read> aux: array<f32>;
-@group(0) @binding(6) var<storage, read> damp: array<f32>;
+// Par maille : amortissement de la sous-maille, distance à la paroi, Cf
+// laminaire imposé (0 : turbulent), angle de la normale de paroi.
+@group(0) @binding(6) var<storage, read> cell: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> force: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read_write> sa: array<vec4<f32>>;
+
+const KAPPA = 0.41;
+const CV1_3 = 357.911;
+
+fn nu_turb(v: f32) -> f32 {
+  if (v <= 0.0) {
+    return 0.0;
+  }
+  let chi = v / P.nu;
+  let c3 = chi * chi * chi;
+  return v * c3 / (c3 + CV1_3);
+}
+
+// u_τ de la loi de Spalding passant par (y, u_t) (Newton sur u⁺).
+fn spalding_utau(ut: f32, y: f32) -> f32 {
+  if (!(ut > 1e-12)) {
+    return 0.0;
+  }
+  let e_kb = 0.12873490; // exp(−κ B), B = 5
+  let rey = y * ut / P.nu;
+  var up = sqrt(rey);
+  if (rey >= 30.0) {
+    up = log(rey) / KAPPA;
+  }
+  for (var k = 0; k < 20; k++) {
+    let ku = KAPPA * up;
+    let e = exp(ku);
+    let yy = up + e_kb * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+    let dy = 1.0 + e_kb * KAPPA * (e - 1.0 - ku - ku * ku / 2.0);
+    let h = up * yy - rey;
+    let next = up - h / (yy + up * dy);
+    up = select(0.5 * up, next, next > 0.0);
+    if (abs(h) < 1e-6 * rey) {
+      break;
+    }
+  }
+  return ut / up;
+}
 
 const CX = array<i32, 9>(0, 1, 0, -1, 0, 1, -1, -1, 1);
 const CY = array<i32, 9>(0, 0, 1, 0, -1, 1, 1, -1, -1);
@@ -131,6 +177,13 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (t == 1u) {
     return;
   }
+  let sa_on = (P.flags & 8u) != 0u;
+  var s = vec4<f32>(0.0);
+  if (sa_on) {
+    s = sa[idx];
+  }
+  var slip = vec2<f32>(0.0);
+  var slip_done = false;
   var f: array<f32, 9>;
   var fsum = vec3<f32>(0.0);
   if (t == 0u) {
@@ -163,6 +216,33 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (P.spin != 0.0) {
         uw = vec2<f32>(-P.spin * (wy - P.rot_y), P.spin * (wx - P.rot_x));
       }
+      if (sa_on) {
+        if (!slip_done) {
+          // Loi de paroi : glissement tangentiel (vitesse du pas précédent).
+          slip_done = true;
+          let cg = cell[idx];
+          var u = s.xy;
+          if (P.spin != 0.0) {
+            u += vec2<f32>(P.spin * (f32(y) - P.rot_y), -P.spin * (f32(x) - P.rot_x));
+          }
+          let nw = vec2<f32>(cos(cg.w), sin(cg.w));
+          let tv = u - dot(u, nw) * nw;
+          let ut = length(tv);
+          let yw = max(0.1, cg.y);
+          var utau: f32;
+          if (cg.z > 0.0) {
+            utau = ut * sqrt(0.5 * cg.z);
+          } else {
+            utau = spalding_utau(ut, yw);
+          }
+          s.z = utau;
+          if (ut >= 1e-12) {
+            let us = max(0.0, ut - utau * utau * yw / (P.nu + KAPPA * utau * yw));
+            slip = tv * (us / ut);
+          }
+        }
+        uw += slip;
+      }
       let corr = 6.0 * W[j] * (f32(cx) * uw.x + f32(cy) * uw.y);
       var v: f32;
       if ((P.flags & 4u) == 0u) {
@@ -188,9 +268,17 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   var c18 = 0.0;
   if ((P.flags & 2u) != 0u) {
-    c18 = P.c18 * damp[idx];
+    c18 = P.c18 * cell[idx].x;
   }
-  let p = collide(f, aux[x], c18, aux[P.nx + y]);
+  var tau = aux[x];
+  if (sa_on) {
+    let rho = f[0] + f[1] + f[2] + f[3] + f[4] + f[5] + f[6] + f[7] + f[8];
+    let ux = (f[1] - f[3] + f[5] - f[6] - f[7] + f[8]) / rho;
+    let uy = (f[2] - f[4] + f[5] + f[6] - f[7] - f[8]) / rho;
+    sa[idx] = vec4<f32>(ux, uy, s.z, s.w);
+    tau += 3.0 * nu_turb(s.w);
+  }
+  let p = collide(f, tau, c18, aux[P.nx + y]);
   for (var i = 0u; i < 9u; i++) {
     dst[i * P.n + idx] = p[i];
   }
@@ -231,6 +319,14 @@ fn boundary(@builtin(global_invocation_id) gid: vec3<u32>) {
     let en = feq(rho, ux, uy);
     for (var i = 0u; i < 9u; i++) {
       dst[i * P.n + y * P.nx + b] = eb[i] + fn_[i] - en[i];
+    }
+    if ((P.flags & 8u) != 0u) {
+      let ib = y * P.nx + b;
+      var u = vec2<f32>(ux, uy);
+      if (side == 0u) {
+        u = vec2<f32>(P.u_in, 0.0);
+      }
+      sa[ib] = vec4<f32>(u, sa[ib].z, sa[ib].w);
     }
   }
 }

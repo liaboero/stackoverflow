@@ -1,14 +1,51 @@
 //! Veine d'essai : domaine, maquette, mise en vitesse, coefficients.
 
 use crate::cpu::{Collision, CpuSolver, ForceSum, LesMode, Macros, Ramp, SolverConfig};
+use crate::geometry::Geometry;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuSolver;
+use crate::panel::{panel_solve, PanelOptions, PanelResult, PanelShape};
 use crate::shapes::{Body, ShapeKind, ShapeParams};
 
 /// Domaine en multiples de L ; maquette à 8 L de l'entrée, à mi-hauteur.
 pub const DOMAIN: (usize, usize, usize) = (24, 12, 8);
 /// Durée de la mise en vitesse (temps convectifs).
 pub const RAMP_T: f64 = 5.0;
+
+/// Reynolds à partir duquel Spalart–Allmaras s'active en mode automatique.
+pub const RE_SA_AUTO: f64 = 5e4;
+/// Reynolds minimal de la référence « panneaux + couche limite ».
+pub const RE_PANEL_MIN: f64 = 2e4;
+
+/// Modèle de turbulence RANS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turbulence {
+    /// Spalart–Allmaras à partir de Re = 5·10⁴.
+    Auto,
+    /// Spalart–Allmaras et loi de paroi.
+    Sa,
+    Off,
+}
+
+impl Turbulence {
+    pub fn resolve(self, re: f64) -> bool {
+        match self {
+            Turbulence::Auto => re >= RE_SA_AUTO,
+            Turbulence::Sa => true,
+            Turbulence::Off => false,
+        }
+    }
+}
+
+/// Transition laminaire–turbulent de la couche limite (avec Spalart–Allmaras).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    /// Libre : position donnée par la couche limite intégrale (eᴺ), zone
+    /// laminaire imposée en amont.
+    Free,
+    /// Couche limite turbulente dès le bord d'attaque.
+    Turbulent,
+}
 
 /// Longueur d'amortissement pariétal de la sous-maille (mailles), bornée à [1, 4].
 pub fn les_wall_length(l: usize, re: f64) -> f64 {
@@ -36,6 +73,8 @@ pub struct TunnelConfig {
     pub collision: Collision,
     pub bouzidi: bool,
     pub engine: EngineKind,
+    pub turbulence: Turbulence,
+    pub transition: Transition,
 }
 
 impl Default for TunnelConfig {
@@ -50,6 +89,8 @@ impl Default for TunnelConfig {
             collision: Collision::Rr,
             bouzidi: true,
             engine: EngineKind::Cpu { threads: 0 },
+            turbulence: Turbulence::Auto,
+            transition: Transition::Free,
         }
     }
 }
@@ -106,6 +147,44 @@ impl Engine {
     pub fn set_les_wall_length(&mut self, a: f64) {
         dispatch!(self, s => s.set_les_wall_length(a))
     }
+    pub fn set_turbulence(&mut self, on: bool) {
+        dispatch!(self, s => s.set_turbulence(on))
+    }
+    pub fn sa_active(&self) -> bool {
+        dispatch!(self, s => s.sa_active())
+    }
+    pub fn geometry(&self) -> &Geometry {
+        dispatch!(self, s => &s.geo)
+    }
+    pub fn geometry_mut(&mut self) -> &mut Geometry {
+        dispatch!(self, s => &mut s.geo)
+    }
+    pub fn update_laminar_zone(&mut self) {
+        dispatch!(self, s => s.update_laminar_zone())
+    }
+    /// Rapport ν_t/ν par maille (Spalart–Allmaras) ; false si le modèle est inactif.
+    pub fn eddy_viscosity_ratio(&mut self, out: &mut Vec<f32>) -> bool {
+        match self {
+            Engine::Cpu(s) => {
+                let inv_nu = (1.0 / s.cfg.nu) as f32;
+                let Some(st) = s.sa_fields() else { return false };
+                out.clear();
+                out.extend(st.nu_tilde.iter().map(|&v| crate::sa::nu_turb(v, inv_nu) * inv_nu));
+                true
+            }
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => {
+                let inv_nu = (1.0 / s.cfg.nu) as f32;
+                let st = s.sa_state();
+                if st.is_empty() {
+                    return false;
+                }
+                out.clear();
+                out.extend(st.iter().map(|c| crate::sa::nu_turb(c[3], inv_nu) * inv_nu));
+                true
+            }
+        }
+    }
     pub fn name(&self) -> String {
         match self {
             Engine::Cpu(s) => format!("CPU ({} fils)", s.threads()),
@@ -124,6 +203,8 @@ pub struct WindTunnel {
     pub body: Body,
     pub engine: Engine,
     pub ramp: Ramp,
+    /// Référence « panneaux + couche limite » à l'incidence courante (profils, Re ≥ 2·10⁴).
+    pub panel: Option<PanelResult>,
 }
 
 impl WindTunnel {
@@ -152,8 +233,10 @@ impl WindTunnel {
             #[cfg(not(feature = "gpu"))]
             EngineKind::Gpu => return Err("moteur GPU non compilé (option « gpu »)".into()),
         };
+        let sa = cfg.turbulence.resolve(cfg.re);
         dispatch!(&mut engine, s => {
             s.set_body(&body);
+            s.set_turbulence(sa);
             // Démarrage progressif depuis le repos.
             s.reset(0.0);
         });
@@ -161,7 +244,7 @@ impl WindTunnel {
             steps: (RAMP_T * l as f64 / cfg.u_in as f64).round() as u64,
             u: cfg.u_in,
         };
-        Ok(WindTunnel {
+        let mut wt = WindTunnel {
             cfg,
             nx,
             ny,
@@ -170,7 +253,10 @@ impl WindTunnel {
             body,
             engine,
             ramp,
-        })
+            panel: None,
+        };
+        wt.refresh_panel();
+        Ok(wt)
     }
 
     pub fn steps_per_tstar(&self) -> f64 {
@@ -196,6 +282,7 @@ impl WindTunnel {
         self.body = Body::new(shape, params, self.cfg.l as f64, self.x0, self.y0, self.cfg.u_in as f64);
         let body = &self.body;
         dispatch!(&mut self.engine, s => s.set_body(body));
+        self.refresh_panel();
     }
 
     /// Reynolds au-delà duquel la traînée est surestimée de plus de ~10 %
@@ -216,6 +303,115 @@ impl WindTunnel {
         self.cfg.re = re;
         self.engine.set_viscosity(self.cfg.u_in as f64 * self.cfg.l as f64 / re);
         self.engine.set_les_wall_length(les_wall_length(self.cfg.l, re));
+        self.engine.set_turbulence(self.cfg.turbulence.resolve(re));
+        self.refresh_panel();
+    }
+
+    /// Modèle de turbulence, sans relancer l'écoulement.
+    pub fn set_turbulence(&mut self, t: Turbulence) {
+        self.cfg.turbulence = t;
+        self.engine.set_turbulence(t.resolve(self.cfg.re));
+        self.refresh_panel();
+    }
+
+    /// Transition libre ou imposée au bord d'attaque.
+    pub fn set_transition_mode(&mut self, t: Transition) {
+        self.cfg.transition = t;
+        self.refresh_panel();
+    }
+
+    pub fn sa_active(&self) -> bool {
+        self.engine.sa_active()
+    }
+
+    /// Méthode des panneaux et couche limite intégrale pour la maquette
+    /// courante à l'incidence `alpha_deg` (None : forme non profilée ou Re trop bas).
+    pub fn panel_at(&self, alpha_deg: f64) -> Option<PanelResult> {
+        let shape = PanelShape::from_shape(self.cfg.shape, &self.cfg.params)?;
+        let re = self.cfg.re;
+        if re < RE_PANEL_MIN {
+            return None;
+        }
+        let opts = match self.cfg.transition {
+            Transition::Free => PanelOptions::free(re),
+            Transition::Turbulent => PanelOptions::tripped(re, 0.0),
+        };
+        let r = panel_solve(&shape, alpha_deg, &opts);
+        (r.cl.is_finite() && r.cd.is_finite()).then_some(r)
+    }
+
+    /// Recalcule la référence et la zone laminaire imposée au calcul LBM.
+    pub fn refresh_panel(&mut self) {
+        self.panel = self.panel_at(self.body.alpha_deg);
+        let couple = self.sa_active() && self.cfg.transition == Transition::Free;
+        let bl = if couple { self.panel.clone() } else { None };
+        self.set_transition(bl.as_ref());
+    }
+
+    /// Transition imposée à Spalart–Allmaras à partir de la couche limite
+    /// intégrale : en amont de la transition, pas de production turbulente
+    /// et frottement pariétal laminaire (Cf de la couche limite), dans une
+    /// bande de max(3, L/10) mailles autour du corps. None : turbulent partout.
+    pub fn set_transition(&mut self, bl: Option<&PanelResult>) {
+        let l = self.cfg.l as f64;
+        let by_index = self.cfg.shape == ShapeKind::Naca;
+        let loc = &self.body.outline_local;
+        let geo = self.engine.geometry_mut();
+        geo.lam.iter_mut().for_each(|v| *v = 0.0);
+        if let Some(bl) = bl {
+            let m = loc.len();
+            let (mut i_le, mut xmin, mut xmax) = (0usize, f64::INFINITY, f64::NEG_INFINITY);
+            for (k, p) in loc.iter().enumerate() {
+                if p[0] < xmin {
+                    xmin = p[0];
+                    i_le = k;
+                }
+                xmax = xmax.max(p[0]);
+            }
+            let span = if xmax > xmin { xmax - xmin } else { 1.0 };
+            let band = (0.1 * l).max(3.0) as f32;
+            let cf_at = |x: &[f64], cf: &[f64], xc: f64| -> f32 {
+                if x.len() < 2 || cf.len() < x.len() {
+                    return 0.0;
+                }
+                let mut k = 1;
+                while k < x.len() - 1 && x[k] < xc {
+                    k += 1;
+                }
+                // Plafond : pic de Cf au point d'arrêt (abscisse curviligne nulle).
+                cf[k].clamp(1e-5, 0.02) as f32
+            };
+            for i in 0..geo.n {
+                let pos = geo.near_pos[i];
+                if pos < 0.0 || geo.dist[i] > band {
+                    continue;
+                }
+                let k = (pos.round() as usize).min(m - 1);
+                let [bx, by] = loc[k];
+                // Faces : pour le NACA, extrados de l'indice 0 (bord de fuite)
+                // au bord d'attaque ; ailleurs, signe de y dans le repère propre.
+                let upper = if by_index { k <= i_le } else { by >= 0.0 };
+                let xc = (bx - xmin) / span;
+                let xtr = if upper {
+                    bl.transition_upper
+                } else {
+                    bl.transition_lower
+                };
+                if xtr.is_finite() && xc < xtr {
+                    let side = if upper { &bl.friction_upper } else { &bl.friction_lower };
+                    geo.lam[i] = cf_at(&side.x, &side.cf, xc);
+                }
+            }
+        }
+        self.engine.update_laminar_zone();
+    }
+
+    /// y⁺ attendu au premier nœud (plaque plane turbulente,
+    /// Cf ≈ 0,026 Re^(−1/7), nœud à une demi-maille de la paroi).
+    pub fn first_cell_yplus(&self) -> f64 {
+        let re = self.cfg.re;
+        let cf = 0.026 * re.powf(-1.0 / 7.0);
+        0.5 / self.cfg.l as f64 * re * (cf / 2.0).sqrt()
     }
 
     /// Coefficients moyens d'une somme d'efforts.

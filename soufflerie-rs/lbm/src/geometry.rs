@@ -20,6 +20,14 @@ pub struct Geometry {
     pub wall_q: Vec<f32>,
     /// Distance (mailles) à la paroi du corps.
     pub dist: Vec<f32>,
+    /// Normale unitaire sortante de la paroi la plus proche (dans la boîte du corps).
+    pub normal: Vec<f32>,
+    /// Point de paroi le plus proche : indice du segment du contour + fraction ; −1 hors de la boîte.
+    pub near_pos: Vec<f32>,
+    /// Zone laminaire imposée (Cf de la couche limite intégrale) ; 0 : turbulent.
+    pub lam: Vec<f32>,
+    /// Maille portant au moins un lien de paroi avec le corps.
+    pub is_wall: Vec<bool>,
     /// Amortissement de Van Driest de la sous-maille, (1 − e^(−d/A))².
     pub les_damp: Vec<f32>,
     pub les_wall_a: f64,
@@ -43,6 +51,10 @@ impl Geometry {
             kind: vec![FLUID; n],
             wall_q: vec![0.0; 9 * n],
             dist: vec![1e6; n],
+            normal: vec![0.0; 2 * n],
+            near_pos: vec![-1.0; n],
+            lam: vec![0.0; n],
+            is_wall: vec![false; n],
             les_damp: vec![1.0; n],
             les_wall_a,
             runs: Vec::new(),
@@ -127,6 +139,7 @@ impl Geometry {
             self.kind[y * nx + nx - 1] = FLUID;
         }
         self.link_count = links;
+        self.lam.iter_mut().for_each(|v| *v = 0.0);
         self.wall_distance(body);
         self.update_les_damping();
         self.index_rows();
@@ -188,6 +201,8 @@ impl Geometry {
                 1e6
             };
         }
+        self.normal.iter_mut().for_each(|v| *v = 0.0);
+        self.near_pos.iter_mut().for_each(|v| *v = -1.0);
         // Distance exacte au polygone dans une boîte autour du corps.
         let o = &body.outline;
         let m = o.len();
@@ -208,6 +223,7 @@ impl Geometry {
                 }
                 let (px, py) = (x as f64, y as f64);
                 let mut best = f64::INFINITY;
+                let (mut bk, mut bt) = (0usize, 0.0f64);
                 for k in 0..m {
                     let [ax, ay] = o[k];
                     let [cx, cy] = o[(k + 1) % m];
@@ -216,9 +232,28 @@ impl Geometry {
                     let t = (((px - ax) * ex + (py - ay) * ey) / l2).clamp(0.0, 1.0);
                     let dx = px - ax - t * ex;
                     let dy = py - ay - t * ey;
-                    best = best.min(dx * dx + dy * dy);
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < best {
+                        best = d2;
+                        bk = k;
+                        bt = t;
+                    }
                 }
-                self.dist[i] = (best.sqrt() as f32).max(1e-3);
+                let d = best.sqrt();
+                self.dist[i] = (d as f32).max(1e-3);
+                let [ax, ay] = o[bk];
+                let [cx, cy] = o[(bk + 1) % m];
+                let (ex, ey) = (cx - ax, cy - ay);
+                let (nxw, nyw) = if d > 1e-6 {
+                    ((px - ax - bt * ex) / d, (py - ay - bt * ey) / d)
+                } else {
+                    // Point sur la paroi : normale du segment.
+                    let len = (ex * ex + ey * ey).max(1e-12).sqrt();
+                    (ey / len, -ex / len)
+                };
+                self.normal[2 * i] = nxw as f32;
+                self.normal[2 * i + 1] = nyw as f32;
+                self.near_pos[i] = (bk as f64 + bt) as f32;
             }
         }
     }
@@ -246,6 +281,7 @@ impl Geometry {
         self.runs = vec![Vec::new(); ny];
         self.near = vec![Vec::new(); ny];
         self.wall_cells.clear();
+        self.is_wall.iter_mut().for_each(|v| *v = false);
         for y in 0..ny {
             let mut start: Option<usize> = None;
             for x in 1..nx - 1 {
@@ -263,6 +299,7 @@ impl Geometry {
                         self.near[y].push(x);
                         if (1..9).any(|j| self.wall_q[j * self.n + idx] > 0.0) {
                             self.wall_cells.push(idx);
+                            self.is_wall[idx] = true;
                         }
                     }
                 }

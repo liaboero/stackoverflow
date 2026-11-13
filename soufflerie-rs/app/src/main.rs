@@ -3,19 +3,21 @@
 //! Sans argument : interface graphique. Sous-commandes :
 //!   soufflerie run    [options]          un calcul, moyennes et Strouhal
 //!   soufflerie polar  --alpha a:b:pas    polaire (incidences calculées en parallèle), CSV
+//!   soufflerie panel  --alpha a:b:pas    polaire instantanée : panneaux + couche limite, CSV
 //!   soufflerie bench  [--l 32]           vitesse des moteurs (millions de mailles par seconde)
 //!
 //! Options : --shape cylinder|square|ellipse|plate|naca|triangle  --naca 2412
 //!           --alpha 4  --re 1000  --l 32  --t 40  --avg 15  --engine cpu|gpu
 //!           --threads 0  --spin 1  --thickness 0.4  --collision rr|bgk
-//!           --les auto|on|off  --u 0.1
+//!           --les auto|on|off  --u 0.1  --turb auto|sa|off  --transition free|turb
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use lbm::cpu::{Collision, LesMode};
+use lbm::panel::{compressible_correction, panel_solve, section_coefficients, PanelOptions, PanelResult, PanelShape};
 use lbm::stats::{analyze, Analysis};
-use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, TunnelConfig, WindTunnel};
+use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence, WindTunnel};
 use rayon::prelude::*;
 
 #[cfg(feature = "gui")]
@@ -26,13 +28,17 @@ mod worker;
 fn usage() -> ! {
     eprintln!(
         "Soufflerie de poche (native)\n\n\
-         soufflerie                       interface graphique\n\
+         soufflerie [options]             interface graphique (--field eddy, --graph cp|cf)\n\
          soufflerie run   [options]       un calcul\n\
          soufflerie polar --alpha -4:12:2 [options]   polaire, CSV\n\
+         soufflerie panel --alpha -4:16:1 [options]   polaire panneaux + couche limite, CSV\n\
          soufflerie bench [--l 32] [--steps 400]       vitesse des moteurs\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
-         \x20         --collision rr|bgk --les auto|on|off --u 0.1"
+         \x20         --collision rr|bgk --les auto|on|off --u 0.1\n\
+         \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
+         \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
+         \x20         --mach 0.3 (panel : correction de compressibilité)"
     );
     std::process::exit(2)
 }
@@ -101,6 +107,16 @@ impl Args {
             },
             bouzidi: true,
             engine,
+            turbulence: match self.get("turb", "auto".to_string()).as_str() {
+                "sa" => Turbulence::Sa,
+                "off" | "none" => Turbulence::Off,
+                _ => Turbulence::Auto,
+            },
+            transition: if self.get("transition", "free".to_string()) == "turb" {
+                Transition::Turbulent
+            } else {
+                Transition::Free
+            },
         }
     }
 }
@@ -159,6 +175,42 @@ fn cmd_run(a: &Args) {
         wt.engine.tau0(),
         if wt.engine.les_active() { "active" } else { "inactive" }
     );
+    if wt.sa_active() {
+        let profiled = wt.panel.is_some();
+        println!(
+            "Spalart–Allmaras + loi de paroi · y⁺ ≈ {:.0} au premier nœud · transition {}",
+            wt.first_cell_yplus(),
+            match (cfg.transition, profiled) {
+                (Transition::Turbulent, _) => "au bord d'attaque".to_string(),
+                (Transition::Free, true) => {
+                    let r = wt.panel.as_ref().unwrap();
+                    format!(
+                        "libre (extrados {}, intrados {})",
+                        pct(r.transition_upper),
+                        pct(r.transition_lower)
+                    )
+                }
+                (Transition::Free, false) => "non imposée (couche limite turbulente)".to_string(),
+            }
+        );
+    }
+    if let Some(r) = &wt.panel {
+        let k = section_coefficients(r);
+        println!(
+            "Panneaux + couche limite : Cx = {:.4}  Cz = {:.4}  Cm = {:.4}{}",
+            k.cd,
+            k.cl,
+            k.cm,
+            if k.kirchhoff {
+                format!(
+                    "  (décollement à {} de corde : modèle de Kirchhoff)",
+                    pct(r.separation_upper.min(r.separation_lower))
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
     drop(wt);
     let t_end = a.get("t", 40.0f64);
     let avg = a.get("avg", 15.0f64);
@@ -182,18 +234,119 @@ fn cmd_run(a: &Args) {
     }
 }
 
-fn cmd_polar(a: &Args) {
-    let spec = a.get("alpha", "-4:12:2".to_string());
+/// Plage d'incidences a:b:pas (ou une seule valeur).
+fn alpha_range(a: &Args, default: &str) -> Vec<f64> {
+    let spec = a.get("alpha", default.to_string());
     let p: Vec<f64> = spec.split(':').filter_map(|s| s.parse().ok()).collect();
-    if p.len() != 3 || p[2] <= 0.0 {
-        usage()
+    match p.len() {
+        1 => return p,
+        3 if p[2] > 0.0 => {}
+        _ => usage(),
     }
     let mut alphas = Vec::new();
-    let mut x = p[0];
-    while x <= p[1] + 1e-9 {
-        alphas.push(x);
-        x += p[2];
+    let mut k = 0;
+    loop {
+        let x = p[0] + k as f64 * p[2];
+        if x > p[1] + 1e-9 {
+            break;
+        }
+        alphas.push((x * 1e6).round() / 1e6);
+        k += 1;
     }
+    alphas
+}
+
+/// Méthode des panneaux + couche limite intégrale pour la maquette de `cfg`.
+fn panel_of(cfg: &TunnelConfig, alpha: f64) -> Option<PanelResult> {
+    let shape = PanelShape::from_shape(cfg.shape, &cfg.params)?;
+    let opts = match cfg.transition {
+        Transition::Free => PanelOptions::free(cfg.re),
+        Transition::Turbulent => PanelOptions::tripped(cfg.re, 0.0),
+    };
+    let r = panel_solve(&shape, alpha, &opts);
+    (r.cl.is_finite() && r.cd.is_finite()).then_some(r)
+}
+
+fn pct(v: f64) -> String {
+    if v.is_finite() {
+        format!("{:.0} %", v.clamp(0.0, 1.0) * 100.0)
+    } else {
+        "—".into()
+    }
+}
+
+fn cmd_panel(a: &Args) {
+    let mut cfg = a.config();
+    if !a.opts.contains_key("shape") {
+        cfg.shape = ShapeKind::Naca;
+    }
+    if PanelShape::from_shape(cfg.shape, &cfg.params).is_none() {
+        eprintln!("La méthode des panneaux traite les profils NACA, les ellipses et les plaques.");
+        std::process::exit(2);
+    }
+    if !a.opts.contains_key("re") {
+        cfg.re = 1e6;
+    }
+    let mach = a.get("mach", 0.0f64);
+    let alphas = alpha_range(a, "-4:16:1");
+    eprintln!(
+        "{} · Re = {} · transition {}{}",
+        match cfg.shape {
+            ShapeKind::Naca => format!("NACA {}", cfg.params.naca.code()),
+            k => k.label().to_string(),
+        },
+        cfg.re,
+        if cfg.transition == Transition::Free {
+            "libre (eᴺ, N = 9)"
+        } else {
+            "au bord d'attaque"
+        },
+        if mach > 0.0 {
+            format!(" · Mach {mach}")
+        } else {
+            String::new()
+        }
+    );
+    println!("alpha_deg,Cz,Cx,Cm,Cz_attache,x_tr_extrados,x_tr_intrados,x_decollement,kirchhoff,Cp_min,critique");
+    let rows: Vec<_> = alphas.par_iter().map(|&al| (al, panel_of(&cfg, al))).collect();
+    for (al, r) in rows {
+        let Some(r) = r else {
+            println!("{al},,,,,,,,,,");
+            continue;
+        };
+        let k = section_coefficients(&r);
+        let cp_min = r.cp.iter().cloned().fold(f64::INFINITY, f64::min);
+        let (mut cl, mut cm, mut crit) = (k.cl, k.cm, false);
+        let mut cp_min_c = cp_min;
+        if mach > 0.0 {
+            let c = compressible_correction(mach, cp_min);
+            cl *= c.factor;
+            cm *= c.factor;
+            cp_min_c = c.cp_min;
+            crit = c.critical;
+        }
+        let f = |v: f64| {
+            if v.is_finite() {
+                format!("{v:.4}")
+            } else {
+                String::new()
+            }
+        };
+        println!(
+            "{al},{cl:.4},{:.5},{cm:.4},{:.4},{},{},{},{},{cp_min_c:.3},{}",
+            k.cd,
+            r.cl,
+            f(r.transition_upper),
+            f(r.transition_lower),
+            f(r.separation_upper.min(r.separation_lower)),
+            k.kirchhoff as u8,
+            crit as u8
+        );
+    }
+}
+
+fn cmd_polar(a: &Args) {
+    let alphas = alpha_range(a, "-4:12:2");
     let base = a.config();
     let t_end = a.get("t", 40.0f64);
     let avg = a.get("avg", 15.0f64);
@@ -222,11 +375,18 @@ fn cmd_polar(a: &Args) {
     } else {
         alphas.par_iter().map(|&a| run(a)).collect()
     };
-    println!("alpha_deg,Re,L,Cx,Cz,Cm,St,Cz_Cx");
+    println!("alpha_deg,Re,L,Cx,Cz,Cm,St,Cz_Cx,Cx_panneaux,Cz_panneaux");
     for (alpha, r) in res {
+        let pan = match panel_of(&base, alpha).filter(|_| base.re >= lbm::tunnel::RE_PANEL_MIN) {
+            Some(p) => {
+                let k = section_coefficients(&p);
+                format!(",{:.5},{:.4}", k.cd, k.cl)
+            }
+            None => ",,".into(),
+        };
         match r {
             Ok((r, _, ok)) => println!(
-                "{alpha},{},{},{:.5},{:.5},{:.5},{},{}",
+                "{alpha},{},{},{:.5},{:.5},{:.5},{},{}{pan}",
                 base.re,
                 base.l,
                 r.cx,
@@ -243,7 +403,7 @@ fn cmd_polar(a: &Args) {
                     "divergence".into()
                 }
             ),
-            Err(e) => println!("{alpha},,,,,,,{e}"),
+            Err(e) => println!("{alpha},,,,,,,{e}{pan}"),
         }
     }
     eprintln!("{:.1} s", t0.elapsed().as_secs_f64());
@@ -305,10 +465,22 @@ fn main() {
     match a.cmd.as_str() {
         "run" => cmd_run(&a),
         "polar" => cmd_polar(&a),
+        "panel" => cmd_panel(&a),
         "bench" => cmd_bench(&a),
         "" => {
+            // Options sans sous-commande : réglages initiaux de l'interface.
             #[cfg(feature = "gui")]
-            gui::main();
+            gui::main(gui::Start {
+                cfg: a.opts.keys().any(|k| k != "field" && k != "graph").then(|| {
+                    let mut c = a.config();
+                    if !a.opts.contains_key("l") {
+                        c.l = 32;
+                    }
+                    c
+                }),
+                field: a.opts.get("field").cloned(),
+                graph: a.opts.get("graph").cloned(),
+            });
             #[cfg(not(feature = "gui"))]
             usage();
         }

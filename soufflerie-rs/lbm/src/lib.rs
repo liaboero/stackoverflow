@@ -22,9 +22,12 @@ pub mod d2q9;
 pub mod geometry;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod panel;
+pub mod sa;
 pub mod shapes;
 pub mod stats;
 pub mod tunnel;
+pub mod wall;
 
 pub use shapes::{Naca, ShapeKind, ShapeParams};
-pub use tunnel::{Coefficients, EngineKind, TunnelConfig, WindTunnel};
+pub use tunnel::{Coefficients, EngineKind, Transition, TunnelConfig, Turbulence, WindTunnel};

@@ -1,8 +1,10 @@
 //! Validation physique du moteur CPU : mêmes cas et mêmes bornes que la suite
 //! de l'application web (tests/validate.mjs), valeurs JS rappelées.
 
+use lbm::cpu::Macros;
 use lbm::stats::{analyze, Analysis};
-use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, TunnelConfig, WindTunnel};
+use lbm::wall::WallSampler;
+use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence, WindTunnel};
 
 /// Fait tourner une configuration et analyse les `avg_t` derniers temps convectifs.
 pub fn run(cfg: TunnelConfig, t_end: f64, avg_t: f64) -> (Analysis, bool) {
@@ -104,4 +106,77 @@ fn magnus() {
     let (a, ok) = run(c, 70.0, 25.0);
     println!("Cylindre tournant ΩR/U = 1 : Cz = {:.3}, Cx = {:.3}", a.cz, a.cx);
     assert!(ok && a.cz > 2.0 && a.cz < 3.2);
+}
+
+// Spalart–Allmaras + loi de paroi, transition imposée par la méthode des
+// panneaux. Comme dans l'application web, seules la portance et la
+// stabilité sont vérifiées : la traînée LBM d'un profil mince n'est pas
+// convergée en maillage à ces résolutions.
+#[test]
+fn spalart_allmaras_transition_libre() {
+    // JS : Cz = 0,491 (panneaux 0,471 ; mesures ≈ 0,44).
+    let cfg = TunnelConfig {
+        turbulence: Turbulence::Sa,
+        transition: Transition::Free,
+        ..naca(1e6, 16, 4.0)
+    };
+    let wt = WindTunnel::new(cfg.clone()).unwrap();
+    let p = wt.panel.as_ref().expect("référence panneaux");
+    assert!((p.cl - 0.471).abs() < 0.01, "panneaux Cz = {}", p.cl);
+    drop(wt);
+    let (a, ok) = run(cfg, 20.0, 5.0);
+    println!(
+        "SA, Re = 10⁶, α = 4°, transition libre : Cz = {:.4} (JS 0,491), Cx = {:.4}",
+        a.cz, a.cx
+    );
+    assert!(ok && a.cz > 0.42 && a.cz < 0.56);
+    assert!((a.cz - 0.491).abs() < 0.01);
+}
+
+#[test]
+fn spalart_allmaras_re1e7() {
+    // JS : Cz = 0,934 (stabilité à α = 8°).
+    let cfg = TunnelConfig {
+        turbulence: Turbulence::Sa,
+        transition: Transition::Turbulent,
+        ..naca(1e7, 16, 8.0)
+    };
+    let (a, ok) = run(cfg, 15.0, 5.0);
+    println!("SA, Re = 10⁷, α = 8° : Cz = {:.4} (JS 0,934), Cx = {:.4}", a.cz, a.cx);
+    assert!(ok && a.cz > 0.75 && a.cz < 1.1);
+    assert!((a.cz - 0.934).abs() < 0.015);
+}
+
+/// Pression pariétale d'un cylindre stationnaire : point d'arrêt, symétrie, aspiration.
+#[test]
+fn paroi_cylindre_re40() {
+    let mut wt = WindTunnel::new(cyl(40.0, 16)).unwrap();
+    let spt = wt.steps_per_tstar();
+    wt.run((25.0 * spt) as usize);
+    let mut ws = WallSampler::new(&wt);
+    let mut m = Macros::default();
+    for _ in 0..20 {
+        wt.run((0.25 * spt) as usize);
+        wt.engine.macros(&mut m);
+        ws.add(&wt, &m);
+    }
+    let r = ws.result();
+    let near = |side: &[lbm::wall::WallPoint], s: f64| {
+        side.iter()
+            .min_by(|a, b| (a.s - s).abs().total_cmp(&(b.s - s).abs()))
+            .unwrap()
+            .cp
+    };
+    let cp0 = 0.5 * (near(&r.upper, 0.0) + near(&r.lower, 0.0));
+    let cp_min = r.upper.iter().map(|p| p.cp).fold(f64::INFINITY, f64::min);
+    let asym = (near(&r.upper, 90.0) - near(&r.lower, 90.0)).abs();
+    let cf_max = r.upper.iter().map(|p| p.cf).fold(f64::NEG_INFINITY, f64::max);
+    println!(
+        "Cylindre Re = 40 : Cp(0°) = {cp0:.3}, Cp min = {cp_min:.3}, écart haut/bas à 90° = {asym:.4}, Cf max = {cf_max:.4}, {} mailles",
+        r.upper.len() + r.lower.len()
+    );
+    assert!(cp0 > 0.9 && cp0 < 1.35);
+    assert!(cp_min < -0.6 && cp_min > -2.0);
+    assert!(asym < 0.02);
+    assert!(cf_max > 0.0);
 }

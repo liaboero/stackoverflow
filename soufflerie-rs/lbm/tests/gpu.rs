@@ -1,7 +1,7 @@
 //! Moteur GPU contre moteur processeur (ignoré sans adaptateur GPU).
 #![cfg(feature = "gpu")]
 
-use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, TunnelConfig, WindTunnel};
+use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence, WindTunnel};
 
 fn coeffs(cfg: TunnelConfig, steps: usize, every: usize) -> Option<Vec<(f64, f64, f64)>> {
     let mut wt = match WindTunnel::new(cfg) {
@@ -26,18 +26,28 @@ fn coeffs(cfg: TunnelConfig, steps: usize, every: usize) -> Option<Vec<(f64, f64
 
 #[test]
 fn gpu_egal_cpu() {
-    for (shape, re, alpha, spin) in [
-        (ShapeKind::Cylinder, 100.0, 0.0, 0.0),
-        (ShapeKind::Naca, 2000.0, 6.0, 0.0),
-        (ShapeKind::Cylinder, 100.0, 0.0, 1.0),
+    // Spalart–Allmaras : transition libre (zone laminaire de la couche limite
+    // intégrale), puis turbulent avec paroi mobile.
+    for (shape, re, alpha, spin, sa) in [
+        (ShapeKind::Cylinder, 100.0, 0.0, 0.0, false),
+        (ShapeKind::Naca, 2000.0, 6.0, 0.0, false),
+        (ShapeKind::Cylinder, 100.0, 0.0, 1.0, false),
+        (ShapeKind::Naca, 1e6, 4.0, 0.0, true),
+        (ShapeKind::Cylinder, 1e5, 0.0, 1.0, true),
     ] {
         let base = TunnelConfig {
             l: 10,
             re,
             shape,
+            turbulence: if sa { Turbulence::Sa } else { Turbulence::Off },
+            transition: if spin > 0.0 {
+                Transition::Turbulent
+            } else {
+                Transition::Free
+            },
             params: ShapeParams {
                 alpha_deg: alpha,
-                naca: Naca::parse("2412").unwrap(),
+                naca: Naca::parse(if sa { "0012" } else { "2412" }).unwrap(),
                 spin_ratio: spin,
                 ..Default::default()
             },
@@ -70,7 +80,7 @@ fn gpu_egal_cpu() {
                 .max((a.2 - b.2).abs());
         }
         let (a, b) = (cpu.last().unwrap(), gpu.last().unwrap());
-        println!("{shape:?} Re = {re} : CPU Cx, Cz, Cm = {:.4}, {:.4}, {:.4} ; GPU = {:.4}, {:.4}, {:.4} ; écart max {dmax:.2e}", a.0, a.1, a.2, b.0, b.1, b.2);
+        println!("{shape:?} Re = {re} SA {sa} : CPU Cx, Cz, Cm = {:.4}, {:.4}, {:.4} ; GPU = {:.4}, {:.4}, {:.4} ; écart max {dmax:.2e}", a.0, a.1, a.2, b.0, b.1, b.2);
         assert!(dmax < 2e-3, "écart GPU/CPU {dmax}");
     }
 }

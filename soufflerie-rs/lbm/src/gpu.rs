@@ -4,7 +4,7 @@
 //! paramètres variables d'un pas à l'autre (mise en vitesse) passent par un
 //! décalage dynamique du tampon uniforme : des centaines de pas partent en une
 //! seule soumission. Les efforts s'accumulent par maille pariétale et sont
-//! relus en une fois.
+//! relus en une fois. Avec Spalart–Allmaras, une troisième passe transporte ν̃.
 
 use std::sync::mpsc;
 
@@ -17,6 +17,7 @@ use crate::shapes::Body;
 
 const STEP_WGSL: &str = include_str!("d2q9.wgsl");
 const MACRO_WGSL: &str = include_str!("macros.wgsl");
+const SA_WGSL: &str = include_str!("sa.wgsl");
 /// Pas par soumission (emplacements de paramètres).
 const BATCH: usize = 256;
 const SLOT: u64 = 256;
@@ -36,6 +37,8 @@ struct Params {
     rot_y: f32,
     ref_x: f32,
     ref_y: f32,
+    nu: f32,
+    pad: [f32; 3],
 }
 
 pub struct GpuSolver {
@@ -48,7 +51,10 @@ pub struct GpuSolver {
     kind: wgpu::Buffer,
     wq: wgpu::Buffer,
     aux: wgpu::Buffer,
-    damp: wgpu::Buffer,
+    /// Par maille : (amortissement de la sous-maille, distance, Cf laminaire, angle de la normale).
+    cell: wgpu::Buffer,
+    /// Spalart–Allmaras : (u_x, u_y, u_τ, ν̃), deux tampons alternés.
+    sa: [wgpu::Buffer; 2],
     force: wgpu::Buffer,
     force_read: wgpu::Buffer,
     params: wgpu::Buffer,
@@ -56,11 +62,15 @@ pub struct GpuSolver {
     macro_read: wgpu::Buffer,
     _macro_params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
+    sa_layout: wgpu::BindGroupLayout,
     step_pipe: wgpu::ComputePipeline,
     bound_pipe: wgpu::ComputePipeline,
+    sa_pipe: wgpu::ComputePipeline,
     macro_pipe: wgpu::ComputePipeline,
-    bind: [wgpu::BindGroup; 2],
+    bind: Vec<wgpu::BindGroup>,
+    sa_bind: Vec<wgpu::BindGroup>,
     macro_bind: [wgpu::BindGroup; 2],
+    sa_active: bool,
     cur: usize,
     pub time: u64,
     tau0: f64,
@@ -71,6 +81,17 @@ pub struct GpuSolver {
     ref_x: f64,
     ref_y: f64,
     spin: f64,
+}
+
+/// Entrées d'un groupe de liaison, numérotées dans l'ordre.
+fn entries(res: Vec<wgpu::BindingResource<'_>>) -> Vec<wgpu::BindGroupEntry<'_>> {
+    res.into_iter()
+        .enumerate()
+        .map(|(k, resource)| wgpu::BindGroupEntry {
+            binding: k as u32,
+            resource,
+        })
+        .collect()
 }
 
 fn storage(read_only: bool, binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -121,7 +142,9 @@ impl GpuSolver {
         let kind = mk("kind", 4 * n as u64, st);
         let wq = mk("wq", 36 * n as u64, st);
         let aux = mk("aux", 4 * (nx + ny) as u64, st);
-        let damp = mk("damp", 4 * n as u64, st);
+        let cell = mk("cell", 16 * n as u64, st);
+        // Alloués à la première activation de Spalart–Allmaras.
+        let sa = [mk("sa0", 16, st), mk("sa1", 16, st)];
         let force = mk("force", 16, st);
         let force_read = mk(
             "force_read",
@@ -165,6 +188,27 @@ impl GpuSolver {
                 storage(true, 5),
                 storage(true, 6),
                 storage(false, 7),
+                storage(false, 8),
+            ],
+        });
+        let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sa"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+                    },
+                    count: None,
+                },
+                storage(true, 1),
+                storage(true, 2),
+                storage(true, 3),
+                storage(true, 4),
+                storage(false, 5),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -188,6 +232,23 @@ impl GpuSolver {
         };
         let step_pipe = pipe("step");
         let bound_pipe = pipe("boundary");
+        let sa_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sa"),
+            bind_group_layouts: &[Some(&sa_layout)],
+            immediate_size: 0,
+        });
+        let sa_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sa"),
+            source: wgpu::ShaderSource::Wgsl(SA_WGSL.into()),
+        });
+        let sa_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("sa_step"),
+            layout: Some(&sa_pl),
+            module: &sa_mod,
+            entry_point: Some("sa_step"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let mmod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("macros"),
             source: wgpu::ShaderSource::Wgsl(MACRO_WGSL.into()),
@@ -202,10 +263,9 @@ impl GpuSolver {
         });
         let geo = Geometry::new(nx, ny, cfg.les_wall_a);
         let mut s = GpuSolver {
-            bind: [
-                Self::bind_group(&device, &layout, &params, &f[0], &f[1], &kind, &wq, &aux, &damp, &force),
-                Self::bind_group(&device, &layout, &params, &f[1], &f[0], &kind, &wq, &aux, &damp, &force),
-            ],
+            bind: Vec::new(),
+            sa_bind: Vec::new(),
+            sa_active: false,
             macro_bind: [
                 Self::macro_group(&device, &macro_pipe, &macro_params, &f[0], &kind, &macro_buf),
                 Self::macro_group(&device, &macro_pipe, &macro_params, &f[1], &kind, &macro_buf),
@@ -219,7 +279,8 @@ impl GpuSolver {
             kind,
             wq,
             aux,
-            damp,
+            cell,
+            sa,
             force,
             force_read,
             params,
@@ -227,8 +288,10 @@ impl GpuSolver {
             macro_read,
             _macro_params: macro_params,
             layout,
+            sa_layout,
             step_pipe,
             bound_pipe,
+            sa_pipe,
             macro_pipe,
             cur: 0,
             time: 0,
@@ -243,65 +306,54 @@ impl GpuSolver {
         };
         s.set_viscosity(s.cfg.nu);
         s.upload_geometry();
+        s.rebuild_binds();
         s.reset(s.cfg.u_in);
         Ok(s)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn bind_group(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        params: &wgpu::Buffer,
-        src: &wgpu::Buffer,
-        dst: &wgpu::Buffer,
-        kind: &wgpu::Buffer,
-        wq: &wgpu::Buffer,
-        aux: &wgpu::Buffer,
-        damp: &wgpu::Buffer,
-        force: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("d2q9"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: params,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: src.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: dst.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: kind.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wq.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: aux.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: damp.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: force.as_entire_binding(),
-                },
-            ],
-        })
+    /// Groupes de liaison des passes (à refaire quand un tampon change).
+    fn rebuild_binds(&mut self) {
+        let d = &self.device;
+        let params = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.params,
+            offset: 0,
+            size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+        });
+        self.bind = (0..2)
+            .map(|c| {
+                d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("d2q9"),
+                    layout: &self.layout,
+                    entries: &entries(vec![
+                        params.clone(),
+                        self.f[c].as_entire_binding(),
+                        self.f[1 - c].as_entire_binding(),
+                        self.kind.as_entire_binding(),
+                        self.wq.as_entire_binding(),
+                        self.aux.as_entire_binding(),
+                        self.cell.as_entire_binding(),
+                        self.force.as_entire_binding(),
+                        self.sa[c].as_entire_binding(),
+                    ]),
+                })
+            })
+            .collect();
+        self.sa_bind = (0..2)
+            .map(|c| {
+                d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sa"),
+                    layout: &self.sa_layout,
+                    entries: &entries(vec![
+                        params.clone(),
+                        self.kind.as_entire_binding(),
+                        self.aux.as_entire_binding(),
+                        self.cell.as_entire_binding(),
+                        self.sa[c].as_entire_binding(),
+                        self.sa[1 - c].as_entire_binding(),
+                    ]),
+                })
+            })
+            .collect();
     }
 
     fn macro_group(
@@ -361,8 +413,90 @@ impl GpuSolver {
 
     pub fn set_les_wall_length(&mut self, a: f64) {
         self.geo.set_les_wall_length(a);
-        self.queue
-            .write_buffer(&self.damp, 0, bytemuck::cast_slice(&self.geo.les_damp));
+        self.upload_cell();
+    }
+
+    /// Active ou coupe Spalart–Allmaras avec loi de paroi.
+    pub fn set_turbulence(&mut self, on: bool) {
+        let was = self.sa_active;
+        self.sa_active = on;
+        let size = 16 * (self.cfg.nx * self.cfg.ny) as u64;
+        if on && self.sa[0].size() < size {
+            let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+            let mk = |label| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size,
+                    usage: st,
+                    mapped_at_creation: false,
+                })
+            };
+            self.sa = [mk("sa0"), mk("sa1")];
+            self.rebuild_binds();
+        }
+        if on && !was {
+            self.init_sa();
+        }
+    }
+
+    pub fn sa_active(&self) -> bool {
+        self.sa_active
+    }
+
+    /// Zone laminaire (`geo.lam`) modifiée : renvoie les données par maille.
+    pub fn update_laminar_zone(&mut self) {
+        self.upload_cell();
+    }
+
+    /// ν̃ = 3ν au large, nul dans le corps ; vitesses et u_τ nuls.
+    fn init_sa(&mut self) {
+        let n = self.cfg.nx * self.cfg.ny;
+        if self.sa[0].size() < 16 * n as u64 {
+            return;
+        }
+        let v = crate::sa::nu_tilde_inf(self.cfg.nu);
+        let init: Vec<[f32; 4]> = self
+            .geo
+            .kind
+            .iter()
+            .map(|&k| [0.0, 0.0, 0.0, if k == crate::geometry::SOLID { 0.0 } else { v }])
+            .collect();
+        for b in &self.sa {
+            self.queue.write_buffer(b, 0, bytemuck::cast_slice(&init));
+        }
+    }
+
+    /// ν̃ et u_τ (lecture synchrone ; vide si Spalart–Allmaras est inactif).
+    pub fn sa_state(&mut self) -> Vec<[f32; 4]> {
+        let n = self.cfg.nx * self.cfg.ny;
+        if !self.sa_active || self.sa[0].size() < 16 * n as u64 {
+            return Vec::new();
+        }
+        let size = 16 * n as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sa_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let v = self.read_buffer(&self.sa[self.cur], &staging, size);
+        v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+    }
+
+    /// Amortissement de la sous-maille, distance, Cf laminaire et angle de la normale.
+    fn upload_cell(&mut self) {
+        let g = &self.geo;
+        let cell: Vec<[f32; 4]> = (0..g.n)
+            .map(|i| {
+                [
+                    g.les_damp[i],
+                    g.dist[i],
+                    g.lam[i],
+                    g.normal[2 * i + 1].atan2(g.normal[2 * i]),
+                ]
+            })
+            .collect();
+        self.queue.write_buffer(&self.cell, 0, bytemuck::cast_slice(&cell));
     }
 
     /// τ par colonne (éponge) puis coefficient des bandes absorbantes par ligne.
@@ -403,8 +537,7 @@ impl GpuSolver {
         self.queue.write_buffer(&self.kind, 0, bytemuck::cast_slice(&kind));
         self.queue
             .write_buffer(&self.wq, 0, bytemuck::cast_slice(&self.geo.wall_q));
-        self.queue
-            .write_buffer(&self.damp, 0, bytemuck::cast_slice(&self.geo.les_damp));
+        self.upload_cell();
         let wc = self.geo.wall_cells.len();
         if wc != self.wall_count || self.force.size() < (16 * wc.max(1)) as u64 {
             let size = (16 * wc.max(1)) as u64;
@@ -420,33 +553,10 @@ impl GpuSolver {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let d = &self.device;
-            self.bind = [
-                Self::bind_group(
-                    d,
-                    &self.layout,
-                    &self.params,
-                    &self.f[0],
-                    &self.f[1],
-                    &self.kind,
-                    &self.wq,
-                    &self.aux,
-                    &self.damp,
-                    &self.force,
-                ),
-                Self::bind_group(
-                    d,
-                    &self.layout,
-                    &self.params,
-                    &self.f[1],
-                    &self.f[0],
-                    &self.kind,
-                    &self.wq,
-                    &self.aux,
-                    &self.damp,
-                    &self.force,
-                ),
-            ];
+            self.wall_count = wc;
+            if !self.bind.is_empty() {
+                self.rebuild_binds();
+            }
         }
         self.wall_count = wc;
     }
@@ -492,12 +602,14 @@ impl GpuSolver {
         self.time = 0;
         self.force_steps = 0;
         self.finite = true;
+        self.init_sa();
     }
 
     fn flags(&self) -> u32 {
         (self.cfg.collision == Collision::Rr) as u32
             | ((self.les_active as u32) << 1)
             | ((self.cfg.bouzidi as u32) << 2)
+            | ((self.sa_active as u32) << 3)
     }
 
     /// `n` pas ; la vitesse d'entrée suit `ramp`.
@@ -522,6 +634,8 @@ impl GpuSolver {
                     rot_y: self.ref_y as f32,
                     ref_x: self.ref_x as f32,
                     ref_y: self.ref_y as f32,
+                    nu: self.cfg.nu as f32,
+                    pad: [0.0; 3],
                 };
                 let o = s * SLOT as usize;
                 bytes[o..o + std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(&p));
@@ -537,6 +651,11 @@ impl GpuSolver {
                     pass.dispatch_workgroups(nx.div_ceil(64), ny, 1);
                     pass.set_pipeline(&self.bound_pipe);
                     pass.dispatch_workgroups(ny.div_ceil(64), 1, 1);
+                    if self.sa_active {
+                        pass.set_pipeline(&self.sa_pipe);
+                        pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
+                        pass.dispatch_workgroups(nx.div_ceil(64), ny, 1);
+                    }
                     self.cur = 1 - self.cur;
                 }
             }

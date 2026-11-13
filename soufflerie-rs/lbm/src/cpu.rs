@@ -10,6 +10,7 @@ use rayon::prelude::*;
 
 use crate::d2q9::{collide, equilibrium, moments, Relax, CX, CY, OPP, REFY, W};
 use crate::geometry::{Geometry, NEAR, SOLID};
+use crate::sa::{self, SaFields};
 use crate::shapes::Body;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +102,9 @@ pub struct CpuSolver {
     forces: ForceSum,
     last: (f64, f64, f64),
     pool: Option<rayon::ThreadPool>,
+    /// Spalart–Allmaras actif ; champs alloués à la première activation.
+    sa_active: bool,
+    sa: Option<SaFields>,
 }
 
 impl CpuSolver {
@@ -144,6 +148,8 @@ impl CpuSolver {
             forces: ForceSum::default(),
             last: (0.0, 0.0, 0.0),
             pool,
+            sa_active: false,
+            sa: None,
             cfg,
         };
         s.set_viscosity(s.cfg.nu);
@@ -194,6 +200,36 @@ impl CpuSolver {
         self.geo.set_les_wall_length(a);
     }
 
+    /// Active ou coupe Spalart–Allmaras avec loi de paroi.
+    pub fn set_turbulence(&mut self, on: bool) {
+        let was = self.sa_active;
+        self.sa_active = on;
+        if on && self.sa.is_none() {
+            self.sa = Some(SaFields::new(self.cfg.nx * self.cfg.ny));
+        }
+        if on && !was {
+            self.init_sa();
+        }
+    }
+
+    pub fn sa_active(&self) -> bool {
+        self.sa_active
+    }
+
+    /// Champs de Spalart–Allmaras (ν̃, u_τ…), s'il a été activé.
+    pub fn sa_fields(&self) -> Option<&SaFields> {
+        self.sa.as_ref().filter(|_| self.sa_active)
+    }
+
+    /// Zone laminaire modifiée (`geo.lam`) : rien à faire sur processeur.
+    pub fn update_laminar_zone(&mut self) {}
+
+    fn init_sa(&mut self) {
+        if let Some(st) = self.sa.as_mut() {
+            st.init(&self.geo, self.cfg.nu);
+        }
+    }
+
     /// Définit le corps.
     pub fn set_body(&mut self, body: &Body) {
         self.ref_x = body.ref_x;
@@ -238,6 +274,7 @@ impl CpuSolver {
         self.g.copy_from_slice(&self.f);
         self.time = 0;
         self.forces = ForceSum::default();
+        self.init_sa();
     }
 
     /// `n` pas ; la vitesse d'entrée suit `ramp`.
@@ -285,19 +322,55 @@ impl CpuSolver {
             spin: self.spin,
             rot: (self.rot_x, self.rot_y),
             refp: (self.ref_x, self.ref_y),
+            nu: self.cfg.nu,
+            inv_nu: (1.0 / self.cfg.nu) as f32,
+            nu_tilde: &[],
         };
-        let (fx, fy, mz) = self
-            .g
-            .par_chunks_mut(9 * nx)
-            .enumerate()
-            .map(|(y, row)| match (rr, les) {
-                (true, true) => ctx.row::<true, true>(y, row),
-                (true, false) => ctx.row::<true, false>(y, row),
-                (false, true) => ctx.row::<false, true>(y, row),
-                (false, false) => ctx.row::<false, false>(y, row),
-            })
-            .reduce(|| (0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+        let sum = |a: (f64, f64, f64), b: (f64, f64, f64)| (a.0 + b.0, a.1 + b.1, a.2 + b.2);
+        let (fx, fy, mz) = match self.sa.as_mut().filter(|_| self.sa_active) {
+            Some(st) => {
+                let ctx = StepCtx {
+                    nu_tilde: &st.nu_tilde,
+                    ..ctx
+                };
+                self.g
+                    .par_chunks_mut(9 * nx)
+                    .zip(st.usx.par_chunks_mut(nx))
+                    .zip(st.usy.par_chunks_mut(nx))
+                    .zip(st.utau.par_chunks_mut(nx))
+                    .enumerate()
+                    .map(|(y, (((row, usx), usy), utau))| {
+                        let mut w = SaRow { usx, usy, utau };
+                        match (rr, les) {
+                            (true, true) => ctx.row::<true, true, true>(y, row, &mut w),
+                            (true, false) => ctx.row::<true, false, true>(y, row, &mut w),
+                            (false, true) => ctx.row::<false, true, true>(y, row, &mut w),
+                            (false, false) => ctx.row::<false, false, true>(y, row, &mut w),
+                        }
+                    })
+                    .reduce(|| (0.0, 0.0, 0.0), sum)
+            }
+            None => self
+                .g
+                .par_chunks_mut(9 * nx)
+                .enumerate()
+                .map(|(y, row)| {
+                    let mut w = SaRow::default();
+                    match (rr, les) {
+                        (true, true) => ctx.row::<true, true, false>(y, row, &mut w),
+                        (true, false) => ctx.row::<true, false, false>(y, row, &mut w),
+                        (false, true) => ctx.row::<false, true, false>(y, row, &mut w),
+                        (false, false) => ctx.row::<false, false, false>(y, row, &mut w),
+                    }
+                })
+                .reduce(|| (0.0, 0.0, 0.0), sum),
+        };
         self.open_boundaries();
+        if self.sa_active {
+            if let Some(st) = self.sa.as_mut() {
+                st.step(&self.geo, self.cfg.nu, &self.sigma_row);
+            }
+        }
         std::mem::swap(&mut self.f, &mut self.g);
         self.last = (fx, fy, mz);
         self.forces.fx += fx;
@@ -313,6 +386,7 @@ impl CpuSolver {
         let (nx, ny) = (self.cfg.nx, self.cfg.ny);
         let u = self.u_in;
         let dst = &mut self.g;
+        let mut sa = self.sa.as_mut().filter(|_| self.sa_active);
         for y in 0..ny {
             for (b, nb, inlet) in [(0usize, 1usize, true), (nx - 1, nx - 2, false)] {
                 let fnb: [f32; 9] = std::array::from_fn(|i| dst[(y * 9 + i) * nx + nb]);
@@ -325,6 +399,11 @@ impl CpuSolver {
                 let en = equilibrium(rho, ux, uy);
                 for i in 0..9 {
                     dst[(y * 9 + i) * nx + b] = eb[i] + fnb[i] - en[i];
+                }
+                if let Some(st) = sa.as_deref_mut() {
+                    let (vx, vy) = if inlet { (u, 0.0) } else { (ux, uy) };
+                    st.usx[y * nx + b] = vx;
+                    st.usy[y * nx + b] = vy;
                 }
             }
         }
@@ -400,6 +479,18 @@ struct StepCtx<'a> {
     spin: f64,
     rot: (f64, f64),
     refp: (f64, f64),
+    /// Viscosité moléculaire, son inverse et ν̃ (Spalart–Allmaras).
+    nu: f64,
+    inv_nu: f32,
+    nu_tilde: &'a [f32],
+}
+
+/// Champs de Spalart–Allmaras d'une ligne, écrits pendant le pas.
+#[derive(Default)]
+struct SaRow<'a> {
+    usx: &'a mut [f32],
+    usy: &'a mut [f32],
+    utau: &'a mut [f32],
 }
 
 impl StepCtx<'_> {
@@ -409,20 +500,32 @@ impl StepCtx<'_> {
     }
 
     /// Une ligne ; renvoie les efforts (Fx, Fy, Mz) de ses mailles pariétales.
-    fn row<const RR: bool, const LES: bool>(&self, y: usize, row: &mut [f32]) -> (f64, f64, f64) {
+    fn row<const RR: bool, const LES: bool, const SA: bool>(
+        &self,
+        y: usize,
+        row: &mut [f32],
+        w: &mut SaRow,
+    ) -> (f64, f64, f64) {
         let nx = self.nx;
         let sigma = self.sigma_row[y];
         let damp = &self.geo.les_damp[y * nx..(y + 1) * nx];
         for &(x0, x1) in &self.geo.runs[y] {
-            self.fluid_run::<RR, LES>(y, row, x0, x1, damp, sigma);
+            self.fluid_run::<RR, LES, SA>(y, row, x0, x1, damp, sigma, w);
         }
         let mut force = (0.0, 0.0, 0.0);
         for &x in &self.geo.near[y] {
             let idx = y * nx + x;
             debug_assert_eq!(self.geo.kind[idx], NEAR);
-            let f = self.pull_near_wall(x, y, &mut force);
+            let f = self.pull_near_wall::<SA>(x, y, &mut force, w);
+            let mut tau = self.tau_col[x];
+            if SA {
+                let (_, ux, uy) = moments(&f);
+                w.usx[x] = ux;
+                w.usy[x] = uy;
+                tau += 3.0 * sa::nu_turb(self.nu_tilde[idx], self.inv_nu);
+            }
             let r = Relax {
-                tau: self.tau_col[x],
+                tau,
                 c18: if LES { self.c18 * damp[x] } else { 0.0 },
                 gx: self.gx,
                 sigma,
@@ -437,7 +540,8 @@ impl StepCtx<'_> {
 
     /// Mailles fluides ordinaires [x0, x1) : boucle sans branchement.
     #[inline(always)]
-    fn fluid_run<const RR: bool, const LES: bool>(
+    #[allow(clippy::too_many_arguments)]
+    fn fluid_run<const RR: bool, const LES: bool, const SA: bool>(
         &self,
         y: usize,
         row: &mut [f32],
@@ -445,6 +549,7 @@ impl StepCtx<'_> {
         x1: usize,
         damp: &[f32],
         sigma: f32,
+        w: &mut SaRow,
     ) {
         let nx = self.nx;
         let n = x1 - x0;
@@ -463,10 +568,29 @@ impl StepCtx<'_> {
         let dm = &damp[x0..x1];
         let q = &self.q_eq;
         let (c18, gx) = (self.c18, self.gx);
+        let (usx, usy, nt): (&mut [f32], &mut [f32], &[f32]) = if SA {
+            (
+                &mut w.usx[x0..x1],
+                &mut w.usy[x0..x1],
+                &self.nu_tilde[y * nx + x0..y * nx + x1],
+            )
+        } else {
+            (&mut [], &mut [], &[])
+        };
+        let inv_nu = self.inv_nu;
         for k in 0..n {
             let f = [s0[k], s1[k], s2[k], s3[k], s4[k], s5[k], s6[k], s7[k], s8[k]];
+            let mut tk = tau[k];
+            if SA {
+                // Vitesse avant collision (loi de paroi, transport de ν̃) et
+                // viscosité turbulente ajoutée au temps de relaxation.
+                let (_, ux, uy) = moments(&f);
+                usx[k] = ux;
+                usy[k] = uy;
+                tk += 3.0 * sa::nu_turb(nt[k], inv_nu);
+            }
             let r = Relax {
-                tau: tau[k],
+                tau: tk,
                 c18: if LES { c18 * dm[k] } else { 0.0 },
                 gx,
                 sigma,
@@ -487,9 +611,16 @@ impl StepCtx<'_> {
     /// Propagation d'une maille voisine de la paroi : rebond interpolé de
     /// Bouzidi (paroi mobile si le cylindre tourne), réflexion spéculaire en
     /// haut et en bas, efforts par échange de quantité de mouvement.
-    fn pull_near_wall(&self, x: usize, y: usize, force: &mut (f64, f64, f64)) -> [f32; 9] {
+    fn pull_near_wall<const SA: bool>(
+        &self,
+        x: usize,
+        y: usize,
+        force: &mut (f64, f64, f64),
+        w: &mut SaRow,
+    ) -> [f32; 9] {
         let (nx, ny, n) = (self.nx, self.ny, self.n);
         let idx = y * nx + x;
+        let mut slip: Option<(f64, f64)> = None;
         let mut out = [0.0f32; 9];
         out[0] = self.at(x, y, 0);
         for j in 1..9 {
@@ -514,6 +645,12 @@ impl StepCtx<'_> {
             if self.spin != 0.0 {
                 uwx = -self.spin * (wy - self.rot.1);
                 uwy = self.spin * (wx - self.rot.0);
+            }
+            if SA {
+                // Loi de paroi : glissement tangentiel (vitesse du pas précédent).
+                let (sx, sy) = *slip.get_or_insert_with(|| self.wall_slip(idx, x, y, w));
+                uwx += sx;
+                uwy += sy;
             }
             let corr = 6.0 * W[j] * (cx as f32 * uwx as f32 + cy as f32 * uwy as f32);
             let val = if !self.bouzidi {
@@ -544,5 +681,22 @@ impl StepCtx<'_> {
             force.2 += (wx - self.refp.0) * fyl - (wy - self.refp.1) * fxl;
         }
         out
+    }
+
+    /// Glissement de la loi de paroi d'une maille pariétale ; met à jour u_τ.
+    fn wall_slip(&self, idx: usize, x: usize, y: usize, w: &mut SaRow) -> (f64, f64) {
+        let geo = self.geo;
+        let mut ux = w.usx[x] as f64;
+        let mut uy = w.usy[x] as f64;
+        if self.spin != 0.0 {
+            // Vitesse relative à la paroi tournante.
+            ux += self.spin * (y as f64 - self.rot.1);
+            uy -= self.spin * (x as f64 - self.rot.0);
+        }
+        let normal = (geo.normal[2 * idx] as f64, geo.normal[2 * idx + 1] as f64);
+        let yw = (geo.dist[idx] as f64).max(0.1);
+        let (sx, sy, utau) = sa::wall_slip(ux, uy, normal, yw, geo.lam[idx] as f64, self.nu);
+        w.utau[x] = utau as f32;
+        (sx, sy)
     }
 }

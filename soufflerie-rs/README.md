@@ -46,11 +46,26 @@ sans signification pour la vitesse.
   périodes et Strouhal.
 - Maquettes : cylindre (rotation), carré, ellipse, plaque, profil NACA à 4
   chiffres, triangle ; bord de fuite recalé sur le réseau.
+- **Turbulence de Spalart–Allmaras et loi de paroi de Spalding** (Re de
+  5·10⁴ à 10⁷), sur les deux moteurs : viscosité turbulente ajoutée au temps
+  de relaxation, glissement de paroi qui transmet le frottement de la loi,
+  ν̃ = κu_τy au premier nœud, sous-maille conservée loin de la paroi.
+- **Méthode des panneaux et couche limite intégrale** (tourbillons
+  linéaires, Thwaites, transition eᴺ, Head, Squire–Young, décrochage
+  approché de Kirchhoff, correction de compressibilité) : référence Cz, Cx,
+  Cm en écoulement attaché, et **couplage hybride** : en transition libre,
+  la paroi du calcul LBM reste laminaire en amont de la transition prédite.
+- **Distributions pariétales** Cp et Cf du calcul LBM, moyennées dans le
+  temps, comparées aux panneaux (profils) ou à l'écoulement potentiel
+  (cylindre).
 - Interface : veine zoomable (molette, glisser, double-clic pour recadrer),
-  vorticité, vitesse ou pression, traceurs en filets ou en **fronts** (lignes
-  de temps, couleurs alternées), force résultante, coefficients et
-  historique, copie CSV. Résolutions jusqu'à 192 mailles par longueur
-  (13 millions de mailles).
+  vorticité, vitesse, pression ou viscosité turbulente, traceurs en filets
+  ou en **fronts** (lignes de temps, couleurs alternées), force résultante,
+  coefficients, référence « panneaux + couche limite », historique et
+  distributions pariétales, copie CSV. Reynolds de 10 à 10⁷, résolutions
+  jusqu'à 192 mailles par longueur (13 millions de mailles).
+
+![NACA 2412 à 6°, Re = 10⁶, Spalart–Allmaras et transition libre : −Cp à la paroi, points LBM et tirets des panneaux](capture-sa.png)
 
 Validation (`cargo test --release`) : mêmes cas que l'application web, mêmes
 valeurs à 10⁻³ près.
@@ -62,11 +77,26 @@ valeurs à 10⁻³ près.
 | NACA 0012, α = ±4°, Re = 500, L = 12 | Cz = ±0,1972 | ±0,1972 |
 | NACA 0012, α = 0, Re = 1000, L = 16 | Cx = 0,1454 | 0,1454 |
 | Cylindre tournant ΩR/U = 1, Re = 100 | Cz = 2,642 | 2,642 |
+| SA, NACA 0012, Re = 10⁶, α = 4°, transition libre, L = 16 | Cz = 0,490, Cx = 0,0536 | 0,491, 0,0536 |
+| SA, NACA 0012, Re = 10⁷, α = 8°, turbulent, L = 16 | Cz = 0,931 | 0,934 |
+| SA, NACA 0012, Re = 10⁶, L = 32 : α = 0 turbulent / libre, α = 4° libre | Cx = 0,0126 / 0,0091, Cz = 0,505 | 0,0125 / 0,0091, 0,505 |
+| Panneaux, NACA 0012 non visqueux, α = 4° | Cz = 0,4797 | 0,4797 |
+| Panneaux + couche limite, Re = 6·10⁶ turbulent : α = 0, α = 10° | Cx = 0,00816 ; Cz = 1,168, Cx = 0,01285 | identiques |
+| Cylindre, Re = 40 : Cp au point d'arrêt | 1,145 | (≈ 1,14 publié) |
 
-Pas encore porté : turbulence de Spalart–Allmaras et loi de paroi, méthode
-des panneaux et couche limite intégrale, aile finie, soufflerie 3D,
-distributions Cp/Cf, balayage automatique dans l'interface (la commande
-`polar` le remplace).
+Le moteur GPU donne les mêmes efforts que le processeur avec Spalart–Allmaras
+(écart ≤ 7·10⁻⁵ sur un profil à Re = 10⁶ et un cylindre tournant à 10⁵).
+Spalart–Allmaras coûte environ 45 % de la vitesse sur processeur (131 au lieu
+de 239 millions de mailles par seconde sur 4 cœurs), un peu moins sur GPU.
+
+Comme dans l'application web, la portance et le décollement sont
+qualitatifs à ces résolutions, et la traînée LBM d'un profil mince reste
+approximative : la référence « panneaux + couche limite » est la bonne
+valeur de traînée en écoulement attaché.
+
+Pas encore porté : aile finie, soufflerie 3D, balayage automatique dans
+l'interface (les commandes `polar` et `panel` le remplacent), unités
+physiques (fluide, corde, vitesse) et Mach réel dans l'interface.
 
 ## Installation
 
@@ -74,8 +104,11 @@ Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
 
 ```sh
 cargo run --release                     # interface graphique
+cargo run --release -- --shape naca --naca 2412 --alpha 6 --re 1e6 --l 24 --graph cp   # interface réglée
 cargo run --release -- run --shape naca --naca 2412 --alpha 6 --re 1000 --l 32
+cargo run --release -- run --shape naca --naca 0012 --alpha 4 --re 1e6 --l 32 --turb sa
 cargo run --release -- polar --shape naca --naca 0012 --re 2000 --l 24 --alpha -4:12:2 > polaire.csv
+cargo run --release -- panel --naca 2412 --re 3e6 --alpha -4:18:1 > panneaux.csv   # instantané
 cargo run --release -- bench --l 32     # vitesse des moteurs
 cargo test --release                    # validation
 ```
@@ -87,7 +120,19 @@ Options de calcul : `--shape cylinder|square|ellipse|plate|naca|triangle`,
 `--naca 2412`, `--alpha 4`, `--re 1000`, `--l 32` (mailles par longueur),
 `--t 40` (durée en temps convectifs), `--avg 15` (fenêtre de moyenne),
 `--engine cpu|gpu`, `--threads 0` (tous les cœurs), `--spin 1`,
-`--thickness 0.4`, `--collision rr|bgk`, `--les auto|on|off`, `--u 0.1`.
+`--thickness 0.4`, `--collision rr|bgk`, `--les auto|on|off`, `--u 0.1`,
+`--turb auto|sa|off` (auto : Spalart–Allmaras dès Re = 5·10⁴),
+`--transition free|turb` (libre : position prédite par la couche limite
+intégrale, paroi laminaire en amont ; turb : couche limite turbulente dès le
+bord d'attaque). `panel` accepte aussi `--mach 0.5` (Prandtl–Glauert,
+Kármán–Tsien, détection de la zone supersonique locale). Sans sous-commande,
+les mêmes options règlent l'interface au démarrage, avec `--field
+vorticity|speed|pressure|eddy` et `--graph history|cp|cf`.
+
+`polar` ajoute les colonnes de la méthode des panneaux (Re ≥ 2·10⁴) ;
+`panel` donne Cz, Cx, Cm (décrochage de Kirchhoff compris), le Cz attaché,
+les transitions, le décollement et le Cp minimal, toutes incidences en
+quelques millisecondes.
 
 Linux : l'interface demande `libxkbcommon-x11` et un pilote Vulkan ou
 OpenGL (rendu wgpu, repli OpenGL automatique ; `SOUFFLERIE_RENDU=glow`
@@ -101,22 +146,25 @@ soufflerie-rs/
 ├── lbm/                bibliothèque de calcul
 │   ├── src/d2q9.rs     réseau, équilibre, collision (RR, BGK, sous-maille)
 │   ├── src/cpu.rs      moteur processeur (rayon, boucles vectorisées)
-│   ├── src/gpu.rs      moteur GPU (wgpu) ; d2q9.wgsl, macros.wgsl
-│   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance à la paroi
+│   ├── src/gpu.rs      moteur GPU (wgpu) ; d2q9.wgsl, sa.wgsl, macros.wgsl
+│   ├── src/sa.rs       Spalart–Allmaras, loi de paroi de Spalding
+│   ├── src/panel.rs    méthode des panneaux, couche limite intégrale, Kirchhoff
+│   ├── src/wall.rs     distributions pariétales Cp, Cf
+│   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
-│   ├── src/tunnel.rs   veine d'essai, mise en vitesse, coefficients
+│   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
-│   └── tests/          validation, comparaison GPU/CPU
+│   └── tests/          validation, panneaux, comparaison GPU/CPU
 └── app/                application : interface (egui) et commandes
-    ├── src/main.rs     ligne de commande (run, polar, bench)
+    ├── src/main.rs     ligne de commande (run, polar, panel, bench)
     ├── src/gui.rs      interface graphique
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
 ## Pistes
 
-- Porter Spalart–Allmaras et la méthode des panneaux (référence hybride),
-  puis l'aile finie et la 3D (le solveur WGSL 3D de l'application web se
+- Porter l'aile finie (la méthode des panneaux, déjà portée, fournit les
+  polaires de section) et la 3D (le solveur WGSL 3D de l'application web se
   transpose presque tel quel).
 - Stockage en demi-précision et propagation en place sur GPU (deux à quatre
   fois moins de mémoire), raffinement local de maillage.

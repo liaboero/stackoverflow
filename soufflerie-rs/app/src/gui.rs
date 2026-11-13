@@ -1,12 +1,16 @@
 //! Interface graphique (egui) : veine d'essai zoomable, traceurs, réglages,
-//! coefficients et historique des efforts.
+//! coefficients, référence « panneaux + couche limite », historique des
+//! efforts et distributions pariétales.
 
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, Points, VLine};
 use lbm::cpu::{Collision, LesMode};
-use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, TunnelConfig};
+use lbm::panel::{section_coefficients, PanelShape};
+use lbm::tunnel::RE_PANEL_MIN;
+use lbm::wall::WallAxis;
+use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence};
 
 use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers, BODY_RGB};
 
@@ -15,7 +19,17 @@ const ACCENT: Color32 = Color32::from_rgb(0xc8, 0x46, 0x1c);
 const LIFT: Color32 = Color32::from_rgb(0x1f, 0x6f, 0x9c);
 const TRACER: Color32 = Color32::from_rgba_premultiplied(16, 28, 38, 170);
 
-pub fn main() {
+/// Réglages initiaux de l'interface (options de la ligne de commande).
+#[derive(Clone)]
+pub struct Start {
+    pub cfg: Option<TunnelConfig>,
+    /// vorticity | speed | pressure | eddy
+    pub field: Option<String>,
+    /// history | cp | cf
+    pub graph: Option<String>,
+}
+
+pub fn main(start: Start) {
     // Rendu wgpu par défaut, OpenGL (glow) en repli ; SOUFFLERIE_RENDU=glow le force.
     let forced_glow = std::env::var("SOUFFLERIE_RENDU").map(|v| v == "glow").unwrap_or(false);
     let renderers: &[eframe::Renderer] = if forced_glow {
@@ -31,7 +45,13 @@ pub fn main() {
             renderer,
             ..Default::default()
         };
-        match eframe::run_native("Soufflerie de poche", opts, Box::new(|cc| Ok(Box::new(App::new(cc))))) {
+        // Chaque tentative de rendu reçoit sa copie des réglages.
+        let st = start.clone();
+        match eframe::run_native(
+            "Soufflerie de poche",
+            opts,
+            Box::new(move |cc| Ok(Box::new(App::new(cc, st)))),
+        ) {
             Ok(()) => return,
             Err(e) if k + 1 < renderers.len() => eprintln!("Rendu {renderer:?} indisponible ({e}) : essai suivant."),
             Err(e) => eprintln!("Interface graphique indisponible : {e}\nUtilisez les commandes run, polar ou bench."),
@@ -48,12 +68,21 @@ struct App {
     /// Vue : centre (réseau) et largeur affichée (mailles) ; None = cadrage maquette.
     view: Option<(Pos2, f32)>,
     show_force: bool,
+    bottom: Bottom,
+}
+
+/// Graphique du bas.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bottom {
+    History,
+    Cp,
+    Cf,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, start: Start) -> App {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        let cfg = TunnelConfig {
+        let cfg = start.cfg.unwrap_or(TunnelConfig {
             l: 32,
             re: 1000.0,
             shape: ShapeKind::Naca,
@@ -63,10 +92,22 @@ impl App {
                 ..Default::default()
             },
             ..Default::default()
+        });
+        let field = match start.field.as_deref() {
+            Some("speed") => Field::Speed,
+            Some("pressure") => Field::Pressure,
+            Some("eddy") => Field::Eddy,
+            _ => Field::Vorticity,
         };
+        let bottom = match start.graph.as_deref() {
+            Some("cp") => Bottom::Cp,
+            Some("cf") => Bottom::Cf,
+            _ => Bottom::History,
+        };
+        let naca_text = cfg.params.naca.code();
         let settings = Settings {
             cfg,
-            field: Field::Vorticity,
+            field,
             tracers: Tracers::Fronts,
             running: true,
         };
@@ -80,11 +121,12 @@ impl App {
         App {
             shared,
             settings,
-            naca_text: "2412".into(),
+            naca_text,
             texture: None,
             image_id: 0,
             view: None,
             show_force: true,
+            bottom,
         }
     }
 
@@ -153,12 +195,38 @@ impl App {
         ui.separator();
         ui.heading("Écoulement");
         let r = ui.add(
-            egui::Slider::new(&mut self.settings.cfg.re, 10.0..=100_000.0)
+            egui::Slider::new(&mut self.settings.cfg.re, 10.0..=1e7)
                 .logarithmic(true)
+                .custom_formatter(|v, _| fmt_re(v))
                 .text("Reynolds"),
         );
         if r.drag_stopped() || (r.changed() && !r.dragged()) {
             self.push(|q| q.reynolds = true);
+        }
+        let t0 = (self.settings.cfg.turbulence, self.settings.cfg.transition);
+        ui.horizontal(|ui| {
+            ui.label("Turbulence");
+            let t = &mut self.settings.cfg.turbulence;
+            ui.selectable_value(t, Turbulence::Auto, "auto")
+                .on_hover_text("Spalart–Allmaras avec loi de paroi dès Re = 5·10⁴, aucun modèle en dessous");
+            ui.selectable_value(t, Turbulence::Sa, "Spalart–Allmaras");
+            ui.selectable_value(t, Turbulence::Off, "aucune");
+        });
+        let profiled = PanelShape::from_shape(shape, &self.settings.cfg.params).is_some();
+        if fr.sa && profiled {
+            ui.horizontal(|ui| {
+                ui.label("Transition");
+                let t = &mut self.settings.cfg.transition;
+                ui.selectable_value(t, Transition::Free, "libre").on_hover_text(
+                    "Position prédite par la méthode des panneaux et la couche limite intégrale (critère e^N, N = 9) ; \
+                     paroi laminaire en amont",
+                );
+                ui.selectable_value(t, Transition::Turbulent, "bord d'attaque")
+                    .on_hover_text("Couche limite turbulente partout");
+            });
+        }
+        if (self.settings.cfg.turbulence, self.settings.cfg.transition) != t0 {
+            self.push(|q| q.turbulence = true);
         }
         let mut rebuild = false;
         let l0 = self.settings.cfg.l;
@@ -199,11 +267,7 @@ impl App {
         });
         rebuild |= (self.settings.cfg.collision, self.settings.cfg.les) != c0;
         ui.horizontal(|ui| {
-            let label = if self.settings.running {
-                "Pause"
-            } else {
-                "Reprendre"
-            };
+            let label = if self.settings.running { "Pause" } else { "Reprendre" };
             if ui.button(label).clicked() {
                 self.settings.running = !self.settings.running;
                 self.push(|_| {});
@@ -219,10 +283,13 @@ impl App {
         ui.separator();
         ui.heading("Affichage");
         let f0 = (self.settings.field, self.settings.tracers);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.settings.field, Field::Vorticity, "Vorticité");
             ui.selectable_value(&mut self.settings.field, Field::Speed, "Vitesse");
             ui.selectable_value(&mut self.settings.field, Field::Pressure, "Pression");
+            if fr.sa || self.settings.field == Field::Eddy {
+                ui.selectable_value(&mut self.settings.field, Field::Eddy, "Viscosité turbulente");
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Traceurs");
@@ -304,6 +371,7 @@ impl App {
                 });
                 ui.end_row();
             });
+        self.panel_reference(ui, fr);
         if fr.ready && ui.button("Copier (CSV)").clicked() {
             let c = &self.settings.cfg;
             ui.ctx().copy_text(format!(
@@ -338,7 +406,28 @@ impl App {
             .small()
             .monospace(),
         );
-        if self.settings.cfg.re > fr.reliable_re && fr.reliable_re > 0.0 {
+        if fr.sa {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Spalart–Allmaras + loi de paroi · y+ ≈ {} au premier nœud",
+                    if fr.yplus < 100.0 {
+                        format!("{:.3}", fr.yplus)
+                    } else {
+                        format!("{:.0}", (fr.yplus / 10.0).round() * 10.0)
+                    }
+                ))
+                .small(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "La couche limite, plus mince qu'une maille, n'est pas résolue : un glissement de paroi \
+                     transmet le frottement de la loi de Spalding. Portance et décollement qualitatifs, \
+                     traînée LBM approximative.",
+                )
+                .small()
+                .weak(),
+            );
+        } else if self.settings.cfg.re > fr.reliable_re && fr.reliable_re > 0.0 {
             ui.colored_label(
                 Color32::from_rgb(0x93, 0x65, 0x0f),
                 format!(
@@ -352,6 +441,86 @@ impl App {
         }
     }
 
+    /// Référence « panneaux + couche limite » (profils, Re ≥ 2·10⁴).
+    fn panel_reference(&self, ui: &mut egui::Ui, fr: &Frame) {
+        let profiled = PanelShape::from_shape(self.settings.cfg.shape, &self.settings.cfg.params).is_some();
+        if !profiled {
+            return;
+        }
+        ui.add_space(4.0);
+        let Some(r) = &fr.panel else {
+            if self.settings.cfg.re < RE_PANEL_MIN {
+                ui.label(
+                    egui::RichText::new("Référence « panneaux + couche limite » à partir de Re = 2·10⁴.")
+                        .small()
+                        .weak(),
+                );
+            }
+            return;
+        };
+        let k = section_coefficients(r);
+        ui.label(egui::RichText::new("Panneaux + couche limite").strong());
+        let pct = |v: f64| {
+            if v.is_finite() {
+                format!("{:.0} %", v.clamp(0.0, 1.0) * 100.0)
+            } else {
+                "—".into()
+            }
+        };
+        egui::Grid::new("panneaux")
+            .num_columns(2)
+            .spacing([16.0, 2.0])
+            .show(ui, |ui| {
+                ui.colored_label(ACCENT, "Cx");
+                ui.label(format!("{:.4}", k.cd));
+                ui.end_row();
+                ui.colored_label(LIFT, "Cz");
+                ui.label(format!("{:.4}", k.cl));
+                ui.end_row();
+                ui.label("Cm");
+                ui.label(format!("{:.4}", k.cm));
+                ui.end_row();
+                ui.label("Transition");
+                ui.label(if self.settings.cfg.transition == Transition::Turbulent {
+                    "bord d'attaque".to_string()
+                } else {
+                    format!(
+                        "extrados {}, intrados {}",
+                        pct(r.transition_upper),
+                        pct(r.transition_lower)
+                    )
+                });
+                ui.end_row();
+            });
+        let note = if k.kirchhoff {
+            Some(format!(
+                "Décollement à {} de corde : décrochage approché (modèle de Kirchhoff).",
+                pct(r.separation_upper.min(r.separation_lower).min(1.0))
+            ))
+        } else if self.settings.cfg.re < 2e5 && self.settings.cfg.transition == Transition::Free {
+            Some("Bulbes de décollement laminaire non modélisés.".to_string())
+        } else {
+            None
+        };
+        if let Some(n) = note {
+            ui.colored_label(Color32::from_rgb(0x93, 0x65, 0x0f), egui::RichText::new(n).small());
+        }
+    }
+
+    fn bottom(&mut self, ui: &mut egui::Ui, fr: &Frame) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.bottom, Bottom::History, "Historique");
+            if fr.wall.is_some() {
+                ui.selectable_value(&mut self.bottom, Bottom::Cp, "Pression pariétale Cp");
+                ui.selectable_value(&mut self.bottom, Bottom::Cf, "Frottement Cf");
+            }
+        });
+        match self.bottom {
+            Bottom::Cp | Bottom::Cf if fr.wall.is_some() => self.wall_chart(ui, fr),
+            _ => self.history(ui, fr),
+        }
+    }
+
     fn history(&self, ui: &mut egui::Ui, fr: &Frame) {
         let cx: Vec<[f64; 2]> = fr.history.iter().map(|h| [h[0], h[1]]).collect();
         let cz: Vec<[f64; 2]> = fr.history.iter().map(|h| [h[0], h[2]]).collect();
@@ -362,6 +531,111 @@ impl App {
             .show(ui, |p| {
                 p.line(Line::new("Cx", PlotPoints::from(cx)).color(ACCENT));
                 p.line(Line::new("Cz", PlotPoints::from(cz)).color(LIFT));
+            });
+    }
+
+    /// −Cp (aspiration vers le haut) ou Cf×1000 le long de la paroi : points
+    /// LBM, tirets de la méthode des panneaux (ou écoulement potentiel).
+    fn wall_chart(&self, ui: &mut egui::Ui, fr: &Frame) {
+        let Some(w) = &fr.wall else { return };
+        let cp = self.bottom == Bottom::Cp;
+        let cyl = w.axis == WallAxis::Angle;
+        let (up_name, lo_name) = if cyl {
+            ("dessus", "dessous")
+        } else {
+            ("extrados", "intrados")
+        };
+        let val = |p: &lbm::wall::WallPoint| if cp { -p.cp } else { 1000.0 * p.cf };
+        let up: Vec<[f64; 2]> = w.upper.iter().map(|p| [p.s, val(p)]).collect();
+        let lo: Vec<[f64; 2]> = w.lower.iter().map(|p| [p.s, val(p)]).collect();
+        let dash = LineStyle::dashed_dense();
+        let mut refs: Vec<(String, Vec<[f64; 2]>, Color32)> = Vec::new();
+        if cyl {
+            if cp {
+                let pts = (0..=90)
+                    .map(|k| {
+                        let t = 2.0 * k as f64;
+                        [t, -(1.0 - 4.0 * t.to_radians().sin().powi(2))]
+                    })
+                    .collect();
+                refs.push(("potentiel".into(), pts, Color32::GRAY));
+            }
+        } else if let Some(r) = &fr.panel {
+            if cp {
+                let (mut pu, mut pl) = (Vec::new(), Vec::new());
+                for i in 0..r.cp_x.len() {
+                    if i >= r.i_le {
+                        pu.push([r.cp_x[i], -r.cp[i]]);
+                    }
+                    if i <= r.i_le {
+                        pl.push([r.cp_x[i], -r.cp[i]]);
+                    }
+                }
+                refs.push((format!("panneaux, {up_name}"), pu, LIFT));
+                refs.push((format!("panneaux, {lo_name}"), pl, ACCENT));
+            } else {
+                let side = |f: &lbm::panel::Friction| {
+                    (0..f.x.len())
+                        .map(|i| [f.x[i], 1000.0 * f.cf[i] * f.ue[i] * f.ue[i]])
+                        .collect::<Vec<_>>()
+                };
+                refs.push((format!("panneaux, {up_name}"), side(&r.friction_upper), LIFT));
+                refs.push((format!("panneaux, {lo_name}"), side(&r.friction_lower), ACCENT));
+            }
+        }
+        let marks: Vec<(f64, Color32)> = match &fr.panel {
+            Some(r) if !cyl && fr.sa && self.settings.cfg.transition == Transition::Free => {
+                [(r.transition_upper, LIFT), (r.transition_lower, ACCENT)]
+                    .into_iter()
+                    .filter(|m| m.0.is_finite())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let x_name = if cyl { "angle depuis l'arrêt (°)" } else { "x/c" };
+        let y_name = if cp { "−Cp" } else { "Cf × 1000" };
+        ui.label(
+            egui::RichText::new(if w.n > 0 {
+                format!(
+                    "{y_name} selon {x_name} · points : mailles voisines de la paroi, moyenne de {} relevés{}",
+                    w.n,
+                    if cp {
+                        " ; pic d'aspiration du bord d'attaque écrêté"
+                    } else if fr.sa {
+                        " ; frottement de la loi de paroi (laminaire en amont de la transition)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "Moyenne disponible après le transitoire".into()
+            })
+            .small()
+            .weak(),
+        );
+        Plot::new(if cp { "cp" } else { "cf" })
+            .height(ui.available_height().max(80.0))
+            .legend(Legend::default())
+            .allow_scroll(false)
+            .x_axis_label(x_name)
+            .y_axis_label(y_name)
+            .show(ui, |p| {
+                for (name, pts, color) in refs {
+                    p.line(Line::new(name, PlotPoints::from(pts)).color(color).style(dash));
+                }
+                p.points(
+                    Points::new(format!("LBM, {up_name}"), PlotPoints::from(up))
+                        .color(LIFT)
+                        .radius(1.8),
+                );
+                p.points(
+                    Points::new(format!("LBM, {lo_name}"), PlotPoints::from(lo))
+                        .color(ACCENT)
+                        .radius(1.8),
+                );
+                for (x, c) in marks {
+                    p.vline(VLine::new("transition", x).color(c).style(LineStyle::dotted_dense()));
+                }
             });
     }
 
@@ -488,6 +762,7 @@ impl App {
             Field::Vorticity => "Vorticité ω·L/U",
             Field::Speed => "Vitesse |u|/U",
             Field::Pressure => "Pression Cp",
+            Field::Eddy => "Viscosité turbulente log₁₀(1 + νt/ν)",
         };
         painter.text(
             rect.left_bottom() + Vec2::new(8.0, -8.0),
@@ -509,9 +784,42 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, &fr));
             });
         egui::Panel::bottom("historique")
-            .default_size(170.0)
+            .default_size(190.0)
             .resizable(true)
-            .show(ui, |ui| self.history(ui, &fr));
+            .show(ui, |ui| self.bottom(ui, &fr));
         egui::CentralPanel::default().show(ui, |ui| self.tunnel(ui, &fr));
+    }
+}
+
+/// Reynolds lisible : 20 000, 2·10⁵, 10⁶…
+fn fmt_re(v: f64) -> String {
+    if v < 1e5 {
+        let r = if v < 100.0 {
+            v.round()
+        } else {
+            (v / 10.0).round() * 10.0
+        };
+        let s = format!("{r:.0}");
+        let n = s.len();
+        s.chars()
+            .enumerate()
+            .flat_map(|(k, c)| {
+                let sep = k > 0 && (n - k) % 3 == 0;
+                sep.then_some('\u{202f}').into_iter().chain(std::iter::once(c))
+            })
+            .collect()
+    } else {
+        let e = (v.log10() + 1e-9).floor() as i32;
+        let m = (v / 10f64.powi(e) * 10.0).round() / 10.0;
+        let sup: String = e
+            .to_string()
+            .chars()
+            .map(|d| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(d as usize - '0' as usize).unwrap())
+            .collect();
+        if (m - 1.0).abs() < 1e-9 {
+            format!("10{sup}")
+        } else {
+            format!("{}·10{sup}", format!("{m}").replace('.', ","))
+        }
     }
 }

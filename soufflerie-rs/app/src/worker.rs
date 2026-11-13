@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use lbm::cpu::Macros;
 use lbm::geometry::SOLID;
+use lbm::panel::PanelResult;
 use lbm::stats::{analyze, Analysis};
+use lbm::wall::{wall_supported, WallProfile, WallSampler};
 use lbm::{TunnelConfig, WindTunnel};
 use rayon::prelude::*;
 
@@ -16,6 +18,8 @@ pub enum Field {
     Vorticity,
     Speed,
     Pressure,
+    /// Viscosité turbulente de Spalart–Allmaras, log₁₀(1 + ν_t/ν).
+    Eddy,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +47,8 @@ pub struct Requests {
     pub body: bool,
     /// Nouveau Reynolds.
     pub reynolds: bool,
+    /// Modèle de turbulence ou transition modifiés.
+    pub turbulence: bool,
 }
 
 /// Image publiée par le fil de calcul.
@@ -75,6 +81,13 @@ pub struct Frame {
     pub label: String,
     pub diverged: bool,
     pub error: Option<String>,
+    /// Spalart–Allmaras actif, y⁺ attendu au premier nœud.
+    pub sa: bool,
+    pub yplus: f64,
+    /// Référence « panneaux + couche limite » (profils, Re ≥ 2·10⁴).
+    pub panel: Option<PanelResult>,
+    /// Distributions pariétales moyennées (après le transitoire).
+    pub wall: Option<WallProfile>,
 }
 
 pub struct Shared {
@@ -131,6 +144,7 @@ pub fn field_range(f: Field) -> (f32, f32, bool) {
         Field::Vorticity => (-5.0, 5.0, true),
         Field::Speed => (0.0, 1.6, false),
         Field::Pressure => (-1.5, 1.5, true),
+        Field::Eddy => (0.0, 4.0, false),
     }
 }
 
@@ -340,6 +354,8 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut steps_since_frame = 0u64;
     let mut diverged = false;
+    let mut wall: Option<WallSampler> = None;
+    let mut eddy: Vec<f32> = Vec::new();
     loop {
         let (settings, req) = {
             let mut s = shared.lock().unwrap();
@@ -357,6 +373,7 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             history.clear();
             t_change = 0.0;
             diverged = false;
+            wall = None;
             parts.reset(settings.tracers);
             batch = 8;
         }
@@ -373,10 +390,21 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             w.set_body(settings.cfg.shape, &settings.cfg.params);
             t_change = w.t_star();
             parts.reset(settings.tracers);
+            wall = None;
         }
         if req.reynolds {
             w.set_reynolds(settings.cfg.re);
             t_change = w.t_star();
+        }
+        if req.turbulence {
+            w.set_turbulence(settings.cfg.turbulence);
+            w.set_transition_mode(settings.cfg.transition);
+            t_change = w.t_star();
+        }
+        if req.reynolds || req.turbulence {
+            if let Some(ws) = wall.as_mut() {
+                ws.reset();
+            }
         }
         // Calcul : lots de pas, ≈ 16 échantillons d'efforts par temps convectif.
         let spt = w.steps_per_tstar();
@@ -408,6 +436,7 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
         if last_frame.elapsed() >= Duration::from_millis(33) || !settings.running {
             last_frame = Instant::now();
             w.engine.macros(&mut macros);
+            let has_eddy = settings.field == Field::Eddy && w.engine.eddy_viscosity_ratio(&mut eddy);
             if !w.engine.is_finite() {
                 diverged = true;
             }
@@ -418,7 +447,15 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             };
             parts.advect(w, &macros, kind, steps_since_frame);
             steps_since_frame = 0;
-            let rgba = colorize(&macros, kind, settings.field, w.cfg.l as f32, w.cfg.u_in, &luts);
+            let rgba = colorize(
+                &macros,
+                kind,
+                settings.field,
+                w.cfg.l as f32,
+                w.cfg.u_in,
+                if has_eddy { &eddy } else { &[] },
+                &luts,
+            );
             let (points, lines, line_parity) = parts.shapes(w.nx, w.ny, kind, w.cfg.l as f64);
             let el = perf.0.elapsed().as_secs_f64();
             if el > 1.0 {
@@ -432,6 +469,17 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             } else {
                 SETTLE_T
             };
+            // Distributions pariétales : moyenne depuis la fin du transitoire.
+            if wall_supported(w.cfg.shape) && !diverged {
+                let ws = wall.get_or_insert_with(|| WallSampler::new(w));
+                if now < t_change + settle {
+                    ws.reset();
+                } else if settings.running && !ws.is_empty() {
+                    ws.add(w, &macros);
+                }
+            } else {
+                wall = None;
+            }
             let start = (t_change + settle).max(now - WINDOW_T);
             let win: Vec<&[f64; 4]> = history.iter().filter(|h| h[0] >= start).collect();
             let col = |k: usize| win.iter().map(|h| h[k]).collect::<Vec<_>>();
@@ -462,6 +510,10 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
                 label: w.body.label(),
                 diverged,
                 error: None,
+                sa: w.sa_active(),
+                yplus: w.first_cell_yplus(),
+                panel: w.panel.clone(),
+                wall: wall.as_ref().map(|ws| ws.result()),
             };
             shared.lock().unwrap().frame = Arc::new(frame);
             repaint();
@@ -480,7 +532,15 @@ fn publish_error(shared: &Arc<Mutex<Shared>>, e: Option<String>) {
 }
 
 /// Champ coloré, ligne du haut en premier (y vers le haut à l'écran).
-fn colorize(m: &Macros, kind: &[u8], field: Field, l: f32, u: f32, luts: &(Vec<[u8; 4]>, Vec<[u8; 4]>)) -> Vec<u8> {
+fn colorize(
+    m: &Macros,
+    kind: &[u8],
+    field: Field,
+    l: f32,
+    u: f32,
+    eddy: &[f32],
+    luts: &(Vec<[u8; 4]>, Vec<[u8; 4]>),
+) -> Vec<u8> {
     let (nx, ny) = (m.nx, m.ny);
     let mut out = vec![0u8; 4 * nx * ny];
     let (lo, hi, div) = field_range(field);
@@ -496,6 +556,7 @@ fn colorize(m: &Macros, kind: &[u8], field: Field, l: f32, u: f32, luts: &(Vec<[
                 let v = match field {
                     Field::Speed => (m.ux[idx] * m.ux[idx] + m.uy[idx] * m.uy[idx]).sqrt() / u,
                     Field::Pressure => (m.rho[idx] - 1.0) / 3.0 / (0.5 * u * u),
+                    Field::Eddy => eddy.get(idx).map(|&r| (1.0 + r).log10()).unwrap_or(0.0),
                     Field::Vorticity => {
                         let xl = if x > 0 { idx - 1 } else { idx };
                         let xr = if x + 1 < nx { idx + 1 } else { idx };
