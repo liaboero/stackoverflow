@@ -561,6 +561,38 @@ fn cmd_run3d(a: &Args) {
             Err(e) => eprintln!("Écriture de {path} impossible : {e}"),
         }
     }
+    // Vue 3D (maquette, coupe de vorticité, isosurfaces Q) en image PPM.
+    if let Some(path) = a.opts.get("image") {
+        use lbm::gpu3d::{Camera, RenderOptions};
+        let (w, h) = (960usize, 540usize);
+        let cam = Camera::orbit(
+            body.center,
+            a.get("az", 62.0f64),
+            a.get("el", 24.0f64),
+            a.get("dist", 6.0f64) * l as f64,
+        );
+        let rgba = sim.render(&RenderOptions {
+            camera: cam,
+            width: w,
+            height: h,
+            plane_axis: 1,
+            plane_pos: body.center[1],
+            vorticity: true,
+            iso: true,
+            iso_level: a.get("q", 0.4f64),
+            l: l as f64,
+            background: [0.9, 0.92, 0.93],
+            body: [0.2, 0.25, 0.3],
+        });
+        let mut img = format!("P6 {w} {h} 255\n").into_bytes();
+        for px in rgba.chunks_exact(4) {
+            img.extend_from_slice(&px[..3]);
+        }
+        match std::fs::write(path, img) {
+            Ok(()) => eprintln!("Vue 3D écrite dans {path}"),
+            Err(e) => eprintln!("Écriture de {path} impossible : {e}"),
+        }
+    }
     println!(
         "{:.0} millions de mailles par seconde · {:.1} s (dont préparation {:.1} s)",
         sim.n as f64 * sim.time as f64 / secs / 1e6,

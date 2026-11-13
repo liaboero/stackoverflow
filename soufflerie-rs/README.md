@@ -116,11 +116,14 @@ GPU) ; sphère, cube, cylindre, aile NACA 0012 d'allongement 4, de 8 à
 est environ 100 fois plus lent ; `SOUFFLERIE_GPU3D=dx12|vulkan|gl` impose un
 pilote. Les soumissions sont courtes (≈ 3·10⁷ mises à jour de maille) pour
 ne pas déclencher la réinitialisation du pilote Windows (2 s). Affichage :
-plan de coupe (vitesse, vorticité normale au plan, critère Q) calculé sur le
-GPU ; les isosurfaces 3D par lancer de rayons de la version web ne sont pas
-portées.
+vue 3D orbitale calculée sur le GPU par lancer de rayons dans le champ
+(maquette ombrée, plan de coupe en vitesse ou vorticité, isosurfaces du
+critère Q translucides teintées par la vitesse, cadre de la veine), comme
+la version web ; Q est annulé à moins de deux mailles du corps, où la
+couche limite mal résolue donne des valeurs parasites. Une coupe « à plat »
+(vitesse, vorticité, Q) reste disponible.
 
-Pas encore porté : isosurfaces et vue 3D de la soufflerie 3D, balayage automatique dans
+Pas encore porté : balayage automatique dans
 l'interface (les commandes `polar` et `panel` le remplacent), unités
 physiques (fluide, corde, vitesse) et Mach réel dans l'interface.
 
@@ -138,7 +141,7 @@ cargo run --release -- panel --naca 2412 --re 3e6 --alpha -4:18:1 > panneaux.csv
 cargo run --release -- wing --naca 2412 --ar 8 --taper 0.5 --re 1e6 --alpha -6:20:1 > aile.csv
 cargo run --release -- wing --alpha 12 --span 1      # répartition en envergure
 cargo run --release -- --tab wing       # interface, onglet aile finie
-cargo run --release -- run3d --shape sphere --re 300 --l 16 --t 40 --coupe sillage.ppm
+cargo run --release -- run3d --shape sphere --re 300 --l 16 --t 40 --coupe sillage.ppm --image vue.ppm
 cargo run --release -- --tab 3d         # interface, onglet soufflerie 3D
 cargo run --release -- bench --l 32     # vitesse des moteurs
 cargo test --release                    # validation
@@ -175,7 +178,8 @@ l'envergure.
 `run3d` : `--shape sphere|cube|cylinder|wing`, `--re` (10 à 2000 environ),
 `--l 12` (mailles par longueur de référence), `--alpha` (cube, aile), `--t 40`
 et `--avg 15` (temps convectifs), `--fp32 1` (simple précision), `--coupe
-fichier.ppm` (vorticité ωy dans le plan de symétrie). Affiche Cx, Cz, Cy
+fichier.ppm` (vorticité ωy dans le plan de symétrie), `--image fichier.ppm`
+(vue 3D 960 × 540 avec isosurfaces ; `--az 62 --el 24 --dist 6 --q 0.4`). Affiche Cx, Cz, Cy
 (latéral), le Strouhal si l'écoulement est périodique, et la référence de
 Schiller–Naumann pour la sphère.
 
@@ -205,7 +209,7 @@ soufflerie-rs/
 │   ├── src/panel.rs    méthode des panneaux, couche limite intégrale, Kirchhoff
 │   ├── src/wall.rs     distributions pariétales Cp, Cf
 │   ├── src/wing.rs     aile finie : surface portante non linéaire, Trefftz, polaires de section
-│   ├── src/gpu3d.rs    soufflerie 3D : D3Q19 sur GPU (WGSL engendré), voxelisation, coupes
+│   ├── src/gpu3d.rs    soufflerie 3D : D3Q19 sur GPU (WGSL engendré), voxelisation, coupes, rendu 3D
 │   ├── src/bodies3d.rs maquettes 3D (sphère, cube, cylindre, aile)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
@@ -216,14 +220,14 @@ soufflerie-rs/
     ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, bench)
     ├── src/gui.rs      interface graphique, onglets
     ├── src/wing_tab.rs onglet aile finie (vue 3D, envergure, polaire)
-    ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, coupe, efforts)
+    ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, vue 3D, coupe, efforts)
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
 ## Pistes
 
-- Soufflerie 3D : vue 3D orbitale et isosurfaces du critère Q (lancer de
-  rayons du `render3d.js` web), en rendu wgpu dans la fenêtre.
+- Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
+  egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
 - Stockage en demi-précision et propagation en place sur GPU (deux à quatre
   fois moins de mémoire), raffinement local de maillage.
 - Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter

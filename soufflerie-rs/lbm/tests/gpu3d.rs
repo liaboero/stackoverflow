@@ -4,7 +4,7 @@
 
 use lbm::bodies3d::{Body3D, Shape3D};
 use lbm::cpu::Ramp;
-use lbm::gpu3d::{Gpu3D, SliceField};
+use lbm::gpu3d::{Camera, Gpu3D, RenderOptions, SliceField};
 
 #[test]
 fn sphere_re100() {
@@ -40,4 +40,23 @@ fn sphere_re100() {
     let wake = at(c[0] + 1.0 * l as f64, c[2]);
     println!("|u|/U à 1 D en aval : {wake:.3}");
     assert!(wake < 0.5);
+    // Vue 3D vue de face (de l'amont) : sphère sombre au centre, fond clair au bord.
+    let (w, h) = (96usize, 64usize);
+    let img = g.render(&RenderOptions {
+        camera: Camera::orbit(c, 0.0, 0.0, 4.0 * l as f64),
+        width: w,
+        height: h,
+        plane_axis: 1,
+        plane_pos: 0.0,
+        vorticity: true,
+        iso: false,
+        iso_level: 0.4,
+        l: l as f64,
+        background: [1.0, 1.0, 1.0],
+        body: [0.2, 0.25, 0.3],
+    });
+    let px = |x: usize, y: usize| &img[4 * (x + w * y)..4 * (x + w * y) + 3];
+    println!("pixel central {:?}, coin {:?}", px(w / 2, h / 2), px(2, 2));
+    assert!(px(w / 2, h / 2).iter().all(|&v| v < 140), "la sphère doit apparaître au centre");
+    assert!(img.len() == 4 * w * h && !g.lost);
 }

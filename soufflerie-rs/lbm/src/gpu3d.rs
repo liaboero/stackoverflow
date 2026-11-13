@@ -443,6 +443,319 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+/// Dérivées du champ : vorticité ω (xyz) et critère Q (w), par maille.
+const DERIVE_WGSL: &str = "
+struct D { nx: u32, ny: u32, nz: u32, n: u32 };
+@group(0) @binding(0) var<uniform> P: D;
+@group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> wall: array<u32>;
+@group(0) @binding(3) var<storage, read_write> deriv: array<vec4<f32>>;
+
+fn id(p: vec3<i32>) -> u32 {
+  let q = clamp(p, vec3<i32>(0), vec3<i32>(i32(P.nx) - 1, i32(P.ny) - 1, i32(P.nz) - 1));
+  return u32(q.x) + P.nx * (u32(q.y) + P.ny * u32(q.z));
+}
+fn solid(p: vec3<i32>) -> bool { return wall[id(p)] == 0xffffffffu; }
+fn U(p: vec3<i32>) -> vec3<f32> {
+  if (solid(p)) { return vec3<f32>(0.0); }
+  return macroBuf[id(p)].xyz;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i = gid.x + gid.y * nwg.x * 64u;
+  if (i >= P.n) { return; }
+  let p = vec3<i32>(i32(i % P.nx), i32((i / P.nx) % P.ny), i32(i / (P.nx * P.ny)));
+  let ex = vec3<i32>(1, 0, 0);
+  let ey = vec3<i32>(0, 1, 0);
+  let ez = vec3<i32>(0, 0, 1);
+  let dx = 0.5 * (U(p + ex) - U(p - ex));
+  let dy = 0.5 * (U(p + ey) - U(p - ey));
+  let dz = 0.5 * (U(p + ez) - U(p - ez));
+  let w = vec3<f32>(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x);
+  let s2 = dx.x * dx.x + dy.y * dy.y + dz.z * dz.z
+    + 0.5 * ((dx.y + dy.x) * (dx.y + dy.x) + (dx.z + dz.x) * (dx.z + dz.x) + (dy.z + dz.y) * (dy.z + dz.y));
+  var q = 0.5 * (0.5 * dot(w, w) - s2);
+  // Au contact du corps, les différences finies traversent la paroi : Q y est artificiel.
+  // Exclusion sur deux mailles : la couche limite, mal résolue, y donne des Q parasites.
+  var near = solid(p);
+  for (var k = 1; k <= 2; k++) {
+    let a = vec3<i32>(k, 0, 0);
+    let b = vec3<i32>(0, k, 0);
+    let c = vec3<i32>(0, 0, k);
+    near = near || solid(p + a) || solid(p - a) || solid(p + b) || solid(p - b) || solid(p + c) || solid(p - c);
+  }
+  near = near || solid(p + ex + ey) || solid(p + ex - ey) || solid(p - ex + ey) || solid(p - ex - ey)
+    || solid(p + ex + ez) || solid(p + ex - ez) || solid(p - ex + ez) || solid(p - ex - ez)
+    || solid(p + ey + ez) || solid(p + ey - ez) || solid(p - ey + ez) || solid(p - ey - ez);
+  if (near) {
+    q = 0.0;
+  }
+  deriv[i] = vec4<f32>(w, q);
+}
+";
+
+/// Image de la veine par lancer de rayons : maquette ombrée, plan de coupe,
+/// isosurfaces du critère Q translucides teintées par la vitesse.
+const RENDER_WGSL: &str = "
+struct R {
+  eye: vec4<f32>,
+  fwd: vec4<f32>,
+  right: vec4<f32>,
+  up: vec4<f32>,
+  dims: vec4<f32>,
+  bg: vec4<f32>,
+  body: vec4<f32>,
+  plane: vec4<f32>,
+  iso: vec4<f32>,
+  size: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> V: R;
+@group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> wall: array<u32>;
+@group(0) @binding(3) var<storage, read> deriv: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> img: array<u32>;
+
+fn seqMap(t0: f32) -> vec3<f32> {
+  let t = clamp(t0, 0.0, 1.0);
+  let a = vec3<f32>(0.05, 0.11, 0.27);
+  let b = vec3<f32>(0.10, 0.45, 0.62);
+  let c = vec3<f32>(0.42, 0.78, 0.62);
+  let d = vec3<f32>(0.99, 0.88, 0.35);
+  if (t < 0.33) { return mix(a, b, t / 0.33); }
+  if (t < 0.66) { return mix(b, c, (t - 0.33) / 0.33); }
+  return mix(c, d, (t - 0.66) / 0.34);
+}
+fn divMap(t0: f32) -> vec3<f32> {
+  let t = clamp(t0, -1.0, 1.0);
+  let mid = vec3<f32>(0.95, 0.95, 0.93);
+  if (t < 0.0) { return mix(mid, vec3<f32>(0.13, 0.36, 0.70), -t); }
+  return mix(mid, vec3<f32>(0.78, 0.20, 0.15), t);
+}
+
+fn id(p: vec3<i32>) -> u32 {
+  let n = vec3<i32>(V.dims.xyz);
+  let q = clamp(p, vec3<i32>(0), n - vec3<i32>(1));
+  return u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z));
+}
+fn solidI(p: vec3<i32>) -> f32 { return select(0.0, 1.0, wall[id(p)] == 0xffffffffu); }
+
+// Interpolation trilinéaire (centres de maille aux coordonnées entières).
+fn occ(p: vec3<f32>) -> f32 {
+  let b = vec3<i32>(floor(p));
+  let f = p - floor(p);
+  let c00 = mix(solidI(b), solidI(b + vec3<i32>(1, 0, 0)), f.x);
+  let c10 = mix(solidI(b + vec3<i32>(0, 1, 0)), solidI(b + vec3<i32>(1, 1, 0)), f.x);
+  let c01 = mix(solidI(b + vec3<i32>(0, 0, 1)), solidI(b + vec3<i32>(1, 0, 1)), f.x);
+  let c11 = mix(solidI(b + vec3<i32>(0, 1, 1)), solidI(b + vec3<i32>(1, 1, 1)), f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+fn D(p: vec3<f32>) -> vec4<f32> {
+  let b = vec3<i32>(floor(p));
+  let f = p - floor(p);
+  let c00 = mix(deriv[id(b)], deriv[id(b + vec3<i32>(1, 0, 0))], f.x);
+  let c10 = mix(deriv[id(b + vec3<i32>(0, 1, 0))], deriv[id(b + vec3<i32>(1, 1, 0))], f.x);
+  let c01 = mix(deriv[id(b + vec3<i32>(0, 0, 1))], deriv[id(b + vec3<i32>(1, 0, 1))], f.x);
+  let c11 = mix(deriv[id(b + vec3<i32>(0, 1, 1))], deriv[id(b + vec3<i32>(1, 1, 1))], f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+fn Q(p: vec3<f32>) -> f32 { return D(p).w; }
+fn Mv(p: vec3<f32>) -> vec3<f32> {
+  let b = vec3<i32>(floor(p));
+  let f = p - floor(p);
+  let c00 = mix(macroBuf[id(b)].xyz, macroBuf[id(b + vec3<i32>(1, 0, 0))].xyz, f.x);
+  let c10 = mix(macroBuf[id(b + vec3<i32>(0, 1, 0))].xyz, macroBuf[id(b + vec3<i32>(1, 1, 0))].xyz, f.x);
+  let c01 = mix(macroBuf[id(b + vec3<i32>(0, 0, 1))].xyz, macroBuf[id(b + vec3<i32>(1, 0, 1))].xyz, f.x);
+  let c11 = mix(macroBuf[id(b + vec3<i32>(0, 1, 1))].xyz, macroBuf[id(b + vec3<i32>(1, 1, 1))].xyz, f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let w = u32(V.size.x);
+  let h = u32(V.size.y);
+  if (gid.x >= w || gid.y >= h) { return; }
+  let sx = (f32(gid.x) + 0.5) / f32(w) * 2.0 - 1.0;
+  let sy = 1.0 - (f32(gid.y) + 0.5) / f32(h) * 2.0;
+  let th = V.up.w;
+  let o = V.eye.xyz;
+  let dir = normalize(V.fwd.xyz + V.right.xyz * (sx * th * V.right.w) + V.up.xyz * (sy * th));
+  let lo = vec3<f32>(0.0);
+  let hi = V.dims.xyz - vec3<f32>(1.0);
+  let inv = 1.0 / dir;
+  let t0v = (lo - o) * inv;
+  let t1v = (hi - o) * inv;
+  let tmin = max(max(min(t0v.x, t1v.x), min(t0v.y, t1v.y)), min(t0v.z, t1v.z));
+  let tmax = min(min(max(t0v.x, t1v.x), max(t0v.y, t1v.y)), max(t0v.z, t1v.z));
+  var col = V.bg.rgb;
+  let t0 = max(tmin, 0.0);
+  if (t0 < tmax) {
+    // Plan de coupe.
+    let ax = i32(V.plane.x);
+    var ts = 1e30;
+    if (abs(dir[ax]) > 1e-6) {
+      let t = (V.plane.y - o[ax]) / dir[ax];
+      if (t >= t0 && t <= tmax) { ts = t; }
+    }
+    let tend = min(tmax, ts);
+    let stp = V.iso.z;
+    var t = t0;
+    var tp = t0;
+    var tb = 1e30;
+    var ti = 1e30;
+    var tip = 0.0;
+    let level = V.iso.x;
+    let isoOn = V.iso.y > 0.5;
+    for (var k = 0; k < 4000; k++) {
+      if (t > tend) { break; }
+      let p = o + dir * t;
+      if (isoOn && ti > 1e29 && Q(p) > level) { ti = t; tip = tp; }
+      if (solidI(vec3<i32>(round(p))) > 0.5) {
+        // Surface lissée : bisection sur l'occupation trilinéaire.
+        var a = tp;
+        var b = t;
+        for (var j = 0; j < 6; j++) {
+          let m = 0.5 * (a + b);
+          if (occ(o + dir * m) > 0.5) { b = m; } else { a = m; }
+        }
+        tb = b;
+        break;
+      }
+      tp = t;
+      t += stp;
+    }
+    if (tb < 1e29) {
+      let p = o + dir * tb;
+      let e = 1.0;
+      let g = vec3<f32>(
+        occ(p + vec3<f32>(e, 0.0, 0.0)) - occ(p - vec3<f32>(e, 0.0, 0.0)),
+        occ(p + vec3<f32>(0.0, e, 0.0)) - occ(p - vec3<f32>(0.0, e, 0.0)),
+        occ(p + vec3<f32>(0.0, 0.0, e)) - occ(p - vec3<f32>(0.0, 0.0, e)));
+      let n = -normalize(g + vec3<f32>(1e-9));
+      let lam = abs(dot(n, -dir));
+      let key = max(0.0, dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.85))));
+      col = V.body.rgb * (0.35 + 0.45 * lam + 0.25 * key);
+    } else if (ts < 1e29) {
+      let p = o + dir * ts;
+      if (solidI(vec3<i32>(round(p))) > 0.5) {
+        col = V.body.rgb * 0.6;
+      } else if (V.plane.z < 0.5) {
+        col = seqMap(length(Mv(p)) / (1.6 * V.plane.w));
+      } else {
+        let dv = D(p);
+        var wn = dv.y;
+        if (ax == 0) { wn = dv.x; } else if (ax == 2) { wn = dv.z; }
+        col = divMap(wn * V.dims.w / V.plane.w / V.iso.w);
+      }
+    }
+    if (ti < 1e29 && ti < tb) {
+      var a = tip;
+      var b = ti;
+      for (var j = 0; j < 5; j++) {
+        let m = 0.5 * (a + b);
+        if (Q(o + dir * m) > level) { b = m; } else { a = m; }
+      }
+      let p = o + dir * b;
+      let e = 1.0;
+      let gq = vec3<f32>(
+        Q(p + vec3<f32>(e, 0.0, 0.0)) - Q(p - vec3<f32>(e, 0.0, 0.0)),
+        Q(p + vec3<f32>(0.0, e, 0.0)) - Q(p - vec3<f32>(0.0, e, 0.0)),
+        Q(p + vec3<f32>(0.0, 0.0, e)) - Q(p - vec3<f32>(0.0, 0.0, e)));
+      let n = -normalize(gq + vec3<f32>(1e-9));
+      let lam = abs(dot(n, -dir));
+      let base = seqMap(0.15 + 0.75 * length(Mv(p)) / (1.3 * V.plane.w));
+      let c = base * (0.35 + 0.75 * lam) + vec3<f32>(0.25) * pow(lam, 24.0);
+      col = mix(col, c, 0.88);
+    }
+  }
+  img[gid.x + w * gid.y] = pack4x8unorm(vec4<f32>(col, 1.0));
+}
+";
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RenderUniform {
+    eye: [f32; 4],
+    fwd: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    dims: [f32; 4],
+    bg: [f32; 4],
+    body: [f32; 4],
+    plane: [f32; 4],
+    iso: [f32; 4],
+    size: [f32; 4],
+}
+
+/// Caméra orbitale autour d'un point (mailles) : azimut et élévation en
+/// degrés, distance en mailles, champ vertical de 40°.
+#[derive(Clone, Copy, Debug)]
+pub struct Camera {
+    pub eye: [f64; 3],
+    pub fwd: [f64; 3],
+    pub right: [f64; 3],
+    pub up: [f64; 3],
+    pub tan_half: f64,
+}
+
+impl Camera {
+    pub fn orbit(target: [f64; 3], az_deg: f64, el_deg: f64, dist: f64) -> Camera {
+        let (az, el) = (az_deg.to_radians(), el_deg.to_radians());
+        let eye = [
+            target[0] - dist * el.cos() * az.cos(),
+            target[1] - dist * el.cos() * az.sin(),
+            target[2] + dist * el.sin(),
+        ];
+        let n = |v: [f64; 3]| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let fwd = n([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
+        let right = n(cross(fwd, [0.0, 0.0, 1.0]));
+        let up = cross(right, fwd);
+        Camera {
+            eye,
+            fwd,
+            right,
+            up,
+            tan_half: (20f64).to_radians().tan(),
+        }
+    }
+
+    /// Projection d'un point (mailles) en coordonnées normalisées [−1, 1]
+    /// (y vers le haut) pour un rapport largeur/hauteur donné ; None derrière l'œil.
+    pub fn project(&self, p: [f64; 3], aspect: f64) -> Option<[f64; 2]> {
+        let d = [p[0] - self.eye[0], p[1] - self.eye[1], p[2] - self.eye[2]];
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let z = dot(d, self.fwd);
+        if z <= 1e-6 {
+            return None;
+        }
+        Some([dot(d, self.right) / (z * self.tan_half * aspect), dot(d, self.up) / (z * self.tan_half)])
+    }
+}
+
+/// Réglages d'une image 3D.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderOptions {
+    pub camera: Camera,
+    pub width: usize,
+    pub height: usize,
+    /// Plan de coupe : axe (0 : x, 1 : y, 2 : z) et position (maille).
+    pub plane_axis: usize,
+    pub plane_pos: f64,
+    /// Coupe en vorticité (sinon vitesse).
+    pub vorticity: bool,
+    /// Isosurfaces Q > iso_level·(U/L)².
+    pub iso: bool,
+    pub iso_level: f64,
+    /// Longueur de référence (mailles).
+    pub l: f64,
+    pub background: [f32; 3],
+    pub body: [f32; 3],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -539,6 +852,10 @@ pub struct Gpu3D {
     step_pipe: wgpu::ComputePipeline,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
+    derive_pipe: wgpu::ComputePipeline,
+    render_pipe: wgpu::ComputePipeline,
+    /// ω et Q par maille (alloué au premier rendu 3D).
+    deriv: Option<wgpu::Buffer>,
     bind: Vec<wgpu::BindGroup>,
     init_bind: Vec<wgpu::BindGroup>,
     disp: (u32, u32),
@@ -804,6 +1121,22 @@ impl Gpu3D {
             ],
         });
         let slice_pipe = pipe("slice", &slice_layout, SLICE_WGSL.to_string());
+        let auto = |label: &str, code: &str| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(code.into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let derive_pipe = auto("derive3d", DERIVE_WGSL);
+        let render_pipe = auto("render3d", RENDER_WGSL);
         let pb = Some(psize);
         let bind = (0..2)
             .map(|s| {
@@ -865,6 +1198,9 @@ impl Gpu3D {
             step_pipe,
             init_pipe,
             slice_pipe,
+            derive_pipe,
+            render_pipe,
+            deriv: None,
             bind,
             init_bind,
             disp,
@@ -1094,6 +1430,103 @@ impl Gpu3D {
         self.queue.submit([enc.finish()]);
         let data = self.read(&out, &staging, size);
         Slice { w, h, data }
+    }
+
+    /// Image de la veine (RGBA, ligne du haut en premier) depuis le dernier
+    /// champ écrit par `run`.
+    pub fn render(&mut self, o: &RenderOptions) -> Vec<u8> {
+        let (w, h) = (o.width.max(1), o.height.max(1));
+        let n = self.n as u64;
+        if self.deriv.is_none() {
+            self.deriv = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("deriv3d"),
+                size: 16 * n,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }));
+        }
+        let deriv = self.deriv.as_ref().unwrap();
+        let dims = [self.nx as u32, self.ny as u32, self.nz as u32, self.n as u32];
+        let dbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("derive_params"),
+            contents: bytemuck::cast_slice(&dims),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let c = &o.camera;
+        let v4 = |a: [f64; 3], w: f64| [a[0] as f32, a[1] as f32, a[2] as f32, w as f32];
+        let ru = RenderUniform {
+            eye: v4(c.eye, 1.0),
+            fwd: v4(c.fwd, 0.0),
+            right: v4(c.right, w as f64 / h as f64),
+            up: v4(c.up, c.tan_half),
+            dims: [self.nx as f32, self.ny as f32, self.nz as f32, o.l as f32],
+            bg: [o.background[0], o.background[1], o.background[2], 1.0],
+            body: [o.body[0], o.body[1], o.body[2], 1.0],
+            plane: [o.plane_axis.min(2) as f32, o.plane_pos as f32, o.vorticity as u8 as f32, self.u_in],
+            iso: [
+                (o.iso_level * (self.u_in as f64 / o.l).powi(2)) as f32,
+                o.iso as u8 as f32,
+                0.8,
+                4.0,
+            ],
+            size: [w as f32, h as f32, 0.0, 0.0],
+        };
+        let rbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("render_params"),
+            contents: bytemuck::bytes_of(&ru),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let size = (4 * w * h) as u64;
+        let img = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image3d"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image3d_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let dbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("derive3d"),
+            layout: &self.derive_pipe.get_bind_group_layout(0),
+            entries: &[
+                buf_entry(0, &dbuf, None),
+                buf_entry(1, &self.macro_buf, None),
+                buf_entry(2, &self.wall, None),
+                buf_entry(3, deriv, None),
+            ],
+        });
+        let rbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render3d"),
+            layout: &self.render_pipe.get_bind_group_layout(0),
+            entries: &[
+                buf_entry(0, &rbuf, None),
+                buf_entry(1, &self.macro_buf, None),
+                buf_entry(2, &self.wall, None),
+                buf_entry(3, deriv, None),
+                buf_entry(4, &img, None),
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.derive_pipe);
+            pass.set_bind_group(0, &dbg, &[]);
+            pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+            pass.set_pipeline(&self.render_pipe);
+            pass.set_bind_group(0, &rbg, &[]);
+            pass.dispatch_workgroups((w as u32).div_ceil(8), (h as u32).div_ceil(8), 1);
+        }
+        self.queue.submit([enc.finish()]);
+        let v = self.read(&img, &staging, size);
+        if v.is_empty() {
+            self.lost = true;
+            return vec![0; 4 * w * h];
+        }
+        bytemuck::cast_slice::<f32, u8>(&v).to_vec()
     }
 
     /// Le calcul est-il resté borné ?

@@ -10,7 +10,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use lbm::bodies3d::{Body3D, Shape3D};
 use lbm::cpu::Ramp;
-use lbm::gpu3d::{bytes_per_cell, Gpu3D, Slice, SliceField};
+use lbm::gpu3d::{bytes_per_cell, Camera, Gpu3D, RenderOptions, Slice, SliceField};
 use lbm::stats::{analyze, Analysis};
 
 const RE3: [f64; 9] = [10.0, 20.0, 50.0, 100.0, 200.0, 300.0, 500.0, 1000.0, 2000.0];
@@ -95,12 +95,26 @@ struct Settings {
     pos: Option<f64>,
     /// Incrémenté pour relancer le calcul.
     reset: u64,
+    /// Vue 3D (maquette, plan de coupe, isosurfaces) ou coupe plane.
+    view3d: bool,
+    /// Caméra : azimut, élévation (°), distance (en L).
+    az: f64,
+    el: f64,
+    dist: f64,
+    iso: bool,
+    /// Seuil des isosurfaces, en (U/L)².
+    iso_level: f64,
+    /// Taille de l'image 3D (pixels).
+    img: (usize, usize),
 }
 
 /// Ce que le fil de calcul publie.
 #[derive(Default)]
 struct Frame {
     slice: Option<Arc<Slice>>,
+    /// Vue 3D : largeur, hauteur, RGBA, et la caméra qui l'a produite.
+    image: Option<Arc<(usize, usize, Vec<u8>)>>,
+    camera: Option<Camera>,
     slice_id: u64,
     /// Plan effectivement affiché (axe, maille).
     plane_pos: (usize, usize),
@@ -146,6 +160,13 @@ impl Tab3D {
             plane: Plane::Y,
             pos: None,
             reset: 0,
+            view3d: true,
+            az: 62.0,
+            el: 24.0,
+            dist: 6.0,
+            iso: true,
+            iso_level: 0.4,
+            img: (800, 450),
         };
         Tab3D {
             shared: Arc::new(Mutex::new(Shared {
@@ -237,11 +258,35 @@ impl Tab3D {
             }
         });
         ui.separator();
-        ui.heading("Coupe");
+        ui.heading("Affichage");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut s.view3d, true, "Vue 3D");
+            ui.selectable_value(&mut s.view3d, false, "Coupe à plat");
+        });
+        if s.view3d {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut s.iso, "Isosurfaces du critère Q");
+            });
+            if s.iso {
+                ui.add(
+                    egui::Slider::new(&mut s.iso_level, 0.05..=5.0)
+                        .logarithmic(true)
+                        .text("seuil Q·(L/U)²"),
+                );
+            }
+            ui.label(
+                egui::RichText::new("Glisser : tourner · molette : rapprocher · double clic : vue par défaut")
+                    .small()
+                    .weak(),
+            );
+        }
+        ui.label("Plan de coupe");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut s.field, SliceField::Vorticity, "Vorticité");
             ui.selectable_value(&mut s.field, SliceField::Speed, "Vitesse");
-            ui.selectable_value(&mut s.field, SliceField::Q, "Critère Q");
+            if !s.view3d {
+                ui.selectable_value(&mut s.field, SliceField::Q, "Critère Q");
+            }
         });
         ui.horizontal(|ui| {
             for (p, name) in [(Plane::Y, "Longitudinal"), (Plane::Z, "Horizontal"), (Plane::X, "Transversal")] {
@@ -321,6 +366,9 @@ impl Tab3D {
     }
 
     fn view(&mut self, ui: &mut egui::Ui) {
+        if self.settings.view3d {
+            return self.view3d(ui);
+        }
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let rect = resp.rect;
         painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
@@ -401,6 +449,143 @@ impl Tab3D {
                 ["x", "y", "z"][plane_pos.0],
                 plane_pos.1,
                 if plane_pos.0 == 0 { " (vu de l'amont)" } else { "" }
+            ),
+            egui::FontId::proportional(13.0),
+            INK,
+        );
+    }
+
+    /// Vue 3D : image calculée sur le GPU, cadre de la veine, caméra orbitale.
+    fn view3d(&mut self, ui: &mut egui::Ui) {
+        let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+        let rect = resp.rect;
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
+        // Caméra.
+        let mut changed = false;
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            self.settings.az -= d.x as f64 * 0.4;
+            self.settings.el = (self.settings.el + d.y as f64 * 0.3).clamp(-85.0, 85.0);
+            changed = true;
+        }
+        if resp.hovered() {
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let f = (-(scroll as f64) * 0.0015).exp() / zoom as f64;
+            if (f - 1.0).abs() > 1e-4 {
+                self.settings.dist = (self.settings.dist * f).clamp(1.5, 20.0);
+                changed = true;
+            }
+        }
+        if resp.double_clicked() {
+            (self.settings.az, self.settings.el, self.settings.dist) = (62.0, 24.0, 6.0);
+            changed = true;
+        }
+        // Image à ~900 pixels de large au plus (le lancer de rayons coûte par pixel).
+        let k = (900.0 / rect.width()).min(1.0);
+        let want = (
+            ((rect.width() * k) as usize).max(64),
+            ((rect.height() * k) as usize).max(64),
+        );
+        if want != self.settings.img {
+            self.settings.img = want;
+            changed = true;
+        }
+        if changed {
+            self.push();
+        }
+        let (image, id, cam, dims, l, plane_pos) = {
+            let s = self.shared.lock().unwrap();
+            let f = &s.frame;
+            (f.image.clone(), f.slice_id, f.camera, f.dims, f.l, f.plane_pos)
+        };
+        let Some(img) = image else {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Préparation du calcul 3D…",
+                egui::FontId::proportional(16.0),
+                Color32::GRAY,
+            );
+            return;
+        };
+        let (w, h, px) = (&img.0, &img.1, &img.2);
+        if id != self.slice_id || self.texture.is_none() {
+            self.slice_id = id;
+            let ci = egui::ColorImage::from_rgba_unmultiplied([*w, *h], px);
+            match &mut self.texture {
+                Some(t) => t.set(ci, egui::TextureOptions::LINEAR),
+                None => self.texture = Some(ui.ctx().load_texture("vue3d", ci, egui::TextureOptions::LINEAR)),
+            }
+        }
+        // L'image garde le rapport de l'instant où elle a été calculée.
+        let aspect = *w as f32 / *h as f32;
+        let size = if rect.width() / rect.height() > aspect {
+            Vec2::new(rect.height() * aspect, rect.height())
+        } else {
+            Vec2::new(rect.width(), rect.width() / aspect)
+        };
+        let img_rect = Rect::from_center_size(rect.center(), size);
+        if let Some(t) = &self.texture {
+            painter.image(
+                t.id(),
+                img_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        // Cadre de la veine.
+        if let Some(c) = cam {
+            let a = aspect as f64;
+            let to = |p: [f64; 3]| {
+                c.project(p, a).map(|q| {
+                    Pos2::new(
+                        img_rect.center().x + q[0] as f32 * img_rect.width() / 2.0,
+                        img_rect.center().y - q[1] as f32 * img_rect.height() / 2.0,
+                    )
+                })
+            };
+            let [x, y, z] = [dims[0] as f64 - 1.0, dims[1] as f64 - 1.0, dims[2] as f64 - 1.0];
+            let pts = [
+                [0.0, 0.0, 0.0],
+                [x, 0.0, 0.0],
+                [x, y, 0.0],
+                [0.0, y, 0.0],
+                [0.0, 0.0, z],
+                [x, 0.0, z],
+                [x, y, z],
+                [0.0, y, z],
+            ];
+            let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)];
+            let p = painter.with_clip_rect(img_rect);
+            let stroke = (1.0, Color32::from_rgba_premultiplied(40, 52, 62, 150));
+            for (i, j) in edges {
+                if let (Some(a), Some(b)) = (to(pts[i]), to(pts[j])) {
+                    p.line_segment([a, b], stroke);
+                }
+            }
+            // Flèche du vent à l'entrée.
+            let mid = [0.0, y / 2.0, z / 2.0];
+            if let (Some(a), Some(b)) = (to(mid), to([2.0 * l as f64, y / 2.0, z / 2.0])) {
+                p.arrow(a, b - a, (2.0, INK));
+                p.text(a, egui::Align2::RIGHT_BOTTOM, "V∞ ", egui::FontId::proportional(13.0), INK);
+            }
+        }
+        let st = &self.settings;
+        let comp = ["ωx", "ωy", "ωz"][plane_pos.0];
+        let plane = match st.field {
+            SliceField::Speed => "coupe |u|/U de 0 à 1,6".to_string(),
+            _ => format!("coupe {comp}·L/U de −4 à +4"),
+        };
+        painter.text(
+            rect.left_bottom() + Vec2::new(8.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!(
+                "{plane}{} · L = {l} mailles",
+                if st.iso {
+                    format!(" · isosurfaces Q = {:.2} (U/L)², teintées par la vitesse", st.iso_level)
+                } else {
+                    String::new()
+                }
             ),
             egui::FontId::proportional(13.0),
             INK,
@@ -567,7 +752,25 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             }
         }
         .min(n - 1);
-        let sl = g.slice(ax, cell, st.field, st.l as f64);
+        let (sl, image, camera) = if st.view3d {
+            let cam = Camera::orbit(b.center, st.az, st.el, st.dist * st.l as f64);
+            let rgba = g.render(&RenderOptions {
+                camera: cam,
+                width: st.img.0,
+                height: st.img.1,
+                plane_axis: ax,
+                plane_pos: cell as f64,
+                vorticity: st.field != SliceField::Speed,
+                iso: st.iso,
+                iso_level: st.iso_level,
+                l: st.l as f64,
+                background: [0.9, 0.92, 0.93],
+                body: [0.2, 0.25, 0.3],
+            });
+            (None, Some(Arc::new((st.img.0, st.img.1, rgba))), Some(cam))
+        } else {
+            (Some(Arc::new(g.slice(ax, cell, st.field, st.l as f64))), None, None)
+        };
         slice_id += 1;
         // Analyse sur la fenêtre établie.
         let settle = if t_change == 0.0 { RAMP_T + SETTLE_T } else { SETTLE_T };
@@ -606,7 +809,9 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
         {
             let mut s = shared.lock().unwrap();
             let fr = &mut s.frame;
-            fr.slice = Some(Arc::new(sl));
+            fr.slice = sl;
+            fr.image = image;
+            fr.camera = camera;
             fr.slice_id = slice_id;
             fr.plane_pos = (ax, cell);
             fr.dims = [g.nx, g.ny, g.nz];
