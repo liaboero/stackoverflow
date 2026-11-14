@@ -56,6 +56,7 @@ fn usage() -> ! {
          \x20         --turb auto|sa|off (Spalart–Allmaras et loi de paroi dès Re = 5·10⁴ en auto, 2D et 3D)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --xtr 0.3 (run3d, loi de paroi : couche limite laminaire jusqu'à 30 % de la corde locale)\n\
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
          \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
          \x20         --raff 1|2 (GPU, 2D et 3D : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
@@ -590,6 +591,11 @@ fn cmd_run3d(a: &Args) {
             std::process::exit(1);
         }
     };
+    let xtr = a.get("xtr", 0.0f64);
+    if sa && xtr > 0.0 {
+        sim.set_transition(xtr);
+        eprintln!("Couche limite laminaire (Blasius) jusqu'à {:.0} % de la corde locale", 100.0 * xtr);
+    }
     eprintln!(
         "{} · Re = {} · L = {l} mailles ({}) · grille {}×{}×{} = {:.2} M mailles · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {}",
         shape.label(),

@@ -199,3 +199,34 @@ fn raffinement_3d() {
     }
     assert!((cx[1] / cx[0] - 1.0).abs() < 0.015, "Cx {cx:?}");
 }
+
+#[test]
+fn transition_3d() {
+    // Aile à Re = 10⁶ avec loi de paroi (L = 16, α = 8°) : une couche limite
+    // laminaire sur toute la corde retire environ l'écart de frottement
+    // Blasius / turbulent (≈ 0,006). Sur une grille plus grossière, le
+    // glissement laminaire change aussi la traînée de pression.
+    use lbm::bodies3d::{Body3D, Shape3D};
+    use lbm::gpu3d::Gpu3D;
+    let l = 16;
+    let u = 0.1f32;
+    let spt = l as f64 / u as f64;
+    let body = Body3D::new(Shape3D::Wing, l, 8.0);
+    let mut cx = Vec::new();
+    for xtr in [0.0, 1.0] {
+        let Ok(mut g) = Gpu3D::with_turbulence(&body, u as f64 * l as f64 / 1e6, u, true, true) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        g.set_transition(xtr);
+        let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
+        g.run((20.0 * spt) as usize, &ramp);
+        let _ = g.take_forces();
+        g.run((6.0 * spt) as usize, &ramp);
+        let f = g.take_forces();
+        cx.push(f.fx / (0.5 * (u as f64).powi(2) * body.area));
+        println!("xtr {xtr} : Cx = {:.4}", cx.last().unwrap());
+    }
+    let d = cx[0] - cx[1];
+    assert!((0.002..0.012).contains(&d), "baisse de traînée {d}");
+}

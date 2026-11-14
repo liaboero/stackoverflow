@@ -111,6 +111,10 @@ struct Settings {
     body_view: BodyView,
     /// Grilles imbriquées autour de la maquette (0 à 2).
     refine: usize,
+    /// Paroi : 0 auto (loi de paroi dès Re = 5·10⁴), 1 loi de paroi, 2 sans.
+    wall: u8,
+    /// Transition imposée (fraction de la corde locale ; 0 : turbulent).
+    xtr: f64,
     /// Seuil des isosurfaces, en (U/L)².
     iso_level: f64,
     /// Taille de l'image 3D (pixels).
@@ -191,6 +195,8 @@ impl Tab3D {
             iso: true,
             body_view: BodyView::Smooth,
             refine: 0,
+            wall: 0,
+            xtr: 0.0,
             iso_level: 0.4,
             img: (800, 450),
         };
@@ -371,11 +377,27 @@ impl Tab3D {
                 ui.add(egui::Slider::new(&mut k, 0.0..=(RE3.len() - 1) as f64).step_by(1.0).show_value(false));
                 s.re = RE3[k.round() as usize];
                 ui.label(if s.re >= 1e5 { format!("{:.0e}", s.re) } else { format!("{}", s.re) });
-                if s.re >= lbm::tunnel::RE_SA_AUTO {
-                    ui.label(egui::RichText::new("loi de paroi").small().weak())
-                        .on_hover_text("Spalart–Allmaras et loi de Spalding : couche limite turbulente supposée dès l'avant");
-                }
             });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Paroi");
+            ui.selectable_value(&mut s.wall, 0, "auto")
+                .on_hover_text("Loi de paroi dès Re = 5·10⁴");
+            ui.selectable_value(&mut s.wall, 1, "loi de paroi").on_hover_text(
+                "Spalart–Allmaras et loi de Spalding : couche limite turbulente (régime d'après la crise \
+                 de traînée pour les corps épais)",
+            );
+            ui.selectable_value(&mut s.wall, 2, "sans").on_hover_text(
+                "Paroi sans glissement, sous-maille seule : couche limite épaisse, décollement précoce \
+                 (proche du régime sous-critique des corps épais)",
+            );
+        });
+        if wall_model(s) {
+            ui.add(egui::Slider::new(&mut s.xtr, 0.0..=1.0).step_by(0.05).text("transition (x/c)"))
+                .on_hover_text(
+                    "Couche limite laminaire (frottement de Blasius, sans production turbulente) du bord \
+                     d'attaque jusqu'à cette fraction de la corde locale ; 0 : turbulente dès l'avant",
+                );
         }
         ui.label("Résolution (mailles par longueur de référence)");
         ui.horizontal_wrapped(|ui| {
@@ -793,6 +815,15 @@ impl Tab3D {
     }
 }
 
+/// Loi de paroi active pour ces réglages.
+fn wall_model(s: &Settings) -> bool {
+    match s.wall {
+        1 => true,
+        2 => false,
+        _ => s.re >= lbm::tunnel::RE_SA_AUTO,
+    }
+}
+
 /// Nombre à trois chiffres significatifs.
 fn sig(v: f64) -> String {
     let a = v.abs();
@@ -975,7 +1006,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     || b.fp16 != st.fp16
                     || b.reset != st.reset
                     || b.refine != st.refine
-                    || (b.re >= lbm::tunnel::RE_SA_AUTO) != (st.re >= lbm::tunnel::RE_SA_AUTO)
+                    || wall_model(b) != wall_model(&st)
                     || (st.shape == Shape3D::Mesh && (b.stl != st.stl || b.setup != st.setup))
             }
         };
@@ -1003,9 +1034,10 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 (k, _) => Ok(Body3D::new(k, st.l, st.alpha)),
             };
             let nu = U as f64 * st.l as f64 / st.re;
-            let sa = st.re >= lbm::tunnel::RE_SA_AUTO;
+            let sa = wall_model(&st);
             match b.and_then(|b| Gpu3D::with_refinement(&b, nu, U, st.fp16, sa, st.refine).map(|g| (g, b))) {
-                Ok((g, b)) => {
+                Ok((mut g, b)) => {
+                    g.set_transition(st.xtr);
                     let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
                     shared.lock().unwrap().frame.warning = match lost {
                         _ if b.mesh.is_some() && g.wall_count == 0 => {
@@ -1040,6 +1072,13 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             continue;
         };
         let spt = st.l as f64 / U as f64;
+        if built.as_ref().is_some_and(|x| x.xtr != st.xtr) {
+            g.set_transition(st.xtr);
+            t_change = g.time as f64 / spt;
+            if let Some(x) = built.as_mut() {
+                x.xtr = st.xtr;
+            }
+        }
         if built.as_ref().is_some_and(|x| x.re != st.re) {
             g.set_viscosity(U as f64 * st.l as f64 / st.re);
             t_change = g.time as f64 / spt;

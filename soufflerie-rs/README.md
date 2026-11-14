@@ -279,6 +279,20 @@ d'un nœud là où la veine la place à un quart ; à L = 32, l'aile (4 mailles
 d'épaisseur) y est sensible (Re = 10⁶ : Cx 0,057 ou 0,086 selon le calage),
 ce qu'atténue justement le raffinement (×4 : Cx 0,056, Cz 0,600).
 
+**Transition** (`run3d --xtr 0.3`, interface : curseur « transition (x/c) »
+quand la loi de paroi est active). Couche limite laminaire du bord d'attaque
+jusqu'à la fraction xtr de la corde locale, mesurée dans chaque tranche
+d'envergure comme l'étendue en x du corps : frottement de Blasius
+(0,664/√Re_x) à la paroi et pas de production de Spalart–Allmaras autour,
+comme la zone laminaire du 2D. Aile d'allongement 4 à 8°, Re = 10⁶,
+L = 16 : Cx 0,1163 turbulente, 0,1107 laminaire partout (écart de frottement
+attendu ≈ 0,006, test `transition_3d`) ; sur une grille plus grossière, le
+glissement laminaire réduit aussi la traînée de pression. Le décollement
+laminaire des corps épais n'est pas capturé (sphère à Re = 10⁵ : 0,25
+turbulente, 0,21 laminaire, au lieu de 0,47) : pour ce régime sous-critique,
+couper la loi de paroi (« Paroi : sans », `--turb off`) donne une couche
+limite épaisse qui décolle tôt (sphère à Re = 10⁶ : Cx = 0,46).
+
 ## Maquettes STL (3D)
 
 Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le

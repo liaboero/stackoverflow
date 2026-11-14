@@ -91,7 +91,17 @@ struct Params {
   tau0: f32, tauSponge: f32, spongeStart: u32, uIn: f32,
   accel: f32, c18: f32, writeMacro: u32, les: u32,
   rows: u32, sa: u32, nu: f32, lesA: f32,
+  xtr: f32, band: f32, pad0: f32, pad1: f32,
 };
+";
+
+/// Zone laminaire imposée : abscisse locale rapportée à la corde de la
+/// tranche d'envergure y (étendue en x des mailles du corps dans la tranche).
+const LAM_FNS: &str = "
+fn lam_xl(x: i32, y: i32) -> vec2<f32> {
+  let e = slab[u32(y)];
+  return vec2<f32>(f32(x) - e.x, e.y - e.x);
+}
 ";
 
 /// Spalart–Allmaras : viscosité turbulente et loi de Spalding (comme en 2D).
@@ -136,6 +146,11 @@ const SA3_WGSL: &str = "
 @group(0) @binding(5) var<storage, read> dist: array<f32>;
 @group(0) @binding(6) var<storage, read> nutIn: array<f32>;
 @group(0) @binding(7) var<storage, read_write> nutOut: array<f32>;
+@group(0) @binding(8) var<storage, read> slab: array<vec2<f32>>;
+fn lam_xl(x: i32, y: i32) -> vec2<f32> {
+  let e = slab[u32(y)];
+  return vec2<f32>(f32(x) - e.x, e.y - e.x);
+}
 
 const CB1 = 0.1355;
 const CB2 = 0.622;
@@ -219,7 +234,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let fv1 = c3 / (c3 + CV1_3);
     let fv2 = 1.0 - chi / (1.0 + chi * fv1);
     let s_tilde = max(omega + v / kd2 * fv2, 0.3 * omega);
-    let prod = CB1 * s_tilde * v;
+    var prod = CB1 * s_tilde * v;
+    if (P.xtr > 0.0 && dist[idx] < P.band) {
+      let xl = lam_xl(x, y);
+      if (xl.y > 0.0 && xl.x < P.xtr * xl.y) { prod = 0.0; }
+    }
     var r = 10.0;
     if (s_tilde > 1e-12) { r = min(10.0, v / (s_tilde * kd2)); }
     let r2 = r * r;
@@ -412,6 +431,9 @@ fn wgsl_step(fp16: bool) -> String {
 @group(0) @binding(11) var<storage, read_write> utau: array<f32>;
 // Distance à la paroi de chaque maille (amortissement de la sous-maille).
 @group(0) @binding(12) var<storage, read> wdist: array<f32>;
+// Étendue en x du corps par tranche y (zone laminaire).
+@group(0) @binding(13) var<storage, read> slab: array<vec2<f32>>;
+{lam_fns}
 {sa_fns}
 {load}
 {store}
@@ -472,7 +494,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let tv = u0 - dot(u0, gw.xyz) * gw.xyz;
     let ut = length(tv);
     let yw = max(0.1, gw.w);
-    let ut2 = spalding_utau(ut, yw);
+    var ut2 = spalding_utau(ut, yw);
+    if (P.xtr > 0.0) {{
+      // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
+      let xl = lam_xl(x, y);
+      if (xl.y > 0.0 && xl.x < P.xtr * xl.y) {{
+        let rex = max(1.0, P.uIn * max(xl.x, 0.5) / P.nu);
+        let cf = min(0.02, 0.664 / sqrt(rex));
+        ut2 = ut * sqrt(0.5 * cf);
+      }}
+    }}
     utau[wk] = ut2;
     if (ut >= 1e-12) {{
       let us = max(0.0, ut - ut2 * ut2 * yw / (P.nu + KAPPA * ut2 * yw));
@@ -541,6 +572,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }}
 ",
         sa_fns = SA_FNS,
+        lam_fns = LAM_FNS,
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
         jy = sum_expr(|i| C3[i][1]),
@@ -1113,6 +1145,11 @@ pub(crate) struct Params {
     nu: f32,
     /// Longueur d'amortissement pariétal de la sous-maille (mailles).
     les_a: f32,
+    /// Transition imposée à cette fraction de la corde locale (0 : turbulent).
+    xtr: f32,
+    /// Épaisseur (mailles) de la zone sans production autour d'une paroi laminaire.
+    band: f32,
+    pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -1195,6 +1232,9 @@ pub struct Gpu3D {
     /// distance à la paroi, géométrie pariétale et u_τ.
     pub sa: bool,
     pub(crate) nu: f64,
+    /// Transition imposée (fraction de la corde locale ; 0 : turbulent partout).
+    xtr: f64,
+    _slab: wgpu::Buffer,
     /// Mailles par longueur de référence (Reynolds de maille, sous-maille).
     l: usize,
     les_a: f64,
@@ -1395,7 +1435,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(12);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(13);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -1608,6 +1648,23 @@ impl Gpu3D {
         };
         let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
         let dist = body.wall_distance(&solid_mask);
+        // Étendue en x du corps (mailles solides et pariétales) dans chaque tranche y.
+        let mut slab = vec![[1.0f32, 0.0f32]; ny];
+        for (c, &w) in wall.iter().enumerate() {
+            if w != 0 && w != crate::refine3d::GHOST {
+                let (x, y) = ((c % nx) as f32, (c / nx) % ny);
+                if slab[y][0] > slab[y][1] {
+                    slab[y] = [x, x];
+                } else {
+                    slab[y] = [slab[y][0].min(x), slab[y][1].max(x)];
+                }
+            }
+        }
+        let slab_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("slab3d"),
+            contents: bytemuck::cast_slice(&slab),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let init_or = |label: &str, data: &[u8]| {
             if data.is_empty() {
                 mk(label, 16, st)
@@ -1651,6 +1708,7 @@ impl Gpu3D {
                 storage(10, true),
                 storage(11, false),
                 storage(12, true),
+                storage(13, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1664,6 +1722,7 @@ impl Gpu3D {
                 storage(5, true),
                 storage(6, true),
                 storage(7, false),
+                storage(8, true),
             ],
         });
         let init_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1738,6 +1797,7 @@ impl Gpu3D {
                         buf_entry(10, &wall_geo, None),
                         buf_entry(11, &utau_buf, None),
                         buf_entry(12, &dist_buf, None),
+                        buf_entry(13, &slab_buf, None),
                     ],
                 })
             })
@@ -1756,6 +1816,7 @@ impl Gpu3D {
                         buf_entry(5, &dist_buf, None),
                         buf_entry(6, &nut[s], None),
                         buf_entry(7, &nut[1 - s], None),
+                        buf_entry(8, &slab_buf, None),
                     ],
                 })
             })
@@ -1801,6 +1862,8 @@ impl Gpu3D {
             nu,
             l: body.l,
             les_a: 1.0,
+            xtr: 0.0,
+            _slab: slab_buf,
             nut,
             _dist: dist_buf,
             _wall_geo: wall_geo,
@@ -1889,6 +1952,9 @@ impl Gpu3D {
             sa: self.sa as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
+            xtr: self.xtr as f32,
+            band: (self.l as f32 / 10.0).max(3.0),
+            pad: [0.0; 2],
         }
     }
 
@@ -2014,6 +2080,19 @@ impl Gpu3D {
             };
         }
         self.take_forces_one()
+    }
+
+    /// Couche limite laminaire imposée du bord d'attaque jusqu'à la fraction
+    /// `xtr` de la corde locale (étendue en x du corps dans chaque tranche
+    /// d'envergure) : frottement de Blasius à la paroi, pas de production de
+    /// Spalart–Allmaras autour. 0 : turbulente dès l'avant.
+    pub fn set_transition(&mut self, xtr: f64) {
+        self.xtr = xtr.clamp(0.0, 1.0);
+        if let Some(r) = self.refine.as_mut() {
+            for g in r.levels.iter_mut() {
+                g.xtr = self.xtr;
+            }
+        }
     }
 
     /// Grilles fines : (dimensions, mailles pariétales) de la plus fine, et facteur.
