@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["gui", "gpu"]
-gui = ["dep:eframe", "dep:egui_plot", "gpu"]
+gui = ["dep:eframe", "dep:egui_plot", "dep:rfd", "gpu"]
 gpu = ["lbm/gpu"]
 
 [dependencies]
@@ -15,3 +15,5 @@ lbm = { path = "../lbm", default-features = false }
 rayon = "1"
 eframe = { version = "0.37", optional = true, features = ["glow", "wgpu"] }
 egui_plot = { version = "0.38", optional = true }
+# Dialogue natif d'ouverture de fichier (maquettes STL).
+rfd = { version = "0.15", optional = true }

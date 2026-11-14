@@ -30,6 +30,8 @@ pub struct Start {
     pub graph: Option<String>,
     /// Onglet initial : tunnel | wing
     pub tab: Option<String>,
+    /// Maquette STL à charger dans la soufflerie 3D (ouvre cet onglet).
+    pub stl: Option<std::path::PathBuf>,
 }
 
 /// Ouvre l'interface ; false si aucun rendu n'a pu être créé.
@@ -190,6 +192,12 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         worker::spawn(shared.clone(), move || ctx.request_repaint());
         let mut tab3d = Tab3D::new();
+        let tab = if let Some(p) = &start.stl {
+            tab3d.load_stl(p);
+            Tab::Tunnel3D
+        } else {
+            tab
+        };
         if tab == Tab::Tunnel3D {
             tab3d.set_active(true, &cc.egui_ctx);
         }

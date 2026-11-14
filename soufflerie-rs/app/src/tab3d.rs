@@ -15,6 +15,8 @@ fn rgbf(c: Color32) -> [f32; 3] {
     [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
 }
 use lbm::bodies3d::{Body3D, Shape3D};
+use lbm::fluid::Fluid;
+use lbm::stl::{Axis, MeshInfo, MeshSetup, Tri, Unit};
 use lbm::cpu::Ramp;
 use lbm::gpu3d::{bytes_per_cell, Camera, Gpu3D, RenderOptions, Slice, SliceField};
 use lbm::stats::{analyze, Analysis};
@@ -53,10 +55,37 @@ impl Plane {
     }
 }
 
+/// Maquette STL chargée (comparée par numéro de chargement).
+#[derive(Clone)]
+struct StlFile {
+    name: String,
+    tris: Arc<Vec<Tri>>,
+    id: u64,
+}
+
+impl PartialEq for StlFile {
+    fn eq(&self, o: &StlFile) -> bool {
+        self.id == o.id
+    }
+}
+
+/// Résolution de l'aperçu de mise en place (les dimensions de la veine
+/// sont proportionnelles à L).
+const PREVIEW_L: usize = 32;
+
+type Preview = Result<([usize; 3], MeshInfo), String>;
+
 /// Réglages transmis au fil de calcul.
 #[derive(Clone, PartialEq)]
 struct Settings {
     shape: Shape3D,
+    /// Maquette STL et sa mise en place (incidence : `alpha`).
+    stl: Option<StlFile>,
+    setup: MeshSetup,
+    /// Échelle physique de la maquette STL : le Reynolds découle de la vitesse.
+    phys: bool,
+    speed: f64,
+    fluid: Fluid,
     re: f64,
     l: usize,
     alpha: f64,
@@ -115,6 +144,12 @@ struct Shared {
 pub struct Tab3D {
     shared: Arc<Mutex<Shared>>,
     settings: Settings,
+    /// Chargements STL successifs (identifiants).
+    stl_count: u64,
+    stl_error: Option<String>,
+    /// Mise en place calculée pour l'aperçu : (fichier, réglage, incidence) →
+    /// dimensions de la veine à L = 32 et grandeurs de référence.
+    preview: Option<((u64, MeshSetup, f64), Preview)>,
     texture: Option<egui::TextureHandle>,
     slice_id: u64,
     started: bool,
@@ -124,6 +159,11 @@ impl Tab3D {
     pub fn new() -> Tab3D {
         let settings = Settings {
             shape: Shape3D::Sphere,
+            stl: None,
+            setup: MeshSetup::default(),
+            phys: false,
+            speed: 20.0,
+            fluid: Fluid::Air,
             re: 300.0,
             l: 16,
             alpha: 8.0,
@@ -148,6 +188,9 @@ impl Tab3D {
                 active: false,
             })),
             settings,
+            stl_count: 0,
+            stl_error: None,
+            preview: None,
             texture: None,
             slice_id: 0,
             started: false,
@@ -169,7 +212,52 @@ impl Tab3D {
         self.shared.lock().unwrap().settings = self.settings.clone();
     }
 
+    /// Lit un fichier STL et en fait la maquette courante.
+    pub fn load_stl(&mut self, path: &std::path::Path) {
+        match lbm::stl::read_stl(path) {
+            Ok(tris) => {
+                self.stl_count += 1;
+                self.settings.stl = Some(StlFile {
+                    name: path
+                        .file_name()
+                        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into()),
+                    tris: Arc::new(tris),
+                    id: self.stl_count,
+                });
+                self.settings.shape = Shape3D::Mesh;
+                self.settings.pos = None;
+                self.stl_error = None;
+                self.push();
+            }
+            Err(e) => self.stl_error = Some(e),
+        }
+    }
+
+    /// Mise en place de la maquette STL (recalculée quand le réglage change).
+    fn mesh_preview(&mut self) -> Option<Preview> {
+        let s = &self.settings;
+        let f = s.stl.as_ref()?;
+        let key = (f.id, s.setup.clone(), s.alpha);
+        if self.preview.as_ref().is_none_or(|(k, _)| *k != key) {
+            let setup = MeshSetup {
+                alpha_deg: s.alpha,
+                ..s.setup.clone()
+            };
+            let r = Body3D::from_mesh(&f.tris, PREVIEW_L, &setup).map(|(b, i)| ([b.nx, b.ny, b.nz], i));
+            self.preview = Some((key, r));
+        }
+        self.preview.as_ref().map(|(_, r)| r.clone())
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let dropped: Vec<std::path::PathBuf> =
+            ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if let Some(p) = dropped
+            .iter()
+            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")))
+        {
+            self.load_stl(p);
+        }
         egui::Panel::left("s3_reglages")
             .default_size(340.0)
             .resizable(true)
@@ -185,29 +273,83 @@ impl Tab3D {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
-        let s = &mut self.settings;
         ui.heading("Maquette");
-        ui.horizontal_wrapped(|ui| {
-            for k in Shape3D::ALL {
-                if ui.selectable_value(&mut s.shape, k, k.label()).changed() {
-                    s.pos = None;
+        let mut pick = false;
+        {
+            let s = &mut self.settings;
+            ui.horizontal_wrapped(|ui| {
+                for k in Shape3D::ALL {
+                    if ui.selectable_value(&mut s.shape, k, k.label()).changed() {
+                        s.pos = None;
+                    }
                 }
+                if let Some(f) = &s.stl {
+                    if ui
+                        .selectable_value(&mut s.shape, Shape3D::Mesh, format!("STL : {}", f.name))
+                        .changed()
+                    {
+                        s.pos = None;
+                    }
+                }
+                pick = ui
+                    .button("Charger un STL…")
+                    .on_hover_text(
+                        "Maquette maillée (STL binaire ou ASCII, volume fermé) ; on peut aussi glisser le fichier sur la fenêtre",
+                    )
+                    .clicked();
+            });
+        }
+        if pick {
+            if let Some(p) = rfd::FileDialog::new()
+                .add_filter("Maillage STL", &["stl", "STL"])
+                .pick_file()
+            {
+                self.load_stl(&p);
             }
-        });
+        }
+        if let Some(e) = &self.stl_error {
+            ui.colored_label(Color32::RED, e);
+        }
+        let mesh = self.settings.shape == Shape3D::Mesh && self.settings.stl.is_some();
+        let preview = if mesh { self.mesh_preview() } else { None };
+        let s = &mut self.settings;
         if s.shape.has_alpha() {
             ui.add(egui::Slider::new(&mut s.alpha, -10.0..=20.0).step_by(1.0).text("incidence (°)"));
         }
-        ui.horizontal(|ui| {
-            ui.label("Reynolds");
-            let mut k = RE3.iter().position(|&r| r == s.re).unwrap_or(5) as f64;
-            ui.add(egui::Slider::new(&mut k, 0.0..=(RE3.len() - 1) as f64).step_by(1.0).show_value(false));
-            s.re = RE3[k.round() as usize];
-            ui.label(format!("{}", s.re));
-        });
+        if mesh {
+            mesh_controls(ui, s, preview.as_ref());
+        }
+        if mesh && s.phys {
+            if let Some(Ok((_, info))) = &preview {
+                let (nu, _) = s.fluid.props();
+                s.re = (s.speed * info.ref_length_m / nu).max(1.0);
+            }
+            ui.label(format!("Reynolds {:.0} (vitesse et longueur de référence)", s.re));
+            if s.re > 5000.0 {
+                ui.label(
+                    egui::RichText::new(
+                        "Au-delà de quelques milliers, la couche limite n'est pas résolue (sous-maille seule) : coefficients indicatifs.",
+                    )
+                    .small()
+                    .color(theme::warn()),
+                );
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Reynolds");
+                let mut k = RE3.iter().position(|&r| r == s.re).unwrap_or(5) as f64;
+                ui.add(egui::Slider::new(&mut k, 0.0..=(RE3.len() - 1) as f64).step_by(1.0).show_value(false));
+                s.re = RE3[k.round() as usize];
+                ui.label(format!("{}", s.re));
+            });
+        }
         ui.label("Résolution (mailles par longueur de référence)");
         ui.horizontal_wrapped(|ui| {
             for (l, name) in RES3 {
-                let [nx, ny, nz] = s.shape.dims(l);
+                let [nx, ny, nz] = match (&preview, mesh) {
+                    (Some(Ok((d, _))), true) => d.map(|v| v * l / PREVIEW_L),
+                    _ => s.shape.dims(l),
+                };
                 let n = nx * ny * nz;
                 ui.selectable_value(&mut s.l, l, format!("{name} · {l}")).on_hover_text(format!(
                     "{:.2} M mailles, ≈ {} Mo de mémoire GPU",
@@ -312,6 +454,16 @@ impl Tab3D {
             ui.label("Cy (latéral)");
             ui.label(v(cy));
             ui.end_row();
+            if let (true, true, Some(Ok((_, info)))) = (mesh, s.phys, &preview) {
+                let (_, rho) = s.fluid.props();
+                let qs = 0.5 * rho * s.speed * s.speed * info.ref_area_m2;
+                let n = |c: f64| if c.is_finite() { format!("{} N", sig(c * qs)) } else { "—".into() };
+                for (name, c) in [("Traînée", cx), ("Portance", cz), ("Effort latéral", cy)] {
+                    ui.label(format!("{name} à {} m/s", s.speed));
+                    ui.label(n(c));
+                    ui.end_row();
+                }
+            }
             ui.label("Strouhal");
             ui.label(if f.ready && a.periodic && a.st.is_finite() {
                 format!("{:.3} ({} périodes)", a.st, a.periods)
@@ -585,6 +737,116 @@ impl Tab3D {
     }
 }
 
+/// Nombre à trois chiffres significatifs.
+fn sig(v: f64) -> String {
+    let a = v.abs();
+    if a == 0.0 {
+        "0".into()
+    } else if !(1e-3..1e5).contains(&a) {
+        format!("{v:.2e}")
+    } else {
+        let d = (2 - a.log10().floor() as i32).max(0) as usize;
+        format!("{v:.d$}")
+    }
+}
+
+/// Mise en place de la maquette STL : dérapage, axes, unité, références,
+/// échelle physique, et ce qu'elle donne (dimensions, blocage).
+fn mesh_controls(ui: &mut egui::Ui, s: &mut Settings, preview: Option<&Preview>) {
+    let info = preview.and_then(|p| p.as_ref().ok()).map(|(_, i)| i.clone());
+    let st = &mut s.setup;
+    ui.add(egui::Slider::new(&mut st.beta_deg, -30.0..=30.0).step_by(1.0).text("dérapage (°)"))
+        .on_hover_text("Positif : vent venant de la droite de la maquette");
+    let axis_box = |ui: &mut egui::Ui, id: &str, v: &mut Axis| {
+        egui::ComboBox::from_id_salt(id)
+            .width(52.0)
+            .selected_text(v.label())
+            .show_ui(ui, |ui| {
+                for a in Axis::ALL {
+                    ui.selectable_value(v, a, a.label());
+                }
+            });
+    };
+    ui.horizontal(|ui| {
+        ui.label("Écoulement selon");
+        axis_box(ui, "stl_flow", &mut st.flow);
+        ui.label("haut selon");
+        axis_box(ui, "stl_up", &mut st.up);
+    })
+    .response
+    .on_hover_text("Axes du fichier : sens de l'écoulement (de l'avant vers l'arrière) et verticale");
+    ui.horizontal(|ui| {
+        ui.label("Unité du fichier");
+        for u in Unit::ALL {
+            ui.selectable_value(&mut st.unit, u, u.label());
+        }
+    });
+    let u = st.unit.label();
+    let m = st.unit.meters();
+    ui.horizontal(|ui| {
+        let mut on = st.ref_length.is_some();
+        ui.checkbox(&mut on, "Longueur de réf.");
+        if !on {
+            st.ref_length = None;
+            ui.label(egui::RichText::new("longueur hors tout").weak());
+        } else if st.ref_length.is_none() {
+            st.ref_length = info.as_ref().map(|i| i.ref_length_m / m);
+        }
+        if let Some(v) = &mut st.ref_length {
+            ui.add(egui::DragValue::new(v).speed(1.0).range(1e-6..=1e9).suffix(format!(" {u}")));
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut on = st.ref_area.is_some();
+        ui.checkbox(&mut on, "Surface de réf.");
+        if !on {
+            st.ref_area = None;
+            ui.label(egui::RichText::new("maître-couple").weak());
+        } else if st.ref_area.is_none() {
+            st.ref_area = info.as_ref().map(|i| i.frontal_m2 / (m * m));
+        }
+        if let Some(v) = &mut st.ref_area {
+            ui.add(egui::DragValue::new(v).speed(10.0).range(1e-9..=1e15).suffix(format!(" {u}²")));
+        }
+    });
+    match preview {
+        Some(Ok((_, i))) => {
+            let [a, b, c] = i.size_m.map(|v| sig(v / m));
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} triangles · {a} × {b} × {c} {u} (longueur, largeur, hauteur) · maître-couple {} {u}² · blocage {:.1} %",
+                    i.triangles,
+                    sig(i.frontal_m2 / (m * m)),
+                    100.0 * i.blockage
+                ))
+                .small(),
+            );
+            if i.blockage > 0.05 {
+                ui.colored_label(theme::warn(), "Blocage de la veine supérieur à 5 % : coefficients surestimés.");
+            }
+        }
+        Some(Err(e)) => {
+            ui.colored_label(Color32::RED, e);
+        }
+        None => {}
+    }
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut s.phys, "Échelle physique");
+        if s.phys {
+            ui.add(egui::DragValue::new(&mut s.speed).speed(0.5).range(0.01..=1000.0).suffix(" m/s"));
+            egui::ComboBox::from_id_salt("stl_fluid")
+                .selected_text(s.fluid.label())
+                .show_ui(ui, |ui| {
+                    for f in [Fluid::Air, Fluid::Water] {
+                        ui.selectable_value(&mut s.fluid, f, f.label());
+                    }
+                });
+        }
+    })
+    .response
+    .on_hover_text("Le Reynolds découle de la vitesse et de la longueur de référence ; efforts en newtons");
+}
+
 /// Repères de la littérature pour la configuration courante.
 fn reference(shape: Shape3D, re: f64) -> String {
     match shape {
@@ -641,7 +903,14 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
         // Reconstruction si la maquette, la résolution ou la précision changent.
         let need = match &built {
             None => true,
-            Some(b) => b.shape != st.shape || b.l != st.l || b.alpha != st.alpha || b.fp16 != st.fp16 || b.reset != st.reset,
+            Some(b) => {
+                b.shape != st.shape
+                    || b.l != st.l
+                    || b.alpha != st.alpha
+                    || b.fp16 != st.fp16
+                    || b.reset != st.reset
+                    || (st.shape == Shape3D::Mesh && (b.stl != st.stl || b.setup != st.setup))
+            }
         };
         if need {
             sim = None;
@@ -651,10 +920,20 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 s.frame.error = None;
             }
             repaint();
-            let b = Body3D::new(st.shape, st.l, st.alpha);
+            let b = match (st.shape, &st.stl) {
+                (Shape3D::Mesh, Some(f)) => {
+                    let setup = MeshSetup {
+                        alpha_deg: st.alpha,
+                        ..st.setup.clone()
+                    };
+                    Body3D::from_mesh(&f.tris, st.l, &setup).map(|(b, _)| b)
+                }
+                (Shape3D::Mesh, None) => Err("aucun fichier STL chargé".into()),
+                (k, _) => Ok(Body3D::new(k, st.l, st.alpha)),
+            };
             let nu = U as f64 * st.l as f64 / st.re;
-            match Gpu3D::new(&b, nu, U, st.fp16) {
-                Ok(g) => {
+            match b.and_then(|b| Gpu3D::new(&b, nu, U, st.fp16).map(|g| (g, b))) {
+                Ok((g, b)) => {
                     sim = Some(g);
                     body = Some(b);
                 }

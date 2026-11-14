@@ -96,7 +96,7 @@ fn child(a: &Args) {
         cfg: a
             .opts
             .keys()
-            .any(|k| !matches!(k.as_str(), "field" | "graph" | "rendu" | "tab"))
+            .any(|k| !matches!(k.as_str(), "field" | "graph" | "rendu" | "tab" | "stl"))
             .then(|| {
                 let mut c = a.config();
                 if !a.opts.contains_key("l") {
@@ -107,6 +107,7 @@ fn child(a: &Args) {
         field: a.opts.get("field").cloned(),
         graph: a.opts.get("graph").cloned(),
         tab: a.opts.get("tab").cloned(),
+        stl: a.opts.get("stl").map(std::path::PathBuf::from),
     };
     if !gui::main(start) {
         std::process::exit(NO_RENDERER);

@@ -216,6 +216,14 @@ avec Spalart–Allmaras), 3 % sur l'amplitude de Cz'.
 
 ## Maquettes STL (3D)
 
+Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le
+fichier sur la fenêtre, ou `soufflerie --stl fichier.stl` au lancement). Les
+mêmes réglages qu'en ligne de commande y figurent (axes, unité, incidence,
+dérapage, références), avec les dimensions, le maître-couple et le blocage ;
+« Échelle physique » fixe le Reynolds par la vitesse et donne les efforts
+en newtons.
+
+En ligne de commande :
 `soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette
 maillée (STL binaire ou ASCII, volume fermé). Mise en place :
 
