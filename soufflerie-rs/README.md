@@ -97,7 +97,30 @@ de 239 millions de mailles par seconde sur 4 cœurs), un peu moins sur GPU.
 Comme dans l'application web, la portance et le décollement sont
 qualitatifs à ces résolutions, et la traînée LBM d'un profil mince reste
 approximative : la référence « panneaux + couche limite » est la bonne
-valeur de traînée en écoulement attaché.
+valeur de traînée en écoulement attaché. À Re = 10⁶, la traînée LBM d'un
+NACA 0012 à 4° vaut 0,006 à L = 32 et 0,020 à L = 48 (0,008 attendu) : elle
+dépend de la finesse du bord d'attaque, pas d'un défaut de convergence.
+
+**Blocage de la veine.** La veine 2D ne fait que 12 longueurs de haut :
+l'écoulement accélère autour de la maquette et de son sillage, ce qui
+surestimait la traînée d'un cylindre de 14 % à Re = 20 et de 8 % à Re = 100,
+quelle que soit la résolution. Les coefficients (interface, `run`, `polar`)
+sont désormais corrigés par la méthode d'Allen et Vincenti (vitesse effective
+U(1 + ε), ε = blocage de volume + blocage de sillage) ; `--paroi 0` ou la case
+de l'interface rendent les valeurs brutes :
+
+| Cylindre, L = 32 | brut | corrigé | référence (veine infinie) |
+| --- | --- | --- | --- |
+| Re = 20, Cx | 2,347 | 2,077 | 2,05 à 2,09 |
+| Re = 100, Cx | 1,442 | 1,331 | 1,33 à 1,35 |
+| Re = 100, St | 0,175 | 0,170 | 0,164 à 0,167 |
+
+La soufflerie 3D n'a pas encore cette correction.
+
+**Lecture des efforts sans attente.** Le moteur GPU relève les efforts par
+copies asynchrones au lieu de vider la file de calcul à chaque relevé : un
+calcul de cylindre à L = 32 passe de 750 à 1 630 millions de mailles par
+seconde (GTX 1070), à résultats identiques.
 
 L'aile finie (onglet « Aile finie », commande `wing`) reprend la surface
 portante de Weissinger non linéaire de l'application web : polaires de

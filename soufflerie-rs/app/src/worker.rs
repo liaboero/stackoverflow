@@ -36,6 +36,8 @@ pub struct Settings {
     pub field: Field,
     pub tracers: Tracers,
     pub running: bool,
+    /// Coefficients corrigés du blocage de la veine.
+    pub wall_corr: bool,
 }
 
 /// Demandes ponctuelles de l'interface.
@@ -60,6 +62,8 @@ pub struct Frame {
     /// Champ coloré (RGBA, ligne du haut en premier).
     pub rgba: Vec<u8>,
     pub image_id: u64,
+    /// Blocage de la veine ε (0 sans correction).
+    pub blockage: f64,
     /// Contour de la maquette et point de référence (réseau).
     pub outline: Vec<[f64; 2]>,
     pub refp: [f64; 2],
@@ -103,40 +107,6 @@ const FRONT_SPAN: f64 = 4.0;
 const FRONT_DX: f64 = 0.5;
 const MAX_FRONTS: usize = 40;
 const MAX_STREAK: usize = 12000;
-
-/// Palettes de l'application web (thème clair).
-const DIVERGING: [(f32, [u8; 3]); 5] = [
-    (0.0, [0x12, 0x3f, 0x66]),
-    (0.22, [0x4f, 0x86, 0xb8]),
-    (0.5, [0xf3, 0xf6, 0xf7]),
-    (0.78, [0xde, 0x84, 0x56]),
-    (1.0, [0x8c, 0x24, 0x10]),
-];
-const SEQUENTIAL: [(f32, [u8; 3]); 5] = [
-    (0.0, [0xf3, 0xf6, 0xf7]),
-    (0.3, [0xbc, 0xd8, 0xdf]),
-    (0.6, [0x5f, 0x9f, 0xba]),
-    (0.85, [0x24, 0x55, 0x7d]),
-    (1.0, [0x10, 0x23, 0x3f]),
-];
-pub const BODY_RGB: [u8; 3] = [0x24, 0x31, 0x3a];
-
-fn lut(stops: &[(f32, [u8; 3])]) -> Vec<[u8; 4]> {
-    (0..256)
-        .map(|k| {
-            let t = k as f32 / 255.0;
-            let mut s = 0;
-            while s < stops.len() - 2 && t > stops[s + 1].0 {
-                s += 1;
-            }
-            let (p0, c0) = stops[s];
-            let (p1, c1) = stops[s + 1];
-            let u = ((t - p0) / (p1 - p0)).clamp(0.0, 1.0);
-            let c = |i: usize| (c0[i] as f32 + (c1[i] as f32 - c0[i] as f32) * u).round() as u8;
-            [c(0), c(1), c(2), 255]
-        })
-        .collect()
-}
 
 /// Bornes et palette d'une grandeur affichée.
 pub fn field_range(f: Field) -> (f32, f32, bool) {
@@ -341,7 +311,8 @@ pub fn spawn(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
 }
 
 fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
-    let luts = (lut(&DIVERGING), lut(&SEQUENTIAL));
+    let mut luts = (crate::theme::lut(crate::theme::diverging()), crate::theme::lut(crate::theme::sequential()));
+    let mut dark = crate::theme::dark();
     let mut wt: Option<WindTunnel> = None;
     let mut err: Option<String> = None;
     let mut history: Vec<[f64; 4]> = Vec::new();
@@ -414,13 +385,21 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             while t0.elapsed() < Duration::from_millis(28) {
                 let n = batch.min(max_batch);
                 w.run(n);
-                let s = w.engine.take_forces();
-                let c = w.coefficients(s);
-                history.push([w.t_star(), c.cx, c.cz, c.cm]);
+                let spt = w.steps_per_tstar();
+                for (step, s) in w.engine.poll_forces() {
+                    let c = if settings.wall_corr {
+                        w.corrected(w.coefficients(s))
+                    } else {
+                        w.coefficients(s)
+                    };
+                    history.push([step as f64 / spt, c.cx, c.cz, c.cm]);
+                    if !c.cx.is_finite() || !c.cz.is_finite() {
+                        diverged = true;
+                    }
+                }
                 steps_since_frame += n as u64;
                 perf.1 += n as u64;
-                if !c.cx.is_finite() || !c.cz.is_finite() {
-                    diverged = true;
+                if diverged {
                     break;
                 }
                 batch = n;
@@ -447,6 +426,10 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             };
             parts.advect(w, &macros, kind, steps_since_frame);
             steps_since_frame = 0;
+            if crate::theme::dark() != dark {
+                dark = !dark;
+                luts = (crate::theme::lut(crate::theme::diverging()), crate::theme::lut(crate::theme::sequential()));
+            }
             let rgba = colorize(
                 &macros,
                 kind,
@@ -483,7 +466,15 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             let start = (t_change + settle).max(now - WINDOW_T);
             let win: Vec<&[f64; 4]> = history.iter().filter(|h| h[0] >= start).collect();
             let col = |k: usize| win.iter().map(|h| h[k]).collect::<Vec<_>>();
-            let analysis = analyze(&col(0), &col(1), &col(2), &col(3));
+            let mut analysis = analyze(&col(0), &col(1), &col(2), &col(3));
+            // Blocage : vitesse effective U(1 + ε), Strouhal ramené à cette vitesse.
+            let blockage = if settings.wall_corr && analysis.cx.is_finite() {
+                let (es, ew) = w.blockage(analysis.cx);
+                es + ew
+            } else {
+                0.0
+            };
+            analysis.st /= 1.0 + blockage;
             let ready = now - start >= 3.0 && analysis.n >= 8 && analysis.cx.is_finite();
             image_id += 1;
             let frame = Frame {
@@ -492,6 +483,7 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
                 l: w.cfg.l as f64,
                 rgba,
                 image_id,
+                blockage,
                 outline: w.body.outline.clone(),
                 refp: [w.body.ref_x, w.body.ref_y],
                 points,
@@ -545,13 +537,14 @@ fn colorize(
     let mut out = vec![0u8; 4 * nx * ny];
     let (lo, hi, div) = field_range(field);
     let lut = if div { &luts.0 } else { &luts.1 };
+    let body = crate::theme::body_rgb();
     let k = 255.0 / (hi - lo);
     out.par_chunks_mut(4 * nx).enumerate().for_each(|(row, px)| {
         let y = ny - 1 - row;
         for x in 0..nx {
             let idx = y * nx + x;
             let c = if kind[idx] == SOLID {
-                [BODY_RGB[0], BODY_RGB[1], BODY_RGB[2], 255]
+                [body[0], body[1], body[2], 255]
             } else {
                 let v = match field {
                     Field::Speed => (m.ux[idx] * m.ux[idx] + m.uy[idx] * m.uy[idx]).sqrt() / u,

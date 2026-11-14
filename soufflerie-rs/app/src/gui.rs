@@ -15,12 +15,10 @@ use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Tu
 use crate::sweep::{Sweep, SweepVar};
 use crate::tab3d::Tab3D;
 use crate::wing_tab::WingTab;
-use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers, BODY_RGB};
+use crate::theme;
+use crate::worker::{self, Field, Frame, Requests, Settings, Shared, Tracers};
 
 const RES: [usize; 9] = [12, 16, 24, 32, 48, 64, 96, 128, 192];
-const ACCENT: Color32 = Color32::from_rgb(0xc8, 0x46, 0x1c);
-const LIFT: Color32 = Color32::from_rgb(0x1f, 0x6f, 0x9c);
-const TRACER: Color32 = Color32::from_rgba_premultiplied(16, 28, 38, 170);
 
 /// Réglages initiaux de l'interface (options de la ligne de commande).
 #[derive(Clone)]
@@ -161,7 +159,7 @@ fn duration(sec: f64) -> String {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start: Start) -> App {
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
+        cc.egui_ctx.set_theme(egui::ThemePreference::System);
         match &cc.wgpu_render_state {
             Some(rs) => {
                 let i = rs.adapter.get_info();
@@ -203,6 +201,7 @@ impl App {
             tracers: Tracers::Fronts,
             // Sur les autres onglets, la soufflerie 2D attend.
             running: tab == Tab::Tunnel,
+            wall_corr: true,
         };
         let shared = Arc::new(Mutex::new(Shared {
             settings: settings.clone(),
@@ -483,10 +482,10 @@ impl App {
                         String::new()
                     }
                 };
-                ui.colored_label(ACCENT, "Cx (traînée)");
+                ui.colored_label(theme::accent(), "Cx (traînée)");
                 ui.label(format!("{} {}", v(a.cx), amp(a.cx_amp)));
                 ui.end_row();
-                ui.colored_label(LIFT, "Cz (portance)");
+                ui.colored_label(theme::lift(), "Cz (portance)");
                 ui.label(format!("{} {}", v(a.cz), amp(a.cz_amp)));
                 ui.end_row();
                 ui.label("Cm (tangage)");
@@ -507,6 +506,20 @@ impl App {
                 });
                 ui.end_row();
             });
+        let w0 = self.settings.wall_corr;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.settings.wall_corr, "Corriger le blocage de la veine").on_hover_text(
+                "La veine ne fait que 12 longueurs de haut : l'écoulement accélère autour de la maquette \
+                 et de son sillage. Correction d'Allen et Vincenti (vitesse effective U(1 + ε)) ; \
+                 sans elle, la traînée d'un cylindre est surestimée de 8 à 15 %.",
+            );
+            if self.settings.wall_corr && fr.ready && fr.blockage > 0.0 {
+                ui.label(egui::RichText::new(format!("ε = {:.1} %", 100.0 * fr.blockage).replace('.', ",")).small().weak());
+            }
+        });
+        if self.settings.wall_corr != w0 {
+            self.push(|_| {});
+        }
         self.panel_reference(ui, fr);
         if fr.ready && !self.sweep.active() && ui.button("Ajouter à la polaire").clicked() {
             let (var, value) = self.sweep_var();
@@ -562,15 +575,17 @@ impl App {
             ui.label(
                 egui::RichText::new(
                     "La couche limite, plus mince qu'une maille, n'est pas résolue : un glissement de paroi \
-                     transmet le frottement de la loi de Spalding. Portance et décollement qualitatifs, \
-                     traînée LBM approximative.",
+                     transmet le frottement de la loi de Spalding. Portance et décollement qualitatifs. \
+                     La traînée LBM d'un profil porteur dépend de la finesse du bord d'attaque (NACA 0012 \
+                     à 4°, Re = 10⁶ : 0,006 à L = 32, 0,020 à L = 48, pour 0,008 attendu) : en écoulement \
+                     attaché, prendre la traînée des panneaux.",
                 )
                 .small()
                 .weak(),
             );
         } else if self.settings.cfg.re > fr.reliable_re && fr.reliable_re > 0.0 {
             ui.colored_label(
-                Color32::from_rgb(0x93, 0x65, 0x0f),
+                theme::warn(),
                 format!(
                     "Au-delà de Re ≈ {:.0} avec {} mailles par longueur, la couche limite est trop peu résolue : traînée surestimée, résultats qualitatifs.",
                     fr.reliable_re, self.settings.cfg.l
@@ -700,7 +715,7 @@ impl App {
         let mach = if self.fluid == Fluid::Air { v / 340.0 } else { 0.0 };
         if mach > 0.3 {
             ui.colored_label(
-                Color32::from_rgb(0x93, 0x65, 0x0f),
+                theme::warn(),
                 egui::RichText::new(format!(
                     "Mach réel ≈ {} : compressibilité non représentée par le calcul (incompressible). \
                      La référence des panneaux peut être corrigée : soufflerie panel --mach {:.2}.",
@@ -752,13 +767,13 @@ impl App {
                 .x_axis_label(x_name)
                 .show(&mut cols[0], |p| {
                     let dash = LineStyle::dashed_dense();
-                    p.line(Line::new("Cz", PlotPoints::from(cz.clone())).color(LIFT));
-                    p.points(Points::new("Cz", PlotPoints::from(cz)).color(LIFT).radius(3.0));
-                    p.line(Line::new("Cx", PlotPoints::from(cx.clone())).color(ACCENT));
-                    p.points(Points::new("Cx", PlotPoints::from(cx)).color(ACCENT).radius(3.0));
+                    p.line(Line::new("Cz", PlotPoints::from(cz.clone())).color(theme::lift()));
+                    p.points(Points::new("Cz", PlotPoints::from(cz)).color(theme::lift()).radius(3.0));
+                    p.line(Line::new("Cx", PlotPoints::from(cx.clone())).color(theme::accent()));
+                    p.points(Points::new("Cx", PlotPoints::from(cx)).color(theme::accent()).radius(3.0));
                     if !pcz.is_empty() {
-                        p.line(Line::new("Cz panneaux", PlotPoints::from(pcz)).color(LIFT).style(dash));
-                        p.line(Line::new("Cx panneaux", PlotPoints::from(pcx)).color(ACCENT).style(dash));
+                        p.line(Line::new("Cz panneaux", PlotPoints::from(pcz)).color(theme::lift()).style(dash));
+                        p.line(Line::new("Cx panneaux", PlotPoints::from(pcx)).color(theme::accent()).style(dash));
                     }
                 });
             Plot::new("polaire_eiffel")
@@ -767,8 +782,8 @@ impl App {
                 .x_axis_label("Cx")
                 .y_axis_label("Cz")
                 .show(&mut cols[1], |p| {
-                    p.line(Line::new("Cz(Cx)", PlotPoints::from(eiffel.clone())).color(LIFT));
-                    p.points(Points::new("Cz(Cx)", PlotPoints::from(eiffel)).color(LIFT).radius(3.0));
+                    p.line(Line::new("Cz(Cx)", PlotPoints::from(eiffel.clone())).color(theme::lift()));
+                    p.points(Points::new("Cz(Cx)", PlotPoints::from(eiffel)).color(theme::lift()).radius(3.0));
                 });
         });
         if clear {
@@ -806,10 +821,10 @@ impl App {
             .num_columns(2)
             .spacing([16.0, 2.0])
             .show(ui, |ui| {
-                ui.colored_label(ACCENT, "Cx");
+                ui.colored_label(theme::accent(), "Cx");
                 ui.label(format!("{:.4}", k.cd));
                 ui.end_row();
-                ui.colored_label(LIFT, "Cz");
+                ui.colored_label(theme::lift(), "Cz");
                 ui.label(format!("{:.4}", k.cl));
                 ui.end_row();
                 ui.label("Cm");
@@ -838,7 +853,7 @@ impl App {
             None
         };
         if let Some(n) = note {
-            ui.colored_label(Color32::from_rgb(0x93, 0x65, 0x0f), egui::RichText::new(n).small());
+            ui.colored_label(theme::warn(), egui::RichText::new(n).small());
         }
     }
 
@@ -866,8 +881,8 @@ impl App {
             .legend(Legend::default())
             .allow_scroll(false)
             .show(ui, |p| {
-                p.line(Line::new("Cx", PlotPoints::from(cx)).color(ACCENT));
-                p.line(Line::new("Cz", PlotPoints::from(cz)).color(LIFT));
+                p.line(Line::new("Cx", PlotPoints::from(cx)).color(theme::accent()));
+                p.line(Line::new("Cz", PlotPoints::from(cz)).color(theme::lift()));
             });
     }
 
@@ -908,21 +923,21 @@ impl App {
                         pl.push([r.cp_x[i], -r.cp[i]]);
                     }
                 }
-                refs.push((format!("panneaux, {up_name}"), pu, LIFT));
-                refs.push((format!("panneaux, {lo_name}"), pl, ACCENT));
+                refs.push((format!("panneaux, {up_name}"), pu, theme::lift()));
+                refs.push((format!("panneaux, {lo_name}"), pl, theme::accent()));
             } else {
                 let side = |f: &lbm::panel::Friction| {
                     (0..f.x.len())
                         .map(|i| [f.x[i], 1000.0 * f.cf[i] * f.ue[i] * f.ue[i]])
                         .collect::<Vec<_>>()
                 };
-                refs.push((format!("panneaux, {up_name}"), side(&r.friction_upper), LIFT));
-                refs.push((format!("panneaux, {lo_name}"), side(&r.friction_lower), ACCENT));
+                refs.push((format!("panneaux, {up_name}"), side(&r.friction_upper), theme::lift()));
+                refs.push((format!("panneaux, {lo_name}"), side(&r.friction_lower), theme::accent()));
             }
         }
         let marks: Vec<(f64, Color32)> = match &fr.panel {
             Some(r) if !cyl && fr.sa && self.settings.cfg.transition == Transition::Free => {
-                [(r.transition_upper, LIFT), (r.transition_lower, ACCENT)]
+                [(r.transition_upper, theme::lift()), (r.transition_lower, theme::accent())]
                     .into_iter()
                     .filter(|m| m.0.is_finite())
                     .collect()
@@ -962,12 +977,12 @@ impl App {
                 }
                 p.points(
                     Points::new(format!("LBM, {up_name}"), PlotPoints::from(up))
-                        .color(LIFT)
+                        .color(theme::lift())
                         .radius(1.8),
                 );
                 p.points(
                     Points::new(format!("LBM, {lo_name}"), PlotPoints::from(lo))
-                        .color(ACCENT)
+                        .color(theme::accent())
                         .radius(1.8),
                 );
                 for (x, c) in marks {
@@ -981,7 +996,7 @@ impl App {
         let avail = ui.available_size();
         let (resp, painter) = ui.allocate_painter(avail, Sense::click_and_drag());
         let rect = resp.rect;
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
+        painter.rect_filled(rect, 0.0, theme::canvas());
         if fr.nx == 0 {
             painter.text(
                 rect.center(),
@@ -1053,16 +1068,16 @@ impl App {
         let lw = 1.3;
         for (pl, &odd) in fr.lines.iter().zip(&fr.line_parity) {
             let pts: Vec<Pos2> = pl.iter().map(|p| to_screen(p[0], p[1])).collect();
-            painter.add(Shape::line(pts, Stroke::new(lw, if odd { ACCENT } else { TRACER })));
+            painter.add(Shape::line(pts, Stroke::new(lw, if odd { theme::accent() } else { theme::tracer() })));
         }
         for p in &fr.points {
             let q = to_screen(p[0], p[1]);
             if rect.contains(q) {
-                painter.rect_filled(Rect::from_center_size(q, Vec2::splat(1.6)), 0.0, TRACER);
+                painter.rect_filled(Rect::from_center_size(q, Vec2::splat(1.6)), 0.0, theme::tracer());
             }
         }
         // Maquette : éventail depuis le point de référence (formes étoilées).
-        let body = Color32::from_rgb(BODY_RGB[0], BODY_RGB[1], BODY_RGB[2]);
+        let body = theme::body();
         let r = to_screen(fr.refp[0] as f32, fr.refp[1] as f32);
         let ol: Vec<Pos2> = fr.outline.iter().map(|p| to_screen(p[0] as f32, p[1] as f32)).collect();
         let mut mesh = egui::Mesh::default();
@@ -1081,17 +1096,17 @@ impl App {
         }
         painter.add(Shape::line(
             closed,
-            Stroke::new(1.0, Color32::from_rgb(0x0d, 0x16, 0x1c)),
+            Stroke::new(1.0, theme::body_edge()),
         ));
-        painter.circle_filled(r, 2.5, Color32::from_rgb(0x0d, 0x16, 0x1c));
+        painter.circle_filled(r, 2.5, theme::body_edge());
         // Force aérodynamique moyenne : 1 unité de coefficient ↔ 1,2 L.
         let a = &fr.analysis;
         if self.show_force && fr.ready && a.cx.is_finite() && a.cz.is_finite() {
             let k = 1.2 * l;
             let tip = to_screen(fr.refp[0] as f32 + a.cx as f32 * k, fr.refp[1] as f32 + a.cz as f32 * k);
-            painter.line_segment([r, Pos2::new(tip.x, r.y)], Stroke::new(1.2, ACCENT));
-            painter.line_segment([r, Pos2::new(r.x, tip.y)], Stroke::new(1.2, LIFT));
-            painter.arrow(r, tip - r, Stroke::new(2.0, Color32::from_rgb(0x13, 0x20, 0x2a)));
+            painter.line_segment([r, Pos2::new(tip.x, r.y)], Stroke::new(1.2, theme::accent()));
+            painter.line_segment([r, Pos2::new(r.x, tip.y)], Stroke::new(1.2, theme::lift()));
+            painter.arrow(r, tip - r, Stroke::new(2.0, theme::ink()));
         }
         // Légende du champ.
         let (lo, hi, _) = worker::field_range(self.settings.field);
@@ -1106,19 +1121,21 @@ impl App {
             egui::Align2::LEFT_BOTTOM,
             format!("{name} : de {lo} à {hi}   ·   {}   ·   t* = {:.1}", fr.label, fr.t_star),
             egui::FontId::proportional(13.0),
-            Color32::from_rgb(0x13, 0x20, 0x2a),
+            theme::ink(),
         );
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        theme::sync(ui.ctx());
         let mut tab = self.tab;
         egui::Panel::top("onglets").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, Tab::Tunnel, "Soufflerie 2D");
                 ui.selectable_value(&mut tab, Tab::Wing, "Aile finie");
                 ui.selectable_value(&mut tab, Tab::Tunnel3D, "Soufflerie 3D");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), theme::switch);
             });
         });
         let ctx = ui.ctx().clone();

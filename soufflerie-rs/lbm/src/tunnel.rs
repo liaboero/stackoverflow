@@ -129,6 +129,23 @@ impl Engine {
     pub fn take_forces(&mut self) -> ForceSum {
         dispatch!(self, s => s.take_forces())
     }
+    /// Efforts relevés sans bloquer le GPU : (pas atteint, somme) des relevés
+    /// disponibles, éventuellement avec un ou deux relevés de retard.
+    pub fn poll_forces(&mut self) -> Vec<(u64, ForceSum)> {
+        match self {
+            Engine::Cpu(s) => {
+                let t = s.time;
+                let f = s.take_forces();
+                if f.steps > 0 {
+                    vec![(t, f)]
+                } else {
+                    Vec::new()
+                }
+            }
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => s.poll_forces(),
+        }
+    }
     pub fn macros(&mut self, out: &mut Macros) {
         dispatch!(self, s => s.macros(out))
     }
@@ -428,6 +445,45 @@ impl WindTunnel {
             cx: s.fx / steps / (q * l),
             cz: s.fy / steps / (q * l),
             cm: -s.mz / steps / (q * l * l),
+        }
+    }
+
+    /// Blocage de la veine (Allen et Vincenti, 1944) : (ε_s, ε_w), survitesse
+    /// relative au droit de la maquette due au volume de la maquette et à son
+    /// sillage, pour une veine de hauteur ny et un Cx brut donné.
+    ///
+    /// ε_s = (π/6)(1 + e/c)·A/h² (A : section, e/c : épaisseur sur longueur ;
+    /// π²/12·(d/h)² pour un cylindre) ; ε_w = L·Cx/(4h).
+    pub fn blockage(&self, cx: f64) -> (f64, f64) {
+        let ol = &self.body.outline;
+        let h = self.ny as f64;
+        if ol.len() < 3 {
+            return (0.0, 0.0);
+        }
+        let mut area = 0.0;
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (k, p) in ol.iter().enumerate() {
+            let q = ol[(k + 1) % ol.len()];
+            area += p[0] * q[1] - q[0] * p[1];
+            (x0, x1, y0, y1) = (x0.min(p[0]), x1.max(p[0]), y0.min(p[1]), y1.max(p[1]));
+        }
+        let area = 0.5 * area.abs();
+        let ratio = ((y1 - y0) / (x1 - x0).max(1e-9)).min(4.0);
+        let eps_s = std::f64::consts::PI / 6.0 * (1.0 + ratio) * area / (h * h);
+        let eps_w = (self.cfg.l as f64 * cx / (4.0 * h)).max(0.0);
+        (eps_s, eps_w)
+    }
+
+    /// Coefficients corrigés du blocage (Allen et Vincenti) : ramenés à la
+    /// vitesse effective U(1 + ε) ; la traînée perd en outre la poussée
+    /// horizontale due au gradient de pression du sillage (ε_s).
+    pub fn corrected(&self, c: Coefficients) -> Coefficients {
+        let (es, ew) = self.blockage(c.cx);
+        let k = 1.0 - 2.0 * (es + ew);
+        Coefficients {
+            cx: c.cx * (1.0 - 3.0 * es - 2.0 * ew),
+            cz: c.cz * k,
+            cm: c.cm * k,
         }
     }
 

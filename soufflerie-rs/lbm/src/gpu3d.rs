@@ -528,7 +528,8 @@ fn seqMap(t0: f32) -> vec3<f32> {
 }
 fn divMap(t0: f32) -> vec3<f32> {
   let t = clamp(t0, -1.0, 1.0);
-  let mid = vec3<f32>(0.95, 0.95, 0.93);
+  // Valeur nulle : teinte du fond, éclaircie (thème clair) ou non (sombre).
+  let mid = clamp(V.bg.rgb * 1.04 + vec3<f32>(0.01), vec3<f32>(0.0), vec3<f32>(1.0));
   if (t < 0.0) { return mix(mid, vec3<f32>(0.13, 0.36, 0.70), -t); }
   return mix(mid, vec3<f32>(0.78, 0.20, 0.15), t);
 }

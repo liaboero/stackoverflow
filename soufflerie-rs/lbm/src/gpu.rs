@@ -6,7 +6,9 @@
 //! seule soumission. Les efforts s'accumulent par maille pariétale et sont
 //! relus en une fois. Avec Spalart–Allmaras, une troisième passe transporte ν̃.
 
-use std::sync::mpsc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{mpsc, Arc};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -154,6 +156,20 @@ pub struct GpuSolver {
     ref_x: f64,
     ref_y: f64,
     spin: f64,
+    /// Lectures d'efforts en vol (copies non bloquantes) et tampons libres.
+    force_pending: VecDeque<PendingForce>,
+    force_free: Vec<wgpu::Buffer>,
+}
+
+/// Copie des efforts cumulés en cours de lecture.
+struct PendingForce {
+    buf: wgpu::Buffer,
+    size: u64,
+    /// Pas atteint à la copie, nombre de pas cumulés.
+    time: u64,
+    steps: u64,
+    /// 0 : en attente, 1 : lisible, 2 : échec.
+    state: Arc<AtomicU8>,
 }
 
 /// Entrées d'un groupe de liaison, numérotées dans l'ordre.
@@ -382,6 +398,8 @@ impl GpuSolver {
             ref_x: nx as f64 / 4.0,
             ref_y: (ny as f64 - 1.0) / 2.0,
             spin: 0.0,
+            force_pending: VecDeque::new(),
+            force_free: Vec::new(),
         };
         s.set_viscosity(s.cfg.nu);
         s.upload_geometry();
@@ -791,30 +809,90 @@ impl GpuSolver {
 
     /// Efforts cumulés depuis le dernier appel (lecture synchrone), puis remise à zéro.
     pub fn take_forces(&mut self) -> ForceSum {
-        if self.force_steps == 0 || self.wall_count == 0 {
-            return ForceSum {
-                steps: std::mem::take(&mut self.force_steps),
-                ..Default::default()
+        let mut all = self.poll_forces();
+        while !self.force_pending.is_empty() {
+            self.wait();
+            all.extend(self.poll_forces());
+        }
+        let mut s = ForceSum::default();
+        for (_, f) in all {
+            s.fx += f.fx;
+            s.fy += f.fy;
+            s.mz += f.mz;
+            s.steps += f.steps;
+        }
+        s
+    }
+
+    /// Efforts sans attente : lance la copie des efforts cumulés depuis le
+    /// dernier appel (puis les remet à zéro) et renvoie, dans l'ordre, les
+    /// copies déjà arrivées, avec le pas atteint au moment de chacune. Le GPU
+    /// enchaîne ainsi les pas sans se vider à chaque relevé.
+    pub fn poll_forces(&mut self) -> Vec<(u64, ForceSum)> {
+        let mut out = Vec::new();
+        if self.force_steps > 0 && self.wall_count == 0 {
+            let steps = std::mem::take(&mut self.force_steps);
+            out.push((self.time, ForceSum { steps, ..Default::default() }));
+        } else if self.force_steps > 0 {
+            let size = 16 * self.wall_count as u64;
+            let buf = match self.force_free.iter().position(|b| b.size() >= size) {
+                Some(i) => self.force_free.swap_remove(i),
+                None => self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("force_async"),
+                    size,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
             };
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.copy_buffer_to_buffer(&self.force, 0, &buf, 0, size);
+            enc.clear_buffer(&self.force, 0, None);
+            self.queue.submit([enc.finish()]);
+            let state = Arc::new(AtomicU8::new(0));
+            let st = state.clone();
+            buf.map_async(wgpu::MapMode::Read, 0..size, move |r| {
+                st.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release);
+            });
+            self.force_pending.push_back(PendingForce {
+                buf,
+                size,
+                time: self.time,
+                steps: std::mem::take(&mut self.force_steps),
+                state,
+            });
         }
-        let size = 16 * self.wall_count as u64;
-        let v = self.read_buffer(&self.force, &self.force_read, size);
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.clear_buffer(&self.force, 0, None);
-        self.queue.submit([enc.finish()]);
-        let (mut fx, mut fy, mut mz) = (0.0f64, 0.0f64, 0.0f64);
-        for c in v.chunks_exact(4) {
-            fx += c[0] as f64;
-            fy += c[1] as f64;
-            mz += c[2] as f64;
+        // Au plus quatre lectures en vol : au-delà, on attend le GPU.
+        let _ = if self.force_pending.len() > 4 {
+            self.device.poll(wgpu::PollType::wait_indefinitely())
+        } else {
+            self.device.poll(wgpu::PollType::Poll)
+        };
+        while let Some(p) = self.force_pending.front() {
+            let state = p.state.load(Ordering::Acquire);
+            if state == 0 {
+                break;
+            }
+            let p = self.force_pending.pop_front().unwrap();
+            let (mut fx, mut fy, mut mz) = (f64::NAN, f64::NAN, f64::NAN);
+            if state == 1 {
+                (fx, fy, mz) = (0.0, 0.0, 0.0);
+                {
+                    let view = p.buf.get_mapped_range(0..p.size).expect("lecture GPU");
+                    for c in bytemuck::cast_slice::<u8, f32>(&view).chunks_exact(4) {
+                        fx += c[0] as f64;
+                        fy += c[1] as f64;
+                        mz += c[2] as f64;
+                    }
+                }
+                p.buf.unmap();
+            }
+            self.finite = fx.is_finite() && fy.is_finite();
+            out.push((p.time, ForceSum { fx, fy, mz, steps: p.steps }));
+            if state == 1 {
+                self.force_free.push(p.buf);
+            }
         }
-        self.finite = fx.is_finite() && fy.is_finite();
-        ForceSum {
-            fx,
-            fy,
-            mz,
-            steps: std::mem::take(&mut self.force_steps),
-        }
+        out
     }
 
     /// ρ, u (lecture synchrone).

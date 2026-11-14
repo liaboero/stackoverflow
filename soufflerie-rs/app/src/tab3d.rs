@@ -8,6 +8,12 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
+
+use crate::theme;
+
+fn rgbf(c: Color32) -> [f32; 3] {
+    [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
+}
 use lbm::bodies3d::{Body3D, Shape3D};
 use lbm::cpu::Ramp;
 use lbm::gpu3d::{bytes_per_cell, Camera, Gpu3D, RenderOptions, Slice, SliceField};
@@ -25,39 +31,6 @@ const U: f32 = 0.1;
 const RAMP_T: f64 = 4.0;
 const SETTLE_T: f64 = 6.0;
 const WINDOW_T: f64 = 20.0;
-
-const ACCENT: Color32 = Color32::from_rgb(0xc8, 0x46, 0x1c);
-const LIFT: Color32 = Color32::from_rgb(0x1f, 0x6f, 0x9c);
-const INK: Color32 = Color32::from_rgb(0x13, 0x20, 0x2a);
-const BODY: Color32 = Color32::from_rgb(0x24, 0x31, 0x3a);
-
-const DIVERGING: [(f32, [u8; 3]); 5] = [
-    (0.0, [0x12, 0x3f, 0x66]),
-    (0.22, [0x4f, 0x86, 0xb8]),
-    (0.5, [0xf3, 0xf6, 0xf7]),
-    (0.78, [0xde, 0x84, 0x56]),
-    (1.0, [0x8c, 0x24, 0x10]),
-];
-const SEQUENTIAL: [(f32, [u8; 3]); 5] = [
-    (0.0, [0xf3, 0xf6, 0xf7]),
-    (0.3, [0xbc, 0xd8, 0xdf]),
-    (0.6, [0x5f, 0x9f, 0xba]),
-    (0.85, [0x24, 0x55, 0x7d]),
-    (1.0, [0x10, 0x23, 0x3f]),
-];
-
-fn color(stops: &[(f32, [u8; 3])], t: f32) -> [u8; 4] {
-    let t = t.clamp(0.0, 1.0);
-    let mut s = 0;
-    while s < stops.len() - 2 && t > stops[s + 1].0 {
-        s += 1;
-    }
-    let (p0, c0) = stops[s];
-    let (p1, c1) = stops[s + 1];
-    let u = ((t - p0) / (p1 - p0)).clamp(0.0, 1.0);
-    let c = |i: usize| (c0[i] as f32 + (c1[i] as f32 - c0[i] as f32) * u).round() as u8;
-    [c(0), c(1), c(2), 255]
-}
 
 /// Plan de coupe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -322,14 +295,14 @@ impl Tab3D {
         let (cx, cz, cy) = if f.ready { (a.cx, a.cz, a.cm) } else { (last[1], last[2], last[3]) };
         egui::Grid::new("s3_coef").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
             let v = |x: f64| if x.is_finite() { format!("{x:.4}") } else { "—".into() };
-            ui.colored_label(ACCENT, "Cx (traînée)");
+            ui.colored_label(theme::accent(), "Cx (traînée)");
             ui.label(if f.ready && a.periodic && a.cx_amp > 0.001 {
                 format!("{} ± {:.4}", v(cx), a.cx_amp)
             } else {
                 v(cx)
             });
             ui.end_row();
-            ui.colored_label(LIFT, "Cz (portance)");
+            ui.colored_label(theme::lift(), "Cz (portance)");
             ui.label(if f.ready && a.periodic && a.cz_amp > 0.001 {
                 format!("{} ± {:.4}", v(cz), a.cz_amp)
             } else {
@@ -371,7 +344,7 @@ impl Tab3D {
         }
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let rect = resp.rect;
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
+        painter.rect_filled(rect, 0.0, theme::canvas());
         let (slice, id, plane_pos, l) = {
             let s = self.shared.lock().unwrap();
             (s.frame.slice.clone(), s.frame.slice_id, s.frame.plane_pos, s.frame.l)
@@ -400,10 +373,10 @@ impl Tab3D {
                 for i in 0..sl.w {
                     let v = sl.data[i + sl.w * j];
                     let c = if v > 1e29 {
-                        [BODY.r(), BODY.g(), BODY.b(), 255]
+                        { let c = theme::body_rgb(); [c[0], c[1], c[2], 255] }
                     } else {
                         let t = (v - lo) / (hi - lo);
-                        color(if div { &DIVERGING } else { &SEQUENTIAL }, t)
+                        theme::color(if div { theme::diverging() } else { theme::sequential() }, t)
                     };
                     let o = 4 * (i + sl.w * row);
                     px[o..o + 4].copy_from_slice(&c);
@@ -429,7 +402,7 @@ impl Tab3D {
                 Color32::WHITE,
             );
         }
-        painter.rect_stroke(img_rect, 0.0, (1.0, INK), egui::StrokeKind::Outside);
+        painter.rect_stroke(img_rect, 0.0, (1.0, theme::ink()), egui::StrokeKind::Outside);
         let (h_axis, v_axis) = match plane_pos.0 {
             0 => ("y", "z"),
             1 => ("x", "z"),
@@ -451,7 +424,7 @@ impl Tab3D {
                 if plane_pos.0 == 0 { " (vu de l'amont)" } else { "" }
             ),
             egui::FontId::proportional(13.0),
-            INK,
+            theme::ink(),
         );
     }
 
@@ -459,7 +432,7 @@ impl Tab3D {
     fn view3d(&mut self, ui: &mut egui::Ui) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
+        painter.rect_filled(rect, 0.0, theme::canvas());
         // Caméra.
         let mut changed = false;
         if resp.dragged() {
@@ -559,7 +532,7 @@ impl Tab3D {
             ];
             let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)];
             let p = painter.with_clip_rect(img_rect);
-            let stroke = (1.0, Color32::from_rgba_premultiplied(40, 52, 62, 150));
+            let stroke = (1.0, theme::edge());
             for (i, j) in edges {
                 if let (Some(a), Some(b)) = (to(pts[i]), to(pts[j])) {
                     p.line_segment([a, b], stroke);
@@ -568,8 +541,8 @@ impl Tab3D {
             // Flèche du vent à l'entrée.
             let mid = [0.0, y / 2.0, z / 2.0];
             if let (Some(a), Some(b)) = (to(mid), to([2.0 * l as f64, y / 2.0, z / 2.0])) {
-                p.arrow(a, b - a, (2.0, INK));
-                p.text(a, egui::Align2::RIGHT_BOTTOM, "V∞ ", egui::FontId::proportional(13.0), INK);
+                p.arrow(a, b - a, (2.0, theme::ink()));
+                p.text(a, egui::Align2::RIGHT_BOTTOM, "V∞ ", egui::FontId::proportional(13.0), theme::ink());
             }
         }
         let st = &self.settings;
@@ -590,7 +563,7 @@ impl Tab3D {
                 }
             ),
             egui::FontId::proportional(13.0),
-            INK,
+            theme::ink(),
         );
     }
 
@@ -606,8 +579,8 @@ impl Tab3D {
             .allow_scroll(false)
             .x_axis_label("t*")
             .show(ui, |p| {
-                p.line(Line::new("Cx", PlotPoints::from(pts(1))).color(ACCENT));
-                p.line(Line::new("Cz", PlotPoints::from(pts(2))).color(LIFT));
+                p.line(Line::new("Cx", PlotPoints::from(pts(1))).color(theme::accent()));
+                p.line(Line::new("Cz", PlotPoints::from(pts(2))).color(theme::lift()));
             });
     }
 }
@@ -766,8 +739,8 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 iso: st.iso,
                 iso_level: st.iso_level,
                 l: st.l as f64,
-                background: [0.9, 0.92, 0.93],
-                body: [0.2, 0.25, 0.3],
+                background: rgbf(theme::canvas()),
+                body: rgbf(theme::body()),
             });
             (None, Some(Arc::new((st.img.0, st.img.1, rgba))), Some(cam))
         } else {

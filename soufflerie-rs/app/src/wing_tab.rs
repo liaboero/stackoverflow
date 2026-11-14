@@ -21,10 +21,7 @@ const N_HALF: usize = 40;
 const NU_AIR: f64 = 1.46e-5;
 const RHO_AIR: f64 = 1.225;
 
-const ACCENT: Color32 = Color32::from_rgb(0xc8, 0x46, 0x1c);
-const LIFT: Color32 = Color32::from_rgb(0x1f, 0x6f, 0x9c);
-const WARN: Color32 = Color32::from_rgb(0x93, 0x65, 0x0f);
-const INK: Color32 = Color32::from_rgb(0x13, 0x20, 0x2a);
+use crate::theme;
 
 /// Rampe de couleur Cl/Cl max : froid → chaud (rouge = décrochage local).
 const RAMP: [(f32, [u8; 3]); 4] = [
@@ -298,8 +295,8 @@ impl WingTab {
                     ui.label(v);
                     ui.end_row();
                 };
-                row(ui, "CL", Some(LIFT), format!("{:.4}", r.cl));
-                row(ui, "CD", Some(ACCENT), format!("{:.5}", r.cd));
+                row(ui, "CL", Some(theme::lift()), format!("{:.4}", r.cl));
+                row(ui, "CD", Some(theme::accent()), format!("{:.5}", r.cd));
                 row(ui, "  induite CDi", None, format!("{:.5}", r.cdi));
                 row(ui, "  de profil CDp", None, format!("{:.5}", r.cdv));
                 row(ui, "Cm (quart de c moyenne)", None, format!("{:.4}", r.cm));
@@ -388,7 +385,7 @@ impl WingTab {
             msgs.push("Re < 2·10⁵ : bulbes de décollement laminaire non modélisés dans les polaires de section.".into());
         }
         for m in msgs {
-            ui.colored_label(WARN, egui::RichText::new(m).small());
+            ui.colored_label(theme::warn(), egui::RichText::new(m).small());
         }
     }
 
@@ -396,7 +393,7 @@ impl WingTab {
     fn view(&mut self, ui: &mut egui::Ui, done: Option<&Computed>, up_to_date: bool) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
         let rect = resp.rect;
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0xe6, 0xeb, 0xee));
+        painter.rect_filled(rect, 0.0, theme::canvas());
         if resp.dragged() {
             let d = resp.drag_delta();
             self.cam.0 -= d.x * 0.5;
@@ -472,7 +469,7 @@ impl WingTab {
             let p1 = to_screen([t[0] + 0.75 * c + 3.0, t[1], t[2]]).0;
             painter.line_segment([p0, p1], Stroke::new(1.2, Color32::from_rgb(0x6b, 0x7a, 0x86)));
         }
-        let edge = Stroke::new(0.5, Color32::from_rgba_premultiplied(13, 22, 28, 120));
+        let edge = Stroke::new(0.5, theme::edge());
         for (_, q, col) in &quads {
             painter.add(Shape::convex_polygon(q.to_vec(), *col, edge));
         }
@@ -481,8 +478,8 @@ impl WingTab {
         let (u, v, _) = proj([1.0, 0.0, 0.0]);
         let dir = Vec2::new(u as f32, -v as f32);
         let dir = if dir.length() > 0.1 { dir.normalized() } else { Vec2::X };
-        painter.arrow(a0, dir * 40.0, Stroke::new(1.5, INK));
-        painter.text(a0 + Vec2::new(0.0, -14.0), egui::Align2::LEFT_BOTTOM, "V∞", egui::FontId::proportional(12.0), INK);
+        painter.arrow(a0, dir * 40.0, Stroke::new(1.5, theme::ink()));
+        painter.text(a0 + Vec2::new(0.0, -14.0), egui::Align2::LEFT_BOTTOM, "V∞", egui::FontId::proportional(12.0), theme::ink());
         painter.text(
             rect.left_bottom() + Vec2::new(8.0, -8.0),
             egui::Align2::LEFT_BOTTOM,
@@ -491,7 +488,7 @@ impl WingTab {
                 self.alpha
             ),
             egui::FontId::proportional(13.0),
-            INK,
+            theme::ink(),
         );
     }
 
@@ -508,11 +505,11 @@ impl WingTab {
             .allow_scroll(false)
             .x_axis_label("2y/b")
             .show(ui, |p| {
-                p.line(Line::new("Cl local", PlotPoints::from(cl)).color(LIFT));
-                p.line(Line::new("charge c·Cl/c̄", PlotPoints::from(ccl)).color(INK));
+                p.line(Line::new("Cl local", PlotPoints::from(cl)).color(theme::lift()));
+                p.line(Line::new("charge c·Cl/c̄", PlotPoints::from(ccl)).color(theme::ink()));
                 p.line(
                     Line::new("Cl max du profil", PlotPoints::from(cm))
-                        .color(ACCENT)
+                        .color(theme::accent())
                         .style(LineStyle::dashed_dense()),
                 );
             });
@@ -543,27 +540,27 @@ impl WingTab {
                             [k.cd, k.cl]
                         })
                         .collect();
-                    p.line(Line::new("aile", PlotPoints::from(w)).color(LIFT));
+                    p.line(Line::new("aile", PlotPoints::from(w)).color(theme::lift()));
                     p.line(
                         Line::new("profil 2D (emplanture)", PlotPoints::from(s))
                             .color(Color32::GRAY)
                             .style(LineStyle::dashed_dense()),
                     );
                     if let Some((cl, cd)) = cur {
-                        p.points(Points::new("α courant", PlotPoints::from(vec![[cd, cl]])).color(ACCENT).radius(4.0));
+                        p.points(Points::new("α courant", PlotPoints::from(vec![[cd, cl]])).color(theme::accent()).radius(4.0));
                     }
                 } else {
                     let w: Vec<[f64; 2]> = comp.polar.iter().map(|r| [r.alpha, r.cl]).collect();
                     let d: Vec<[f64; 2]> = comp.polar.iter().map(|r| [r.alpha, 10.0 * r.cd]).collect();
                     let s: Vec<[f64; 2]> = (POLAR_LO..=POLAR_HI).map(|a| [a as f64, root.at(a as f64).cl]).collect();
-                    p.line(Line::new("CL aile", PlotPoints::from(w)).color(LIFT));
-                    p.line(Line::new("10 × CD aile", PlotPoints::from(d)).color(ACCENT));
+                    p.line(Line::new("CL aile", PlotPoints::from(w)).color(theme::lift()));
+                    p.line(Line::new("10 × CD aile", PlotPoints::from(d)).color(theme::accent()));
                     p.line(
                         Line::new("Cl profil 2D (emplanture)", PlotPoints::from(s))
                             .color(Color32::GRAY)
                             .style(LineStyle::dashed_dense()),
                     );
-                    p.vline(VLine::new("α courant", self.alpha).color(INK).style(LineStyle::dotted_dense()));
+                    p.vline(VLine::new("α courant", self.alpha).color(theme::ink()).style(LineStyle::dotted_dense()));
                 }
             });
     }

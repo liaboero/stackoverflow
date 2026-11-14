@@ -35,6 +35,8 @@ mod sweep;
 mod tab3d;
 #[cfg(feature = "gui")]
 mod worker;
+#[cfg(feature = "gui")]
+mod theme;
 
 fn usage() -> ! {
     eprintln!(
@@ -54,6 +56,7 @@ fn usage() -> ! {
          \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
     );
     std::process::exit(2)
@@ -138,7 +141,8 @@ impl Args {
 }
 
 /// Calcul jusqu'à `t_end` temps convectifs ; analyse des `avg` derniers.
-fn simulate(cfg: TunnelConfig, t_end: f64, avg: f64, quiet: bool) -> Result<(Analysis, f64, bool), String> {
+/// `corr` : coefficients corrigés du blocage de la veine (Allen et Vincenti).
+fn simulate(cfg: TunnelConfig, t_end: f64, avg: f64, quiet: bool, corr: bool) -> Result<(Analysis, f64, bool), String> {
     let mut wt = WindTunnel::new(cfg)?;
     let spt = wt.steps_per_tstar();
     let every = ((spt / 40.0).round() as usize).max(1);
@@ -151,27 +155,46 @@ fn simulate(cfg: TunnelConfig, t_end: f64, avg: f64, quiet: bool) -> Result<(Ana
         let n = every.min(total - done);
         wt.run(n);
         done += n;
-        let s = wt.engine.take_forces();
-        let c = wt.coefficients(s);
-        let ts = wt.t_star();
-        if ts >= t_end - avg {
-            t.push(ts);
-            cx.push(c.cx);
-            cz.push(c.cz);
-            cm.push(c.cm);
+        let mut polled = wt.engine.poll_forces();
+        if done >= total {
+            // Derniers relevés encore en vol.
+            let s = wt.engine.take_forces();
+            if s.steps > 0 {
+                polled.push((wt.engine.time(), s));
+            }
         }
-        if !quiet && ts >= next_print {
-            eprintln!("  t* = {ts:5.1}  Cx = {:8.4}  Cz = {:8.4}", c.cx, c.cz);
-            next_print += 5.0;
+        let mut bad = false;
+        for (step, s) in polled {
+            let c = if corr { wt.corrected(wt.coefficients(s)) } else { wt.coefficients(s) };
+            let ts = step as f64 / spt;
+            if ts >= t_end - avg {
+                t.push(ts);
+                cx.push(c.cx);
+                cz.push(c.cz);
+                cm.push(c.cm);
+            }
+            if !quiet && ts >= next_print {
+                eprintln!("  t* = {ts:5.1}  Cx = {:8.4}  Cz = {:8.4}", c.cx, c.cz);
+                next_print += 5.0;
+            }
+            bad |= !c.cx.is_finite();
         }
-        if !c.cx.is_finite() {
+        if bad {
             break;
         }
     }
     let secs = t0.elapsed().as_secs_f64();
     let mlups = (wt.nx * wt.ny) as f64 * done as f64 / secs / 1e6;
     let ok = wt.engine.is_finite();
-    Ok((analyze(&t, &cx, &cz, &cm), mlups, ok))
+    let mut r = analyze(&t, &cx, &cz, &cm);
+    if corr && r.cx.is_finite() {
+        let (es, ew) = wt.blockage(r.cx);
+        r.st /= 1.0 + es + ew;
+        if !quiet {
+            eprintln!("Blocage de la veine : ε = {:.2} % (volume {:.2} %, sillage {:.2} %), coefficients corrigés (--paroi 0 : bruts)", 100.0 * (es + ew), 100.0 * es, 100.0 * ew);
+        }
+    }
+    Ok((r, mlups, ok))
 }
 
 fn cmd_run(a: &Args) {
@@ -230,7 +253,7 @@ fn cmd_run(a: &Args) {
     drop(wt);
     let t_end = a.get("t", 40.0f64);
     let avg = a.get("avg", 15.0f64);
-    match simulate(cfg, t_end, avg, false) {
+    match simulate(cfg, t_end, avg, false, a.get("paroi", 1usize) == 1) {
         Ok((r, mlups, ok)) => {
             println!(
                 "Cx = {:.4}  Cz = {:.4}  Cm = {:.4}{}{}",
@@ -619,6 +642,7 @@ fn cmd_polar(a: &Args) {
         }
     );
     let t0 = Instant::now();
+    let corr = a.get("paroi", 1usize) == 1;
     let run = |alpha: f64| {
         let mut cfg = base.clone();
         cfg.params.alpha_deg = alpha;
@@ -626,7 +650,7 @@ fn cmd_polar(a: &Args) {
             // Un fil par incidence : les incidences se partagent les cœurs.
             cfg.engine = EngineKind::Cpu { threads: 1 };
         }
-        (alpha, simulate(cfg, t_end, avg, true))
+        (alpha, simulate(cfg, t_end, avg, true, corr))
     };
     let res: Vec<_> = if gpu {
         alphas.iter().map(|&a| run(a)).collect()
