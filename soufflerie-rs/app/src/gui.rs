@@ -102,28 +102,7 @@ enum Bottom {
     Polar,
 }
 
-/// Fluide de l'échelle physique.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Fluid {
-    Air,
-    Water,
-}
-
-impl Fluid {
-    fn label(self) -> &'static str {
-        match self {
-            Fluid::Air => "Air 15 °C",
-            Fluid::Water => "Eau 20 °C",
-        }
-    }
-    /// Viscosité cinématique (m²/s) et masse volumique (kg/m³).
-    fn props(self) -> (f64, f64) {
-        match self {
-            Fluid::Air => (1.46e-5, 1.225),
-            Fluid::Water => (1.0e-6, 998.0),
-        }
-    }
-}
+use lbm::fluid::Fluid;
 
 /// Nombre lisible à trois chiffres significatifs.
 fn sig3(v: f64) -> String {

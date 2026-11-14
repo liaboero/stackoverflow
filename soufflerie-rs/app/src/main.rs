@@ -56,6 +56,8 @@ fn usage() -> ! {
          \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
+         \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
          \x20         --raff 1|2 (GPU : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
@@ -490,29 +492,75 @@ fn cmd_run3d(a: &Args) {
             std::process::exit(2)
         })
     };
-    let re = a.get("re", 100.0f64);
+    let mut re = a.get("re", 100.0f64);
     let t_end = a.get("t", 40.0f64);
     let avg = a.get("avg", 15.0f64);
     let fp16 = a.get("fp32", 0u8) == 0;
+    let fluid = lbm::fluid::Fluid::from_id(&a.get("fluide", "air".to_string())).unwrap_or_else(|| {
+        eprintln!("--fluide air|eau");
+        std::process::exit(2)
+    });
+    // Échelle physique (maquettes STL) : vitesse (m/s), longueur et surface de référence (m, m²).
+    let mut phys: Option<(f64, f64)> = None;
     let body = match &stl {
         Some(path) => {
+            use lbm::stl::{Axis, MeshSetup, Unit};
+            let axis = |k: &str, d: Axis| {
+                a.opts.get(k).map_or(d, |v| {
+                    Axis::parse(v).unwrap_or_else(|| {
+                        eprintln!("--{k} : +x, -x, +y, -y, +z ou -z");
+                        std::process::exit(2)
+                    })
+                })
+            };
+            let setup = MeshSetup {
+                flow: axis("ecoulement", Axis::Xp),
+                up: axis("haut", Axis::Zp),
+                unit: Unit::parse(&a.get("unite", "mm".to_string())).unwrap_or_else(|| {
+                    eprintln!("--unite mm|cm|m|in");
+                    std::process::exit(2)
+                }),
+                alpha_deg: a.get("alpha", 0.0f64),
+                beta_deg: a.get("beta", 0.0f64),
+                ref_length: a.opts.get("lref").map(|_| a.get("lref", 0.0f64)),
+                ref_area: a.opts.get("sref").map(|_| a.get("sref", 0.0f64)),
+            };
             let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1)
             });
-            let b = Body3D::from_mesh(&tris, l, a.get("alpha", 0.0f64)).unwrap_or_else(|e| {
+            let (b, info) = Body3D::from_mesh(&tris, l, &setup).unwrap_or_else(|e| {
                 eprintln!("{path} : {e}");
                 std::process::exit(1)
             });
-            let bb = b.bounds;
+            let u = setup.unit.label();
+            let m = setup.unit.meters();
+            let [ex, ey, ez] = info.size_m.map(|v| v / m);
             eprintln!(
-                "{path} : {} triangles · maquette {:.2} × {:.2} × {:.2} L (x, y, z) · maître-couple {:.4} L²",
-                tris.len(),
-                (bb.x1 - bb.x0) / l as f64,
-                (bb.y1 - bb.y0) / l as f64,
-                (bb.z1 - bb.z0) / l as f64,
-                b.area / (l * l) as f64
+                "{path} : {} triangles · écoulement selon {} du fichier, haut selon {} · maquette {ex:.4} × {ey:.4} × {ez:.4} {u} (long., larg., haut.) · référence : longueur {:.4} {u} = {l} mailles, surface {:.4} {u}² ({}) · maître-couple {:.4} {u}² · blocage {:.1} %",
+                info.triangles,
+                setup.flow.label(),
+                setup.up.label(),
+                info.ref_length_m / m,
+                info.ref_area_m2 / (m * m),
+                if setup.ref_area.is_some() { "imposée" } else { "maître-couple" },
+                info.frontal_m2 / (m * m),
+                100.0 * info.blockage
             );
+            if info.blockage > 0.05 {
+                eprintln!("Attention : blocage de la veine supérieur à 5 %, coefficients surestimés.");
+            }
+            if let Some(v) = a.opts.get("vitesse").map(|_| a.get("vitesse", 0.0f64)) {
+                let (nu_f, _) = fluid.props();
+                re = v * info.ref_length_m / nu_f;
+                phys = Some((v, info.ref_area_m2));
+                let mach = v / fluid.sound_speed();
+                eprintln!(
+                    "{} à {v} m/s : Re = {re:.4e} sur la longueur de référence{}",
+                    fluid.label(),
+                    if mach > 0.3 { format!(" · Mach {mach:.2} : compressibilité ignorée") } else { String::new() }
+                );
+            }
             b
         }
         None => Body3D::new(shape, l, a.get("alpha", 0.0f64)),
@@ -527,8 +575,9 @@ fn cmd_run3d(a: &Args) {
         }
     };
     eprintln!(
-        "{} · Re = {re} · L = {l} mailles ({}) · grille {}×{}×{} = {:.2} M mailles · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {}",
+        "{} · Re = {} · L = {l} mailles ({}) · grille {}×{}×{} = {:.2} M mailles · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {}",
         shape.label(),
+        if re < 1e5 { format!("{re:.0}") } else { format!("{re:.3e}") },
         shape.reference(),
         sim.nx,
         sim.ny,
@@ -576,7 +625,7 @@ fn cmd_run3d(a: &Args) {
     let from = ts.iter().position(|&t| t >= t_end - avg).unwrap_or(0);
     let r = analyze(&ts[from..], &cx[from..], &cz[from..], &cy[from..]);
     println!(
-        "Cx = {:.4}  Cz = {:.4}  Cy = {:.4}{}",
+        "Cx = {:.4}  Cz = {:.4}  Cy = {:.4}{}{}",
         r.cx,
         r.cz,
         r.cm,
@@ -584,6 +633,19 @@ fn cmd_run3d(a: &Args) {
             format!("  St = {:.4}  Cz' = ±{:.4}", r.st, r.cz_amp)
         } else {
             String::new()
+        },
+        match phys {
+            Some((v, area)) => {
+                let (_, rho) = fluid.props();
+                let qs = 0.5 * rho * v * v * area;
+                format!(
+                    "\nEfforts à {v} m/s : traînée {:.3e} N, portance {:.3e} N, latéral {:.3e} N",
+                    r.cx * qs,
+                    r.cz * qs,
+                    r.cm * qs
+                )
+            }
+            None => String::new(),
         }
     );
     if shape == Shape3D::Sphere {

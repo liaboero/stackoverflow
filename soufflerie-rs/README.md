@@ -216,18 +216,31 @@ avec Spalart–Allmaras), 3 % sur l'amplitude de Cz'.
 
 ## Maquettes STL (3D)
 
-`soufflerie run3d --stl fichier.stl --l 32 --re 5000 --alpha 6` étudie une
-maquette maillée (STL binaire ou ASCII, volume fermé). Conventions : x du
-fichier dans le sens de l'écoulement, z vers le haut ; la longueur hors tout
-selon x devient la longueur de référence L (`--l` mailles), l'incidence
-cabre la maquette autour du centre de sa boîte englobante, et les
-coefficients sont rapportés au maître-couple (projection sur le plan
-transversal). Veine : 3,5 L en amont, 7,5 L en aval, au moins 2,5 L de part
-et d'autre. L'appartenance d'une maille vient de la parité des traversées
-d'un rayon selon x, les fractions de lien de Bouzidi d'une bisection, et
-l'affichage d'une distance signée aux triangles. Une icosphère de 5 120
-triangles donne la même voxelisation que la sphère analytique et une
-traînée à 1 % près (test `sphere_stl`).
+`soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette
+maillée (STL binaire ou ASCII, volume fermé). Mise en place :
+
+| Option | Rôle | Défaut |
+| --- | --- | --- |
+| `--unite mm\|cm\|m\|in` | unité des coordonnées du fichier | mm |
+| `--ecoulement +x` | axe du fichier dans le sens de l'écoulement (de l'avant vers l'arrière) | +x |
+| `--haut +z` | axe du fichier vers le haut | +z |
+| `--alpha 6` | incidence (°), avant vers le haut | 0 |
+| `--beta 10` | dérapage (°), vent venant de la droite de la maquette | 0 |
+| `--lref 250` | longueur de référence (unités du fichier) : `--l` mailles | longueur hors tout selon l'écoulement |
+| `--sref 4.2e4` | surface de référence (unités du fichier²) | maître-couple calculé |
+| `--vitesse 30` | vitesse (m/s) : fixe Re sur la longueur de référence, efforts en newtons | — |
+| `--fluide air\|eau` | fluide de l'échelle physique | air |
+
+La veine s'ajuste à la maquette : 3,5 M en amont, 7,5 M en aval et 2,5 M de
+part et d'autre (M : la plus grande de L et des dimensions de la maquette),
+au moins 6 L de large et de haut ; le blocage (maître-couple sur section de
+veine) est affiché, avec un avertissement au-delà de 5 %. L'appartenance
+d'une maille vient de la parité des traversées d'un rayon selon x, les
+fractions de lien de Bouzidi d'une bisection, et l'affichage d'une distance
+signée aux triangles. Une icosphère de 5 120 triangles donne la même
+voxelisation que la sphère analytique et une traînée à 1 % près (test
+`sphere_stl`) ; un même fuseau décrit avec d'autres axes (écoulement selon
+−y, haut selon +x) donne des coefficients identiques.
 
 ## Validation 3D
 

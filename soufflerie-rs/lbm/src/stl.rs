@@ -7,6 +7,142 @@ use std::path::Path;
 
 pub type Tri = [[f64; 3]; 3];
 
+/// Axe orienté du repère du fichier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Xp,
+    Xm,
+    Yp,
+    Ym,
+    Zp,
+    Zm,
+}
+
+impl Axis {
+    pub const ALL: [Axis; 6] = [Axis::Xp, Axis::Xm, Axis::Yp, Axis::Ym, Axis::Zp, Axis::Zm];
+
+    /// « x », « +x », « -x »…
+    pub fn parse(s: &str) -> Option<Axis> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "x" | "+x" => Axis::Xp,
+            "-x" => Axis::Xm,
+            "y" | "+y" => Axis::Yp,
+            "-y" => Axis::Ym,
+            "z" | "+z" => Axis::Zp,
+            "-z" => Axis::Zm,
+            _ => return None,
+        })
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Axis::Xp => "+x",
+            Axis::Xm => "−x",
+            Axis::Yp => "+y",
+            Axis::Ym => "−y",
+            Axis::Zp => "+z",
+            Axis::Zm => "−z",
+        }
+    }
+    pub fn vec(self) -> [f64; 3] {
+        match self {
+            Axis::Xp => [1.0, 0.0, 0.0],
+            Axis::Xm => [-1.0, 0.0, 0.0],
+            Axis::Yp => [0.0, 1.0, 0.0],
+            Axis::Ym => [0.0, -1.0, 0.0],
+            Axis::Zp => [0.0, 0.0, 1.0],
+            Axis::Zm => [0.0, 0.0, -1.0],
+        }
+    }
+}
+
+/// Unité des coordonnées du fichier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit {
+    Mm,
+    Cm,
+    M,
+    Inch,
+}
+
+impl Unit {
+    pub const ALL: [Unit; 4] = [Unit::Mm, Unit::Cm, Unit::M, Unit::Inch];
+
+    pub fn parse(s: &str) -> Option<Unit> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "mm" => Unit::Mm,
+            "cm" => Unit::Cm,
+            "m" => Unit::M,
+            "in" | "inch" | "po" => Unit::Inch,
+            _ => return None,
+        })
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Unit::Mm => "mm",
+            Unit::Cm => "cm",
+            Unit::M => "m",
+            Unit::Inch => "in",
+        }
+    }
+    /// Mètres par unité.
+    pub fn meters(self) -> f64 {
+        match self {
+            Unit::Mm => 1e-3,
+            Unit::Cm => 1e-2,
+            Unit::M => 1.0,
+            Unit::Inch => 0.0254,
+        }
+    }
+}
+
+/// Mise en place d'une maquette maillée dans la veine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshSetup {
+    /// Axe du fichier dans le sens de l'écoulement (de l'avant vers l'arrière).
+    pub flow: Axis,
+    /// Axe du fichier vers le haut.
+    pub up: Axis,
+    pub unit: Unit,
+    /// Incidence (°) : cabrage, avant vers le haut.
+    pub alpha_deg: f64,
+    /// Dérapage (°) : vent venant de la droite de la maquette.
+    pub beta_deg: f64,
+    /// Longueur de référence (unités du fichier) ; None : longueur hors tout
+    /// selon l'écoulement.
+    pub ref_length: Option<f64>,
+    /// Surface de référence (unités du fichier au carré) ; None : maître-couple.
+    pub ref_area: Option<f64>,
+}
+
+impl Default for MeshSetup {
+    fn default() -> Self {
+        MeshSetup {
+            flow: Axis::Xp,
+            up: Axis::Zp,
+            unit: Unit::Mm,
+            alpha_deg: 0.0,
+            beta_deg: 0.0,
+            ref_length: None,
+            ref_area: None,
+        }
+    }
+}
+
+/// Grandeurs de référence d'une maquette maillée placée.
+#[derive(Clone, Debug)]
+pub struct MeshInfo {
+    pub triangles: usize,
+    /// Longueur hors tout selon l'écoulement, envergure, hauteur (m), maquette placée.
+    pub size_m: [f64; 3],
+    /// Longueur (m) et surface (m²) de référence.
+    pub ref_length_m: f64,
+    pub ref_area_m2: f64,
+    /// Maître-couple (m²).
+    pub frontal_m2: f64,
+    /// Rapport du maître-couple à la section de la veine.
+    pub blockage: f64,
+}
+
 /// Triangles lus dans un fichier STL (coordonnées du fichier).
 pub fn read_stl(path: &Path) -> Result<Vec<Tri>, String> {
     let data = std::fs::read(path).map_err(|e| format!("lecture de {} impossible : {e}", path.display()))?;

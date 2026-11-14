@@ -114,7 +114,11 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::stl::{MeshBody, Tri};
+use crate::stl::{MeshBody, MeshInfo, MeshSetup, Tri};
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
 
 fn naca00(t: f64, x: f64) -> f64 {
     5.0 * t * (0.2969 * x.sqrt() - 0.126 * x - 0.3516 * x * x + 0.2843 * x.powi(3) - 0.1036 * x.powi(4))
@@ -199,36 +203,64 @@ impl Body3D {
         }
     }
 
-    /// Maquette maillée : x du fichier dans le sens de l'écoulement, z vers le
-    /// haut ; longueur hors tout selon x ramenée à `l` mailles, incidence
-    /// `alpha_deg` (cabrage, arrière vers le bas) autour du centre de la boîte
-    /// englobante. Veine : 3,5 L en amont, 7,5 L en aval, au moins 6 L de large
-    /// et de haut (2,5 L de part et d'autre de la maquette).
-    pub fn from_mesh(tris: &[Tri], l: usize, alpha_deg: f64) -> Result<Body3D, String> {
-        let (lo, hi) = crate::stl::bbox(tris);
-        let len = hi[0] - lo[0];
-        if !(len > 0.0) {
-            return Err("maillage sans longueur selon x".into());
+    /// Maquette maillée placée selon `setup` : axes du fichier ramenés au
+    /// repère de la veine (x vers l'aval, z vers le haut), longueur de
+    /// référence ramenée à `l` mailles, incidence puis dérapage autour du
+    /// centre de la boîte englobante. Veine : 3,5 M en amont, 7,5 M en aval,
+    /// 2,5 M de part et d'autre (M : la plus grande de L et des dimensions de
+    /// la maquette dans la direction concernée), au moins 6 L de large et de haut.
+    pub fn from_mesh(tris: &[Tri], l: usize, setup: &MeshSetup) -> Result<(Body3D, MeshInfo), String> {
+        let ef = setup.flow.vec();
+        let ez = setup.up.vec();
+        if dot3(ef, ez) != 0.0 {
+            return Err("l'axe vers le haut doit être perpendiculaire à l'écoulement".into());
+        }
+        let ey = [
+            ez[1] * ef[2] - ez[2] * ef[1],
+            ez[2] * ef[0] - ez[0] * ef[2],
+            ez[0] * ef[1] - ez[1] * ef[0],
+        ];
+        let body: Vec<Tri> = tris
+            .iter()
+            .map(|t| t.map(|p| [dot3(p, ef), dot3(p, ey), dot3(p, ez)]))
+            .collect();
+        let (lo, hi) = crate::stl::bbox(&body);
+        let length = hi[0] - lo[0];
+        let lref = setup.ref_length.unwrap_or(length);
+        if !(length > 0.0) || !(lref > 0.0) {
+            return Err("maillage sans longueur selon l'écoulement".into());
         }
         let lf = l as f64;
-        let s = lf / len;
+        let s = lf / lref;
         let c = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
-        let alpha = alpha_deg.to_radians();
+        let alpha = setup.alpha_deg.to_radians();
         let (sa, ca) = alpha.sin_cos();
+        let (sb, cb) = setup.beta_deg.to_radians().sin_cos();
         let place = |p: [f64; 3]| {
             let (xb, yb, zb) = (s * (p[0] - c[0]), s * (p[1] - c[1]), s * (p[2] - c[2]));
-            [xb * ca + zb * sa, yb, -xb * sa + zb * ca]
+            // Incidence (avant vers le haut), puis dérapage (nez vers −y).
+            let (x1, z1) = (xb * ca + zb * sa, -xb * sa + zb * ca);
+            [x1 * cb + yb * sb, -x1 * sb + yb * cb, z1]
         };
-        let mut placed: Vec<Tri> = tris.iter().map(|t| t.map(place)).collect();
+        let mut placed: Vec<Tri> = body.iter().map(|t| t.map(place)).collect();
         let (rl, rh) = crate::stl::bbox(&placed);
         let e = [rh[0] - rl[0], rh[1] - rl[1], rh[2] - rl[2]];
-        let nx = (3.5 * lf + e[0] + 7.5 * lf).round() as usize;
-        let ny = (6.0 * lf).max(e[1] + 5.0 * lf).round() as usize;
-        let nz = (6.0 * lf).max(e[2] + 5.0 * lf).round() as usize;
-        // Translation : avant de la maquette à 3,5 L, centrée en y et z
+        let mx = e[0].max(lf);
+        let ms = e[1].max(e[2]).max(lf);
+        let nx = (3.5 * mx + e[0] + 7.5 * mx).round() as usize;
+        let ny = (6.0 * lf).max(e[1] + 5.0 * ms).round() as usize;
+        let nz = (6.0 * lf).max(e[2] + 5.0 * ms).round() as usize;
+        let cells = nx as f64 * ny as f64 * nz as f64;
+        if cells > 4e8 {
+            return Err(format!(
+                "veine de {:.0} M mailles : réduire la résolution (L = {l})",
+                cells / 1e6
+            ));
+        }
+        // Translation : avant de la maquette à 3,5 M, centrée en y et z
         // (décalage d'un quart de maille contre les symétries d'arrondi).
         let shift = [
-            3.5 * lf - rl[0] + 0.25,
+            3.5 * mx - rl[0] + 0.25,
             0.5 * ny as f64 - 0.5 * (rl[1] + rh[1]) + 0.25,
             0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25,
         ];
@@ -249,11 +281,22 @@ impl Body3D {
             z1: mesh.hi[2],
         };
         let center = [0, 1, 2].map(|a| 0.5 * (mesh.lo[a] + mesh.hi[a]));
-        let area = mesh.frontal_area();
-        if area <= 0.0 {
+        let frontal = mesh.frontal_area();
+        if frontal <= 0.0 {
             return Err("maître-couple nul".into());
         }
-        Ok(Body3D {
+        let area = setup.ref_area.map(|a| a * s * s).unwrap_or(frontal);
+        // Mètres par maille.
+        let h = setup.unit.meters() / s;
+        let info = MeshInfo {
+            triangles: tris.len(),
+            size_m: e.map(|v| v * h),
+            ref_length_m: lref * setup.unit.meters(),
+            ref_area_m2: area * h * h,
+            frontal_m2: frontal * h * h,
+            blockage: frontal / (ny as f64 * nz as f64),
+        };
+        let b = Body3D {
             shape: Shape3D::Mesh,
             l,
             nx,
@@ -265,7 +308,8 @@ impl Body3D {
             alpha,
             half: 0.0,
             mesh: Some(Arc::new(mesh)),
-        })
+        };
+        Ok((b, info))
     }
 
     /// Le point (réseau) est-il dans la maquette ?
@@ -409,5 +453,84 @@ impl Body3D {
             }
         }
         SdfGrid { origin: lo, h, dims, d }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stl::{icosphere, Axis, MeshSetup, Unit};
+
+    /// Ellipsoïde 100 × 25 × 18 mm (fichier : x vers l'aval, z vers le haut).
+    fn fuseau() -> Vec<Tri> {
+        icosphere(1.0, [0.0; 3], 3)
+            .into_iter()
+            .map(|t| t.map(|p| [50.0 * p[0], 12.5 * p[1], 9.0 * p[2]]))
+            .collect()
+    }
+
+    fn voxels(b: &Body3D) -> usize {
+        let bb = b.bounds;
+        let mut n = 0;
+        for z in bb.z0.floor() as i64..=bb.z1.ceil() as i64 {
+            for y in bb.y0.floor() as i64..=bb.y1.ceil() as i64 {
+                for x in bb.x0.floor() as i64..=bb.x1.ceil() as i64 {
+                    n += b.inside(x as f64, y as f64, z as f64) as usize;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn placement_stl() {
+        let l = 24;
+        let base = MeshSetup {
+            alpha_deg: 6.0,
+            ..Default::default()
+        };
+        let (a, ia) = Body3D::from_mesh(&fuseau(), l, &base).unwrap();
+        // Même maquette décrite avec d'autres axes : écoulement selon −y, haut selon +x.
+        let turned: Vec<Tri> = fuseau().into_iter().map(|t| t.map(|p| [p[2], -p[0], -p[1]])).collect();
+        let setup = MeshSetup {
+            flow: Axis::Ym,
+            up: Axis::Xp,
+            ..base.clone()
+        };
+        let (b, ib) = Body3D::from_mesh(&turned, l, &setup).unwrap();
+        assert_eq!([a.nx, a.ny, a.nz], [b.nx, b.ny, b.nz]);
+        assert_eq!(voxels(&a), voxels(&b));
+        assert!((ia.ref_length_m - 0.1).abs() < 1e-3, "longueur {}", ia.ref_length_m);
+        assert!((ia.frontal_m2 - ib.frontal_m2).abs() < 1e-9);
+        // Surface imposée, en cm.
+        let (c, ic) = Body3D::from_mesh(
+            &fuseau(),
+            l,
+            &MeshSetup {
+                unit: Unit::Cm,
+                ref_area: Some(400.0),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert!((ic.ref_area_m2 - 0.04).abs() < 1e-9);
+        assert!((c.area - 400.0 * (l as f64 / 100.0).powi(2)).abs() < 1e-6);
+        // Dérapage : la maquette s'élargit dans la veine.
+        let (_, id) = Body3D::from_mesh(
+            &fuseau(),
+            l,
+            &MeshSetup {
+                beta_deg: 30.0,
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert!(id.size_m[1] > 2.0 * ia.size_m[1]);
+        // Axes non perpendiculaires.
+        let bad = MeshSetup {
+            up: Axis::Xm,
+            ..base
+        };
+        assert!(Body3D::from_mesh(&fuseau(), l, &bad).is_err());
     }
 }

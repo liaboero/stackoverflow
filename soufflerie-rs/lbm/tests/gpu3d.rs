@@ -69,7 +69,7 @@ fn sphere_stl() {
     use lbm::gpu3d::Gpu3D;
     let l = 8;
     let tris = lbm::stl::icosphere(1.0, [0.0; 3], 4);
-    let mesh = Body3D::from_mesh(&tris, l, 0.0).unwrap();
+    let (mesh, _) = Body3D::from_mesh(&tris, l, &lbm::stl::MeshSetup::default()).unwrap();
     let ana = Body3D::new(Shape3D::Sphere, l, 0.0);
     assert_eq!([mesh.nx, mesh.ny, mesh.nz], [ana.nx, ana.ny, ana.nz]);
     let s = std::f64::consts::PI * 16.0;
