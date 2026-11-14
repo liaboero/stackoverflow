@@ -244,6 +244,9 @@ L = 48 mailles (0,75 m), coefficients rapportés à la surface alaire
 CD = 0,31 avec (ordre de grandeur réel en lisse : CL ≈ 0,9, CD de quelques
 centièmes, davantage train sorti). La traînée reste trop forte à cette
 résolution, et la coupe de vorticité garde un bruit en damier à τ ≈ 0,5.
+Avec la collision régularisée d'ordre 3, les bandes absorbantes et une
+grille fine ×2 (L = 32 + ×2, soit 64 mailles près de l'avion, 3,5 min) :
+CL = 0,63, CD = 0,27, champ sans bruit.
 
 ## Stabilité et raffinement local en 3D
 
