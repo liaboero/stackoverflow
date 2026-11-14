@@ -214,6 +214,21 @@ durées, efforts par mètre d'envergure, alerte de Mach réel). Le moteur GPU
 0,1 à 0,2 % sur les efforts moyens (cylindre Re = 100, NACA 0012 Re = 10⁶
 avec Spalart–Allmaras), 3 % sur l'amplitude de Cz'.
 
+## Maquettes STL (3D)
+
+`soufflerie run3d --stl fichier.stl --l 32 --re 5000 --alpha 6` étudie une
+maquette maillée (STL binaire ou ASCII, volume fermé). Conventions : x du
+fichier dans le sens de l'écoulement, z vers le haut ; la longueur hors tout
+selon x devient la longueur de référence L (`--l` mailles), l'incidence
+cabre la maquette autour du centre de sa boîte englobante, et les
+coefficients sont rapportés au maître-couple (projection sur le plan
+transversal). Veine : 3,5 L en amont, 7,5 L en aval, au moins 2,5 L de part
+et d'autre. L'appartenance d'une maille vient de la parité des traversées
+d'un rayon selon x, les fractions de lien de Bouzidi d'une bisection, et
+l'affichage d'une distance signée aux triangles. Une icosphère de 5 120
+triangles donne la même voxelisation que la sphère analytique et une
+traînée à 1 % près (test `sphere_stl`).
+
 ## Validation 3D
 
 Résultats bruts dans `validation/` ; `tools/validation3d.sh` refait les

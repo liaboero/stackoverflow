@@ -612,6 +612,7 @@ fn reference(shape: Shape3D, re: f64) -> String {
         }
         Shape3D::Cube => "Cube face au vent : décollement fixé par les arêtes ; Cx ≈ 1,05 aux grands Reynolds, plus élevé aux faibles.".into(),
         Shape3D::Wing => "Aile rectangulaire d'allongement 4 : tourbillons marginaux (plan transversal, ωx) ; à faible Reynolds, la couche limite épaisse réduit nettement la portance.".into(),
+        Shape3D::Mesh => "Maquette maillée (STL) : coefficients rapportés au maître-couple.".into(),
     }
 }
 

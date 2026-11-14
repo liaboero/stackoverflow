@@ -60,3 +60,36 @@ fn sphere_re100() {
     assert!(px(w / 2, h / 2).iter().all(|&v| v < 140), "la sphère doit apparaître au centre");
     assert!(img.len() == 4 * w * h && !g.lost);
 }
+
+#[test]
+fn sphere_stl() {
+    // Sphère maillée (icosphère, 5 120 triangles) contre sphère analytique :
+    // même voxelisation à une poignée de mailles près, même traînée.
+    use lbm::bodies3d::{Body3D, Shape3D};
+    use lbm::gpu3d::Gpu3D;
+    let l = 8;
+    let tris = lbm::stl::icosphere(1.0, [0.0; 3], 4);
+    let mesh = Body3D::from_mesh(&tris, l, 0.0).unwrap();
+    let ana = Body3D::new(Shape3D::Sphere, l, 0.0);
+    assert_eq!([mesh.nx, mesh.ny, mesh.nz], [ana.nx, ana.ny, ana.nz]);
+    let s = std::f64::consts::PI * 16.0;
+    assert!((mesh.area / s - 1.0).abs() < 0.02, "maître-couple {}", mesh.area);
+    let u = 0.1f32;
+    let nu = u as f64 * l as f64 / 100.0;
+    let ramp = lbm::cpu::Ramp { steps: 4 * l as u64 * 10, u };
+    let mut cx = Vec::new();
+    for b in [&ana, &mesh] {
+        let Ok(mut g) = Gpu3D::new(b, nu, u, true) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        let steps = (30.0 * l as f64 / u as f64) as usize;
+        g.run(steps - 800, &ramp);
+        let _ = g.take_forces();
+        g.run(800, &ramp);
+        let f = g.take_forces();
+        cx.push(f.fx / (0.5 * (u as f64).powi(2) * b.area));
+        println!("{:?} : {} mailles solides, Cx = {:.4}", b.shape, g.solid_count, cx.last().unwrap());
+    }
+    assert!((cx[1] / cx[0] - 1.0).abs() < 0.03, "Cx maillé {} contre analytique {}", cx[1], cx[0]);
+}

@@ -47,7 +47,7 @@ fn usage() -> ! {
          soufflerie panel --alpha -4:16:1 [options]   polaire panneaux + couche limite, CSV\n\
          soufflerie bench [--l 32] [--steps 400]       vitesse des moteurs\n\
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
-         soufflerie run3d --shape sphere|cube|cylinder|wing --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
+         soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
@@ -480,16 +480,43 @@ fn cmd_run3d(a: &Args) {
     use lbm::gpu3d::Gpu3D;
     const U: f32 = 0.1;
     const RAMP_T: f64 = 4.0;
-    let shape = Shape3D::from_id(&a.get("shape", "sphere".to_string())).unwrap_or_else(|| {
-        eprintln!("--shape sphere|cube|cylinder|wing");
-        std::process::exit(2)
-    });
     let l = a.get("l", 12usize);
+    let stl = a.opts.get("stl").cloned();
+    let shape = if stl.is_some() {
+        Shape3D::Mesh
+    } else {
+        Shape3D::from_id(&a.get("shape", "sphere".to_string())).unwrap_or_else(|| {
+            eprintln!("--shape sphere|cube|cylinder|wing, ou --stl fichier.stl");
+            std::process::exit(2)
+        })
+    };
     let re = a.get("re", 100.0f64);
     let t_end = a.get("t", 40.0f64);
     let avg = a.get("avg", 15.0f64);
     let fp16 = a.get("fp32", 0u8) == 0;
-    let body = Body3D::new(shape, l, a.get("alpha", 0.0f64));
+    let body = match &stl {
+        Some(path) => {
+            let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1)
+            });
+            let b = Body3D::from_mesh(&tris, l, a.get("alpha", 0.0f64)).unwrap_or_else(|e| {
+                eprintln!("{path} : {e}");
+                std::process::exit(1)
+            });
+            let bb = b.bounds;
+            eprintln!(
+                "{path} : {} triangles · maquette {:.2} × {:.2} × {:.2} L (x, y, z) · maître-couple {:.4} L²",
+                tris.len(),
+                (bb.x1 - bb.x0) / l as f64,
+                (bb.y1 - bb.y0) / l as f64,
+                (bb.z1 - bb.z0) / l as f64,
+                b.area / (l * l) as f64
+            );
+            b
+        }
+        None => Body3D::new(shape, l, a.get("alpha", 0.0f64)),
+    };
     let nu = U as f64 * l as f64 / re;
     let t0 = Instant::now();
     let mut sim = match Gpu3D::new(&body, nu, U, fp16) {

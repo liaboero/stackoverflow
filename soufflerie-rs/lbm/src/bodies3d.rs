@@ -9,6 +9,8 @@ pub enum Shape3D {
     Cube,
     Cylinder,
     Wing,
+    /// Maillage STL.
+    Mesh,
 }
 
 impl Shape3D {
@@ -30,6 +32,7 @@ impl Shape3D {
             Shape3D::Cube => "Cube",
             Shape3D::Cylinder => "Cylindre",
             Shape3D::Wing => "Aile",
+            Shape3D::Mesh => "Maillage STL",
         }
     }
 
@@ -40,13 +43,14 @@ impl Shape3D {
             Shape3D::Cube => "arête a",
             Shape3D::Cylinder => "diamètre D (envergure périodique 4D)",
             Shape3D::Wing => "corde c (NACA 0012, allongement 4)",
+            Shape3D::Mesh => "longueur hors tout L selon l'écoulement ; surface : maître-couple",
         }
     }
 
     /// Dimensions de la veine en longueurs de référence.
     pub fn domain(self) -> [f64; 3] {
         match self {
-            Shape3D::Sphere | Shape3D::Cube => [12.0, 6.0, 6.0],
+            Shape3D::Sphere | Shape3D::Cube | Shape3D::Mesh => [12.0, 6.0, 6.0],
             Shape3D::Cylinder => [16.0, 4.0, 8.0],
             Shape3D::Wing => [9.0, 8.0, 4.0],
         }
@@ -55,7 +59,7 @@ impl Shape3D {
     /// Position de la maquette en longueurs de référence.
     fn at(self) -> [f64; 3] {
         match self {
-            Shape3D::Sphere | Shape3D::Cube => [4.0, 3.0, 3.0],
+            Shape3D::Sphere | Shape3D::Cube | Shape3D::Mesh => [4.0, 3.0, 3.0],
             Shape3D::Cylinder => [5.0, 2.0, 4.0],
             Shape3D::Wing => [2.5, 4.0, 2.0],
         }
@@ -63,7 +67,7 @@ impl Shape3D {
 
     /// L'incidence est-elle réglable ?
     pub fn has_alpha(self) -> bool {
-        matches!(self, Shape3D::Cube | Shape3D::Wing)
+        matches!(self, Shape3D::Cube | Shape3D::Wing | Shape3D::Mesh)
     }
 
     /// Nombre de mailles pour la longueur de référence `l`.
@@ -102,7 +106,15 @@ pub struct Body3D {
     alpha: f64,
     /// Demi-envergure de l'aile (mailles).
     half: f64,
+    /// Maillage placé dans la veine (forme `Mesh`).
+    pub mesh: Option<Arc<MeshBody>>,
 }
+
+use std::sync::Arc;
+
+use rayon::prelude::*;
+
+use crate::stl::{MeshBody, Tri};
 
 fn naca00(t: f64, x: f64) -> f64 {
     5.0 * t * (0.2969 * x.sqrt() - 0.126 * x - 0.3516 * x * x + 0.2843 * x.powi(3) - 0.1036 * x.powi(4))
@@ -156,6 +168,7 @@ impl Body3D {
                 },
                 lf * ny as f64,
             ),
+            Shape3D::Mesh => panic!("maillage : Body3D::from_mesh"),
             Shape3D::Wing => {
                 let rr = 0.8 * lf;
                 (
@@ -182,7 +195,77 @@ impl Body3D {
             area,
             alpha,
             half,
+            mesh: None,
         }
+    }
+
+    /// Maquette maillée : x du fichier dans le sens de l'écoulement, z vers le
+    /// haut ; longueur hors tout selon x ramenée à `l` mailles, incidence
+    /// `alpha_deg` (cabrage, arrière vers le bas) autour du centre de la boîte
+    /// englobante. Veine : 3,5 L en amont, 7,5 L en aval, au moins 6 L de large
+    /// et de haut (2,5 L de part et d'autre de la maquette).
+    pub fn from_mesh(tris: &[Tri], l: usize, alpha_deg: f64) -> Result<Body3D, String> {
+        let (lo, hi) = crate::stl::bbox(tris);
+        let len = hi[0] - lo[0];
+        if !(len > 0.0) {
+            return Err("maillage sans longueur selon x".into());
+        }
+        let lf = l as f64;
+        let s = lf / len;
+        let c = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
+        let alpha = alpha_deg.to_radians();
+        let (sa, ca) = alpha.sin_cos();
+        let place = |p: [f64; 3]| {
+            let (xb, yb, zb) = (s * (p[0] - c[0]), s * (p[1] - c[1]), s * (p[2] - c[2]));
+            [xb * ca + zb * sa, yb, -xb * sa + zb * ca]
+        };
+        let mut placed: Vec<Tri> = tris.iter().map(|t| t.map(place)).collect();
+        let (rl, rh) = crate::stl::bbox(&placed);
+        let e = [rh[0] - rl[0], rh[1] - rl[1], rh[2] - rl[2]];
+        let nx = (3.5 * lf + e[0] + 7.5 * lf).round() as usize;
+        let ny = (6.0 * lf).max(e[1] + 5.0 * lf).round() as usize;
+        let nz = (6.0 * lf).max(e[2] + 5.0 * lf).round() as usize;
+        // Translation : avant de la maquette à 3,5 L, centrée en y et z
+        // (décalage d'un quart de maille contre les symétries d'arrondi).
+        let shift = [
+            3.5 * lf - rl[0] + 0.25,
+            0.5 * ny as f64 - 0.5 * (rl[1] + rh[1]) + 0.25,
+            0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25,
+        ];
+        for t in &mut placed {
+            for p in t.iter_mut() {
+                for a in 0..3 {
+                    p[a] += shift[a];
+                }
+            }
+        }
+        let mesh = MeshBody::new(placed);
+        let bounds = Bounds {
+            x0: mesh.lo[0],
+            x1: mesh.hi[0],
+            y0: mesh.lo[1],
+            y1: mesh.hi[1],
+            z0: mesh.lo[2],
+            z1: mesh.hi[2],
+        };
+        let center = [0, 1, 2].map(|a| 0.5 * (mesh.lo[a] + mesh.hi[a]));
+        let area = mesh.frontal_area();
+        if area <= 0.0 {
+            return Err("maître-couple nul".into());
+        }
+        Ok(Body3D {
+            shape: Shape3D::Mesh,
+            l,
+            nx,
+            ny,
+            nz,
+            center,
+            bounds,
+            area,
+            alpha,
+            half: 0.0,
+            mesh: Some(Arc::new(mesh)),
+        })
     }
 
     /// Le point (réseau) est-il dans la maquette ?
@@ -200,6 +283,7 @@ impl Body3D {
                 xb.abs() <= r && (y - cy).abs() <= r && zb.abs() <= r
             }
             Shape3D::Cylinder => (x - cx).powi(2) + (z - cz).powi(2) <= r * r,
+            Shape3D::Mesh => self.mesh.as_ref().is_some_and(|m| m.inside(x, y, z)),
             Shape3D::Wing => {
                 if (y - cy).abs() > self.half {
                     return false;
@@ -288,6 +372,18 @@ impl Body3D {
             Vec::new()
         };
         let mut d = vec![0f32; dims[0] * dims[1] * dims[2]];
+        if let Some(m) = &self.mesh {
+            // Distance aux triangles (plafonnée à 3 mailles), signe par appartenance.
+            d.par_iter_mut().enumerate().for_each(|(n, v)| {
+                let i = n % dims[0];
+                let j = (n / dims[0]) % dims[1];
+                let k = n / (dims[0] * dims[1]);
+                let p = [lo[0] + i as f64 * h, lo[1] + j as f64 * h, lo[2] + k as f64 * h];
+                let dist = m.distance(p, 3.0);
+                *v = if m.inside(p[0], p[1], p[2]) { -dist } else { dist } as f32;
+            });
+            return SdfGrid { origin: lo, h, dims, d };
+        }
         for k in 0..dims[2] {
             for j in 0..dims[1] {
                 for i in 0..dims[0] {
@@ -301,6 +397,7 @@ impl Body3D {
                             let out = q.iter().map(|v| v.max(0.0).powi(2)).sum::<f64>().sqrt();
                             out + q[0].max(q[1]).max(q[2]).min(0.0)
                         }
+                        Shape3D::Mesh => 0.0,
                         Shape3D::Wing => {
                             // Extrusion de la section sur l'envergure.
                             let w = [section[k * dims[0] + i], (y - cy).abs() - self.half];
