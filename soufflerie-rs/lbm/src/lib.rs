@@ -26,6 +26,8 @@ pub mod gpu;
 #[cfg(feature = "gpu")]
 pub mod gpu3d;
 pub mod panel;
+#[cfg(feature = "gpu")]
+pub mod refine;
 pub mod sa;
 pub mod shapes;
 pub mod stats;

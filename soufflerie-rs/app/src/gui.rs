@@ -383,6 +383,21 @@ impl App {
                         .on_hover_text("Populations sur 2 octets : deux fois moins de mémoire, plus rapide ; écart ≈ 0,2 % sur les efforts moyens");
                 });
                 rebuild |= self.settings.cfg.gpu_half != h0;
+                let r0 = self.settings.cfg.refine;
+                ui.horizontal(|ui| {
+                    ui.label("Près de la maquette");
+                    let l = self.settings.cfg.l;
+                    ui.selectable_value(&mut self.settings.cfg.refine, 0, "uniforme");
+                    ui.selectable_value(&mut self.settings.cfg.refine, 1, format!("×2 ({})", 2 * l))
+                        .on_hover_text("Grille deux fois plus fine autour de la maquette");
+                    ui.selectable_value(&mut self.settings.cfg.refine, 2, format!("×4 ({})", 4 * l))
+                        .on_hover_text(
+                            "Deux grilles imbriquées, 2 et 4 fois plus fines : couche limite, bords d'attaque \
+                             et de fuite résolus à 4 L pour un coût proche de la grille L ; \
+                             traînée des profils à grand Reynolds nettement plus juste",
+                        );
+                });
+                rebuild |= self.settings.cfg.refine != r0;
             }
             rebuild |= self.settings.cfg.engine != e0;
             let c0 = (self.settings.cfg.collision, self.settings.cfg.les);

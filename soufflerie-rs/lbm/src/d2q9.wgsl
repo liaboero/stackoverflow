@@ -170,7 +170,8 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = y * P.nx + x;
   let k = kind[idx];
   let t = k & 3u;
-  if (t == 1u) {
+  // 1 : solide ; 3 : maille fantôme d'une grille fine, remplie par refine.wgsl.
+  if (t == 1u || t == 3u) {
     return;
   }
   let sa_on = (P.flags & 8u) != 0u;

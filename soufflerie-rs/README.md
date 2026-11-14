@@ -119,6 +119,42 @@ couche limite » (lecture, Cz/Cx, polaire Cz(Cx), colonne `Cx_retenu` du
 CSV). Dès que les panneaux prédisent un décollement, la traînée de pression
 domine et le Cx LBM est de nouveau retenu.
 
+**Ce qui porte l'excès.** En séparant frottement (∫Cf dx) et pression, la
+loi de paroi donne le bon frottement (0,0050 contre 0,0053 pour la couche
+limite intégrale) : l'excès est une traînée de pression, qui décroît quand
+le bord d'attaque, le bord de fuite et la couche limite sont mieux résolus
+(0,017 à L = 64, 0,007 à 128, 0,005 à 192 ; panneaux 0,0025).
+
+**Raffinement local (GPU).** Plutôt que d'affiner toute la veine (coût en
+L³), `--raff 1|2` (interface : « Près de la maquette ») ajoute autour de la
+maquette une ou deux grilles imbriquées, chacune deux fois plus fine en
+espace et en temps que la précédente (emprise : 0,9 corde en amont, 1,9 en
+aval, ±0,75 ; puis 0,65, 1,5, ±0,58). Le couplage passe par les moments
+(ρ, u, partie hors équilibre de Π remise à l'échelle de chaque grille) :
+interpolation cubique le long du bord de la grille fine et linéaire en
+temps, recopie filtrée sur 3 × 3 nœuds vers la grille parente (Lagrava
+et al., 2012). ν̃ suit la même voie. Efforts et distributions pariétales
+viennent de la grille la plus fine, l'affichage de la veine. NACA 2412,
+Re = 10⁶, α = 4°, Cx moyen une fois le tourbillon de démarrage sorti :
+
+| Près du corps | Grille | Cx | Calcul (34 t*) |
+| --- | --- | --- | --- |
+| 128 | L = 128 uniforme | 0,0121 | ≈ 3 min |
+| 128 | L = 64 + ×2 | 0,0115 | 23 s |
+| 128 | L = 32 + ×4 | 0,0115 | 8 s |
+| 192 | L = 48 + ×4 | 0,0088 | 21 s |
+| 256 | L = 128 + ×2 | 0,0108 | 241 s |
+| 256 | L = 64 + ×4 | 0,0106 | 50 s |
+
+À résolution égale près du corps, les grilles imbriquées retrouvent la
+grille uniforme à quelques pour cent, 5 à 20 fois plus vite. La traînée
+reste toutefois au-dessus des panneaux (0,0078) et ne décroît plus
+au-delà de 192 : elle dépend de la viscosité de sous-maille près de la
+paroi, nécessaire à la stabilité à τ ≈ 0,5 (une longueur d'amortissement
+pariétal de 4 mailles au lieu de 2 la ramène à 0,008, mais le calcul
+devient instable). Trois niveaux (×8) divergent de même dans la couche
+limite laminaire, et ne sont pas proposés.
+
 Le moteur GPU 2D choisit désormais Vulkan (ou Metal) avant DirectX 12, comme
 la soufflerie 3D : sous DirectX 12 (pilote NVIDIA), il divergeait dès le
 premier pas, ce qui touchait l'interface, dont la fenêtre est en DirectX 12.

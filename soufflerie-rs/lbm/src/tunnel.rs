@@ -4,6 +4,8 @@ use crate::cpu::{Collision, CpuSolver, ForceSum, LesMode, Macros, Ramp, SolverCo
 use crate::geometry::Geometry;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuSolver;
+#[cfg(feature = "gpu")]
+use crate::refine::RefinedGpu;
 use crate::panel::{panel_solve, PanelOptions, PanelResult, PanelShape};
 use crate::shapes::{Body, ShapeKind, ShapeParams};
 
@@ -77,6 +79,9 @@ pub struct TunnelConfig {
     pub transition: Transition,
     /// Moteur GPU : populations en demi-précision.
     pub gpu_half: bool,
+    /// Moteur GPU : nombre de grilles imbriquées autour de la maquette, chacune
+    /// deux fois plus fine que la précédente (0 : grille uniforme).
+    pub refine: usize,
 }
 
 impl Default for TunnelConfig {
@@ -94,6 +99,7 @@ impl Default for TunnelConfig {
             turbulence: Turbulence::Auto,
             transition: Transition::Free,
             gpu_half: false,
+            refine: 0,
         }
     }
 }
@@ -110,6 +116,8 @@ pub enum Engine {
     Cpu(Box<CpuSolver>),
     #[cfg(feature = "gpu")]
     Gpu(Box<GpuSolver>),
+    #[cfg(feature = "gpu")]
+    Refined(Box<RefinedGpu>),
 }
 
 macro_rules! dispatch {
@@ -118,6 +126,8 @@ macro_rules! dispatch {
             Engine::Cpu($s) => $e,
             #[cfg(feature = "gpu")]
             Engine::Gpu($s) => $e,
+            #[cfg(feature = "gpu")]
+            Engine::Refined($s) => $e,
         }
     };
 }
@@ -144,13 +154,21 @@ impl Engine {
             }
             #[cfg(feature = "gpu")]
             Engine::Gpu(s) => s.poll_forces(),
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.poll_forces(),
         }
     }
     pub fn macros(&mut self, out: &mut Macros) {
         dispatch!(self, s => s.macros(out))
     }
     pub fn time(&self) -> u64 {
-        dispatch!(self, s => s.time)
+        match self {
+            Engine::Cpu(s) => s.time,
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => s.time,
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.time(),
+        }
     }
     pub fn tau0(&self) -> f64 {
         dispatch!(self, s => s.tau0())
@@ -164,8 +182,16 @@ impl Engine {
     pub fn set_viscosity(&mut self, nu: f64) {
         dispatch!(self, s => s.set_viscosity(nu))
     }
-    pub fn set_les_wall_length(&mut self, a: f64) {
-        dispatch!(self, s => s.set_les_wall_length(a))
+    /// Amortissement pariétal de la sous-maille pour L mailles par longueur
+    /// de référence (chaque grille fine avec sa propre résolution).
+    pub fn set_les_wall_length(&mut self, l: usize, re: f64) {
+        match self {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.set_les_wall_lengths(|k| les_wall_length(l << k, re)),
+            Engine::Cpu(s) => s.set_les_wall_length(les_wall_length(l, re)),
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => s.set_les_wall_length(les_wall_length(l, re)),
+        }
     }
     pub fn set_turbulence(&mut self, on: bool) {
         dispatch!(self, s => s.set_turbulence(on))
@@ -174,10 +200,22 @@ impl Engine {
         dispatch!(self, s => s.sa_active())
     }
     pub fn geometry(&self) -> &Geometry {
-        dispatch!(self, s => &s.geo)
+        match self {
+            Engine::Cpu(s) => &s.geo,
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => &s.geo,
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.geometry(),
+        }
     }
     pub fn geometry_mut(&mut self) -> &mut Geometry {
-        dispatch!(self, s => &mut s.geo)
+        match self {
+            Engine::Cpu(s) => &mut s.geo,
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => &mut s.geo,
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.geometry_mut(),
+        }
     }
     pub fn update_laminar_zone(&mut self) {
         dispatch!(self, s => s.update_laminar_zone())
@@ -193,9 +231,13 @@ impl Engine {
                 true
             }
             #[cfg(feature = "gpu")]
-            Engine::Gpu(s) => {
-                let inv_nu = (1.0 / s.cfg.nu) as f32;
-                let st = s.sa_state();
+            Engine::Gpu(_) | Engine::Refined(_) => {
+                let inv_nu = (1.0 / self.nu()) as f32;
+                let st = match self {
+                    Engine::Gpu(s) => s.sa_state(),
+                    Engine::Refined(s) => s.sa_state(),
+                    _ => Vec::new(),
+                };
                 if st.is_empty() {
                     return false;
                 }
@@ -205,11 +247,42 @@ impl Engine {
             }
         }
     }
+    /// Géométrie de la grille la plus fine (la veine sans raffinement).
+    pub fn wall_geometry(&self) -> &Geometry {
+        match self {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => &s.levels.last().unwrap().geo,
+            e => e.geometry(),
+        }
+    }
+    /// ρ, u de la grille la plus fine.
+    pub fn wall_macros(&mut self, out: &mut Macros) {
+        match self {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => {
+                let k = s.levels.len() - 1;
+                s.level_macros(k, out)
+            }
+            e => e.macros(out),
+        }
+    }
+    /// Viscosité (réseau de la veine).
+    pub fn nu(&self) -> f64 {
+        match self {
+            Engine::Cpu(s) => s.cfg.nu,
+            #[cfg(feature = "gpu")]
+            Engine::Gpu(s) => s.cfg.nu,
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => s.levels[0].cfg.nu,
+        }
+    }
     pub fn name(&self) -> String {
         match self {
             Engine::Cpu(s) => format!("CPU ({} fils)", s.threads()),
             #[cfg(feature = "gpu")]
             Engine::Gpu(s) => format!("GPU ({})", s.adapter_name()),
+            #[cfg(feature = "gpu")]
+            Engine::Refined(s) => format!("GPU ({})", s.adapter_name()),
         }
     }
 }
@@ -250,6 +323,10 @@ impl WindTunnel {
         let mut engine = match cfg.engine {
             EngineKind::Cpu { threads } => Engine::Cpu(Box::new(CpuSolver::new(scfg, threads))),
             #[cfg(feature = "gpu")]
+            EngineKind::Gpu if cfg.refine > 0 => {
+                Engine::Refined(Box::new(RefinedGpu::new(scfg, cfg.refine, l, x0, y0)?))
+            }
+            #[cfg(feature = "gpu")]
             EngineKind::Gpu => Engine::Gpu(Box::new(GpuSolver::new(scfg)?)),
             #[cfg(not(feature = "gpu"))]
             EngineKind::Gpu => return Err("moteur GPU non compilé (option « gpu »)".into()),
@@ -261,6 +338,7 @@ impl WindTunnel {
             // Démarrage progressif depuis le repos.
             s.reset(0.0);
         });
+        engine.set_les_wall_length(l, cfg.re);
         let ramp = Ramp {
             steps: (RAMP_T * l as f64 / cfg.u_in as f64).round() as u64,
             u: cfg.u_in,
@@ -323,7 +401,7 @@ impl WindTunnel {
     pub fn set_reynolds(&mut self, re: f64) {
         self.cfg.re = re;
         self.engine.set_viscosity(self.cfg.u_in as f64 * self.cfg.l as f64 / re);
-        self.engine.set_les_wall_length(les_wall_length(self.cfg.l, re));
+        self.engine.set_les_wall_length(self.cfg.l, re);
         self.engine.set_turbulence(self.cfg.turbulence.resolve(re));
         self.refresh_panel();
     }
@@ -377,54 +455,34 @@ impl WindTunnel {
         let l = self.cfg.l as f64;
         let by_index = self.cfg.shape == ShapeKind::Naca;
         let loc = &self.body.outline_local;
-        let geo = self.engine.geometry_mut();
-        geo.lam.iter_mut().for_each(|v| *v = 0.0);
-        if let Some(bl) = bl {
-            let m = loc.len();
-            let (mut i_le, mut xmin, mut xmax) = (0usize, f64::INFINITY, f64::NEG_INFINITY);
-            for (k, p) in loc.iter().enumerate() {
-                if p[0] < xmin {
-                    xmin = p[0];
-                    i_le = k;
-                }
-                xmax = xmax.max(p[0]);
-            }
-            let span = if xmax > xmin { xmax - xmin } else { 1.0 };
-            let band = (0.1 * l).max(3.0) as f32;
-            let cf_at = |x: &[f64], cf: &[f64], xc: f64| -> f32 {
-                if x.len() < 2 || cf.len() < x.len() {
-                    return 0.0;
-                }
-                let mut k = 1;
-                while k < x.len() - 1 && x[k] < xc {
-                    k += 1;
-                }
-                // Plafond : pic de Cf au point d'arrêt (abscisse curviligne nulle).
-                cf[k].clamp(1e-5, 0.02) as f32
-            };
-            for i in 0..geo.n {
-                let pos = geo.near_pos[i];
-                if pos < 0.0 || geo.dist[i] > band {
-                    continue;
-                }
-                let k = (pos.round() as usize).min(m - 1);
-                let [bx, by] = loc[k];
-                // Faces : pour le NACA, extrados de l'indice 0 (bord de fuite)
-                // au bord d'attaque ; ailleurs, signe de y dans le repère propre.
-                let upper = if by_index { k <= i_le } else { by >= 0.0 };
-                let xc = (bx - xmin) / span;
-                let xtr = if upper {
-                    bl.transition_upper
-                } else {
-                    bl.transition_lower
-                };
-                if xtr.is_finite() && xc < xtr {
-                    let side = if upper { &bl.friction_upper } else { &bl.friction_lower };
-                    geo.lam[i] = cf_at(&side.x, &side.cf, xc);
+        match &mut self.engine {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(r) => {
+                for (k, lev) in r.levels.iter_mut().enumerate() {
+                    laminar_zone(&mut lev.geo, loc, l * (1u64 << k) as f64, by_index, bl);
                 }
             }
+            e => laminar_zone(e.geometry_mut(), loc, l, by_index, bl),
         }
         self.engine.update_laminar_zone();
+    }
+
+    /// Maquette dans la grille la plus fine.
+    pub fn wall_body(&self) -> &Body {
+        match &self.engine {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(r) => r.bodies.last().unwrap_or(&self.body),
+            _ => &self.body,
+        }
+    }
+
+    /// Mailles par longueur de référence au plus près du corps.
+    pub fn wall_l(&self) -> usize {
+        match &self.engine {
+            #[cfg(feature = "gpu")]
+            Engine::Refined(r) => self.cfg.l << (r.levels.len() - 1),
+            _ => self.cfg.l,
+        }
     }
 
     /// y⁺ attendu au premier nœud (plaque plane turbulente,
@@ -432,7 +490,7 @@ impl WindTunnel {
     pub fn first_cell_yplus(&self) -> f64 {
         let re = self.cfg.re;
         let cf = 0.026 * re.powf(-1.0 / 7.0);
-        0.5 / self.cfg.l as f64 * re * (cf / 2.0).sqrt()
+        0.5 / self.wall_l() as f64 * re * (cf / 2.0).sqrt()
     }
 
     /// Coefficients moyens d'une somme d'efforts.
@@ -490,5 +548,56 @@ impl WindTunnel {
     /// Mach réseau.
     pub fn mach(&self) -> f64 {
         self.cfg.u_in as f64 * 3f64.sqrt()
+    }
+}
+
+/// Zone laminaire d'une grille : en amont de la transition, Cf de la couche
+/// limite intégrale dans une bande de max(3, L/10) mailles autour du corps.
+fn laminar_zone(geo: &mut Geometry, loc: &[[f64; 2]], l: f64, by_index: bool, bl: Option<&PanelResult>) {
+    geo.lam.iter_mut().for_each(|v| *v = 0.0);
+    if let Some(bl) = bl {
+        let m = loc.len();
+        let (mut i_le, mut xmin, mut xmax) = (0usize, f64::INFINITY, f64::NEG_INFINITY);
+        for (k, p) in loc.iter().enumerate() {
+            if p[0] < xmin {
+                xmin = p[0];
+                i_le = k;
+            }
+            xmax = xmax.max(p[0]);
+        }
+        let span = if xmax > xmin { xmax - xmin } else { 1.0 };
+        let band = (0.1 * l).max(3.0) as f32;
+        let cf_at = |x: &[f64], cf: &[f64], xc: f64| -> f32 {
+            if x.len() < 2 || cf.len() < x.len() {
+                return 0.0;
+            }
+            let mut k = 1;
+            while k < x.len() - 1 && x[k] < xc {
+                k += 1;
+            }
+            // Plafond : pic de Cf au point d'arrêt (abscisse curviligne nulle).
+            cf[k].clamp(1e-5, 0.02) as f32
+        };
+        for i in 0..geo.n {
+            let pos = geo.near_pos[i];
+            if pos < 0.0 || geo.dist[i] > band {
+                continue;
+            }
+            let k = (pos.round() as usize).min(m - 1);
+            let [bx, by] = loc[k];
+            // Faces : pour le NACA, extrados de l'indice 0 (bord de fuite)
+            // au bord d'attaque ; ailleurs, signe de y dans le repère propre.
+            let upper = if by_index { k <= i_le } else { by >= 0.0 };
+            let xc = (bx - xmin) / span;
+            let xtr = if upper {
+                bl.transition_upper
+            } else {
+                bl.transition_lower
+            };
+            if xtr.is_finite() && xc < xtr {
+                let side = if upper { &bl.friction_upper } else { &bl.friction_lower };
+                geo.lam[i] = cf_at(&side.x, &side.cf, xc);
+            }
+        }
     }
 }

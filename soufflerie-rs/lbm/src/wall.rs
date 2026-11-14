@@ -63,8 +63,8 @@ pub struct WallSampler {
 
 impl WallSampler {
     pub fn new(wt: &WindTunnel) -> WallSampler {
-        let geo = wt.engine.geometry();
-        let body = &wt.body;
+        let geo = wt.engine.wall_geometry();
+        let body = wt.wall_body();
         let axis = if body.kind == ShapeKind::Cylinder {
             WallAxis::Angle
         } else {
@@ -135,16 +135,30 @@ impl WallSampler {
         self.n = 0;
     }
 
-    /// Ajoute un relevé (champs macroscopiques complets de la veine).
-    pub fn add(&mut self, wt: &WindTunnel, m: &Macros) {
+    /// Ajoute un relevé : `m`, champs macroscopiques complets de la veine
+    /// (pression de référence) ; avec des grilles fines, la paroi est relevée
+    /// dans la plus fine.
+    pub fn add(&mut self, wt: &mut WindTunnel, m: &Macros) {
         if m.rho.len() != m.nx * m.ny || m.nx == 0 {
             return;
         }
-        let geo = wt.engine.geometry();
-        let u = wt.cfg.u_in as f64;
-        let nu = u * wt.cfg.l as f64 / wt.cfg.re;
-        let sa = wt.sa_active();
         let rho_ref = upstream_density(m);
+        let fine;
+        let m = if wt.wall_l() != wt.cfg.l {
+            let mut f = Macros::default();
+            wt.engine.wall_macros(&mut f);
+            fine = f;
+            &fine
+        } else {
+            m
+        };
+        if m.rho.len() != m.nx * m.ny {
+            return;
+        }
+        let geo = wt.engine.wall_geometry();
+        let u = wt.cfg.u_in as f64;
+        let nu = u * wt.wall_l() as f64 / wt.cfg.re;
+        let sa = wt.sa_active();
         let q = 0.5 * rho_ref * u * u;
         for (k, c) in self.cells.iter().enumerate() {
             let i = c.idx;

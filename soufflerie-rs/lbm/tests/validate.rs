@@ -158,7 +158,7 @@ fn paroi_cylindre_re40() {
     for _ in 0..20 {
         wt.run((0.25 * spt) as usize);
         wt.engine.macros(&mut m);
-        ws.add(&wt, &m);
+        ws.add(&mut wt, &m);
     }
     let r = ws.result();
     let near = |side: &[lbm::wall::WallPoint], s: f64| {

@@ -45,6 +45,9 @@ fn sa_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   var out: f32;
   if ((k & 3u) == 1u) {
     out = 0.0;
+  } else if ((k & 3u) == 3u) {
+    // Maille fantôme : ν̃ venu de la grille parente.
+    out = me.w;
   } else if (x == 0u) {
     out = inf;
   } else if (x == nx - 1u) {

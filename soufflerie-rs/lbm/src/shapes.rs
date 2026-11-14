@@ -306,6 +306,11 @@ impl Body {
         }
     }
 
+    /// Paramètres de la forme.
+    pub fn params(&self) -> &ShapeParams {
+        &self.params
+    }
+
     /// Boîte englobante (réseau).
     pub fn bbox(&self) -> [f64; 4] {
         let mut b = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];

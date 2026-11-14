@@ -419,11 +419,7 @@ fn run(shared: Arc<Mutex<Shared>>, repaint: impl Fn()) {
             if !w.engine.is_finite() {
                 diverged = true;
             }
-            let kind = match &w.engine {
-                lbm::tunnel::Engine::Cpu(s) => &s.geo.kind,
-                #[cfg(feature = "gpu")]
-                lbm::tunnel::Engine::Gpu(s) => &s.geo.kind,
-            };
+            let kind = &w.engine.geometry().kind;
             parts.advect(w, &macros, kind, steps_since_frame);
             steps_since_frame = 0;
             if crate::theme::dark() != dark {

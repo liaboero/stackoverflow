@@ -56,6 +56,7 @@ fn usage() -> ! {
          \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --raff 1|2 (GPU : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
     );
@@ -135,7 +136,9 @@ impl Args {
                 Transition::Turbulent
             } else {
                 Transition::Free
-            },            gpu_half: self.get("half", 0u8) == 1,
+            },
+            gpu_half: self.get("half", 0u8) == 1,
+            refine: self.get("raff", 0usize),
         }
     }
 }

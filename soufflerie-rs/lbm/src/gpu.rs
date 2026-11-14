@@ -94,12 +94,12 @@ fn f32_to_f16(v: f32) -> u16 {
 const MACRO_WGSL: &str = include_str!("macros.wgsl");
 const SA_WGSL: &str = include_str!("sa.wgsl");
 /// Pas par soumission (emplacements de paramètres).
-const BATCH: usize = 256;
-const SLOT: u64 = 256;
+pub(crate) const BATCH: usize = 256;
+pub(crate) const SLOT: u64 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
+pub(crate) struct Params {
     nx: u32,
     ny: u32,
     n: u32,
@@ -119,46 +119,49 @@ struct Params {
 pub struct GpuSolver {
     pub cfg: SolverConfig,
     pub geo: Geometry,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     adapter_name: String,
-    f: [wgpu::Buffer; 2],
-    kind: wgpu::Buffer,
+    pub(crate) f: [wgpu::Buffer; 2],
+    pub(crate) kind: wgpu::Buffer,
     wq: wgpu::Buffer,
     aux: wgpu::Buffer,
     /// Par maille : (amortissement de la sous-maille, distance, Cf laminaire, angle de la normale).
     cell: wgpu::Buffer,
     /// Spalart–Allmaras : (u_x, u_y, u_τ, ν̃), deux tampons alternés.
-    sa: [wgpu::Buffer; 2],
+    pub(crate) sa: [wgpu::Buffer; 2],
     force: wgpu::Buffer,
     force_read: wgpu::Buffer,
-    params: wgpu::Buffer,
+    pub(crate) params: wgpu::Buffer,
     macro_buf: wgpu::Buffer,
     macro_read: wgpu::Buffer,
     _macro_params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     sa_layout: wgpu::BindGroupLayout,
-    step_pipe: wgpu::ComputePipeline,
-    bound_pipe: wgpu::ComputePipeline,
-    sa_pipe: wgpu::ComputePipeline,
+    pub(crate) step_pipe: wgpu::ComputePipeline,
+    pub(crate) bound_pipe: wgpu::ComputePipeline,
+    pub(crate) sa_pipe: wgpu::ComputePipeline,
     macro_pipe: wgpu::ComputePipeline,
-    bind: Vec<wgpu::BindGroup>,
-    sa_bind: Vec<wgpu::BindGroup>,
+    pub(crate) bind: Vec<wgpu::BindGroup>,
+    pub(crate) sa_bind: Vec<wgpu::BindGroup>,
     macro_bind: [wgpu::BindGroup; 2],
     sa_active: bool,
-    cur: usize,
+    pub(crate) cur: usize,
     pub time: u64,
     tau0: f64,
     les_active: bool,
-    force_steps: u64,
+    pub(crate) force_steps: u64,
     wall_count: usize,
-    finite: bool,
-    ref_x: f64,
-    ref_y: f64,
-    spin: f64,
+    pub(crate) finite: bool,
+    pub(crate) ref_x: f64,
+    pub(crate) ref_y: f64,
+    pub(crate) spin: f64,
     /// Lectures d'efforts en vol (copies non bloquantes) et tampons libres.
     force_pending: VecDeque<PendingForce>,
     force_free: Vec<wgpu::Buffer>,
+    /// Grille fine imbriquée : ni éponge ni bandes absorbantes, pourtour
+    /// en mailles fantômes (type 3) remplies depuis la grille parente.
+    pub(crate) nested: bool,
 }
 
 /// Copie des efforts cumulés en cours de lecture.
@@ -237,6 +240,17 @@ impl GpuSolver {
             ..Default::default()
         }))
         .map_err(|e| format!("GPU indisponible : {e}"))?;
+        Ok(Self::with_device(cfg, device, queue, adapter_name, false))
+    }
+
+    /// Solveur sur un périphérique existant ; `nested` : grille fine imbriquée.
+    pub(crate) fn with_device(
+        cfg: SolverConfig,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_name: String,
+        nested: bool,
+    ) -> GpuSolver {
         let (nx, ny) = (cfg.nx, cfg.ny);
         let n = nx * ny;
         let mk = |label: &str, size: u64, usage: wgpu::BufferUsages| {
@@ -421,12 +435,13 @@ impl GpuSolver {
             spin: 0.0,
             force_pending: VecDeque::new(),
             force_free: Vec::new(),
+            nested,
         };
         s.set_viscosity(s.cfg.nu);
         s.upload_geometry();
         s.rebuild_binds();
         s.reset(s.cfg.u_in);
-        Ok(s)
+        s
     }
 
     /// Groupes de liaison des passes (à refaire quand un tampon change).
@@ -620,10 +635,14 @@ impl GpuSolver {
     /// τ par colonne (éponge) puis coefficient des bandes absorbantes par ligne.
     fn upload_aux(&mut self) {
         let (nx, ny) = (self.cfg.nx, self.cfg.ny);
-        let s0 = (nx as f64 * (1.0 - self.cfg.sponge_fraction)).round() as usize;
+        let s0 = if self.nested {
+            nx
+        } else {
+            (nx as f64 * (1.0 - self.cfg.sponge_fraction)).round() as usize
+        };
         let tau_sponge = self.tau0.max(0.9);
         let len = (nx - 1).saturating_sub(s0).max(1) as f64;
-        let absorb = (ny as f64 / 8.0).round();
+        let absorb = if self.nested { 0.0 } else { (ny as f64 / 8.0).round() };
         let mut aux: Vec<f32> = (0..nx)
             .map(|x| {
                 let mut tau = self.tau0;
@@ -651,6 +670,16 @@ impl GpuSolver {
         let mut kind: Vec<u32> = self.geo.kind.iter().map(|&k| k as u32).collect();
         for (w, &idx) in self.geo.wall_cells.iter().enumerate() {
             kind[idx] |= ((w + 1) as u32) << 2;
+        }
+        if self.nested {
+            let (nx, ny) = (self.cfg.nx, self.cfg.ny);
+            for y in 0..ny {
+                for x in 0..nx {
+                    if x == 0 || y == 0 || x == nx - 1 || y == ny - 1 {
+                        kind[y * nx + x] = 3;
+                    }
+                }
+            }
         }
         self.queue.write_buffer(&self.kind, 0, bytemuck::cast_slice(&kind));
         self.queue
@@ -750,6 +779,27 @@ impl GpuSolver {
             | ((self.sa_active as u32) << 3)
     }
 
+    /// Paramètres d'un pas : vitesse d'entrée `u`, accélération de mise en vitesse `a`.
+    pub(crate) fn step_params(&self, u: f32, a: f32) -> Params {
+        let (nx, ny) = (self.cfg.nx as u32, self.cfg.ny as u32);
+        Params {
+            nx,
+            ny,
+            n: nx * ny,
+            flags: self.flags(),
+            u_in: u,
+            accel: a,
+            c18: 18.0 * self.cfg.cs * self.cfg.cs,
+            spin: self.spin as f32,
+            rot_x: self.ref_x as f32,
+            rot_y: self.ref_y as f32,
+            ref_x: self.ref_x as f32,
+            ref_y: self.ref_y as f32,
+            nu: self.cfg.nu as f32,
+            pad: [0.0; 3],
+        }
+    }
+
     /// `n` pas ; la vitesse d'entrée suit `ramp`.
     pub fn run(&mut self, n: usize, ramp: &Ramp) {
         let (nx, ny) = (self.cfg.nx as u32, self.cfg.ny as u32);
@@ -762,22 +812,7 @@ impl GpuSolver {
             let mut bytes = vec![0u8; SLOT as usize * k];
             for s in 0..k {
                 let (u, a) = ramp.at(self.time + s as u64);
-                let p = Params {
-                    nx,
-                    ny,
-                    n: nx * ny,
-                    flags: self.flags(),
-                    u_in: u,
-                    accel: a,
-                    c18: 18.0 * self.cfg.cs * self.cfg.cs,
-                    spin: self.spin as f32,
-                    rot_x: self.ref_x as f32,
-                    rot_y: self.ref_y as f32,
-                    ref_x: self.ref_x as f32,
-                    ref_y: self.ref_y as f32,
-                    nu: self.cfg.nu as f32,
-                    pad: [0.0; 3],
-                };
+                let p = self.step_params(u, a);
                 let o = s * SLOT as usize;
                 bytes[o..o + std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(&p));
             }

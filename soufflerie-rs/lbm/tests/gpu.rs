@@ -126,3 +126,34 @@ fn gpu_demi_precision() {
         assert!(d < 5e-3 + 0.01 * a.0.abs(), "écart demi/simple {d}");
     }
 }
+
+#[test]
+fn raffinement_local() {
+    // Cylindre à Re = 40 (stationnaire) : une grille fine ×2 autour du corps
+    // sur une veine L = 12 donne la même traînée que la grille uniforme L = 24.
+    let base = TunnelConfig {
+        l: 24,
+        re: 40.0,
+        shape: ShapeKind::Cylinder,
+        engine: EngineKind::Gpu,
+        turbulence: Turbulence::Off,
+        ..Default::default()
+    };
+    let t = 30.0;
+    let Some(uni) = coeffs(base.clone(), (t * 24.0 / 0.1) as usize, 240) else {
+        return;
+    };
+    let fine = coeffs(
+        TunnelConfig {
+            l: 12,
+            refine: 1,
+            ..base
+        },
+        (t * 12.0 / 0.1) as usize,
+        120,
+    )
+    .unwrap();
+    let (a, b) = (uni.last().unwrap().0, fine.last().unwrap().0);
+    println!("Cx uniforme L = 24 : {a:.4} ; L = 12 + grille ×2 : {b:.4}");
+    assert!((a - b).abs() < 0.02 * a, "écart {:.2} %", 100.0 * (b / a - 1.0));
+}
