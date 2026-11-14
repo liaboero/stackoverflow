@@ -173,3 +173,29 @@ fn loi_de_paroi_3d() {
     }
     assert!(cz[1] > 2.0 * cz[0] && (0.35..0.75).contains(&cz[1]), "Cz {cz:?}");
 }
+
+#[test]
+fn raffinement_3d() {
+    // Sphère à Re = 100 : veine D = 8 avec une grille fine ×2 autour de la
+    // sphère, contre veine uniforme D = 16.
+    use lbm::bodies3d::{Body3D, Shape3D};
+    use lbm::gpu3d::Gpu3D;
+    let u = 0.1f32;
+    let mut cx = Vec::new();
+    for (l, depth) in [(16usize, 0usize), (8, 1)] {
+        let body = Body3D::new(Shape3D::Sphere, l, 0.0);
+        let spt = l as f64 / u as f64;
+        let Ok(mut g) = Gpu3D::with_refinement(&body, u as f64 * l as f64 / 100.0, u, true, false, depth) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
+        g.run((20.0 * spt) as usize, &ramp);
+        let _ = g.take_forces();
+        g.run((4.0 * spt) as usize, &ramp);
+        let f = g.take_forces();
+        cx.push(f.fx / (0.5 * (u as f64).powi(2) * body.area));
+        println!("D = {l}, raffinement {depth} : Cx = {:.4}", cx.last().unwrap());
+    }
+    assert!((cx[1] / cx[0] - 1.0).abs() < 0.015, "Cx {cx:?}");
+}

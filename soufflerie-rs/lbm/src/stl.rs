@@ -527,6 +527,11 @@ impl MeshBody {
         }
     }
 
+    /// Le même maillage transformé point par point (grilles de rangement refaites).
+    pub fn transformed(&self, t: impl Fn([f64; 3]) -> [f64; 3]) -> MeshBody {
+        MeshBody::new(self.tris.iter().map(|tr| tr.map(&t)).collect(), self.rays.len() == 3)
+    }
+
     /// Point dans le volume : parité des traversées d'un rayon selon x, ou
     /// vote à la majorité sur trois rayons pour un maillage ouvert.
     pub fn inside(&self, x: f64, y: f64, z: f64) -> bool {

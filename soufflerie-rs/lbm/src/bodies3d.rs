@@ -380,6 +380,29 @@ fn poly_dist(p: [f64; 2], poly: &[[f64; 2]]) -> f64 {
 }
 
 impl Body3D {
+    /// La même maquette dans une grille deux fois plus fine dont le nœud 0 est
+    /// au nœud `origin` de celle-ci, de dimensions `dims`.
+    pub fn refined(&self, origin: [f64; 3], dims: [usize; 3]) -> Body3D {
+        let t = |p: [f64; 3]| [0, 1, 2].map(|a| 2.0 * (p[a] - origin[a]));
+        let b = self.bounds;
+        let [x0, y0, z0] = t([b.x0, b.y0, b.z0]);
+        let [x1, y1, z1] = t([b.x1, b.y1, b.z1]);
+        Body3D {
+            shape: self.shape,
+            l: 2 * self.l,
+            nx: dims[0],
+            ny: dims[1],
+            nz: dims[2],
+            center: t(self.center),
+            bounds: Bounds { x0, x1, y0, y1, z0, z1 },
+            area: 4.0 * self.area,
+            alpha: self.alpha,
+            half: 2.0 * self.half,
+            mesh: self.mesh.as_ref().map(|m| Arc::new(m.transformed(|p| t(p)))),
+            mesh_volume: 8.0 * self.mesh_volume,
+        }
+    }
+
     /// Profil NACA 0012 de l'aile dans son repère (mailles, origine au quart de corde).
     fn foil(&self) -> Vec<[f64; 2]> {
         let lf = self.l as f64;

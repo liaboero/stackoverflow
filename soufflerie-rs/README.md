@@ -245,6 +245,40 @@ CD = 0,31 avec (ordre de grandeur réel en lisse : CL ≈ 0,9, CD de quelques
 centièmes, davantage train sorti). La traînée reste trop forte à cette
 résolution, et la coupe de vorticité garde un bruit en damier à τ ≈ 0,5.
 
+## Stabilité et raffinement local en 3D
+
+**Collision et bords.** La collision D3Q19 est régularisée récursivement
+(ordre 3, Malaspinas 2015 : moments d'ordre 3 tirés de ρ, u et de la partie
+hors équilibre d'ordre 2), comme en 2D. Aux Reynolds de maille élevés
+(sous-maille active), des bandes absorbantes rappellent l'écoulement vers
+l'amont près des bords latéraux périodiques, de l'entrée et dans la zone
+éponge de sortie : les ondes de pression de la mise en vitesse ne rebondissent
+plus dans la veine. Sphère à Re = 10⁶ (D = 16, loi de paroi) : vorticité
+résiduelle en amont 2,63 → 0,004 U/L, fluctuation rapide de Cx
+0,014 → 0,0006, Cx 0,254 → 0,214. Sans loi de paroi, la sous-maille est
+amortie près de la paroi (Van Driest, longueur 8 L/√Re bornée à [1, 4]
+mailles, comme en 2D) ; avec elle, elle reste entière : c'est elle qui
+stabilise les premiers nœuds à τ ≈ 0,5.
+
+**Raffinement local** (`run3d --raff 1|2`, interface : « Près de la
+maquette »). Une ou deux grilles imbriquées autour de la maquette, deux fois
+plus fines en espace et en temps (emprise : 0,6 L en amont, 1,5 L en aval,
+0,5 L de côté, puis 0,3 / 0,6 / 0,25 L), couplées comme en 2D : moments
+(ρ, u, Π hors équilibre remis à l'échelle, ν̃) interpolés en cubique sur
+l'enveloppe de mailles fantômes et en linéaire dans le temps, recopie vers
+la veine sous la zone raffinée ; efforts de la grille la plus fine.
+
+| Cas | Veine uniforme | Raffinée | Calcul |
+| --- | --- | --- | --- |
+| Sphère, Re = 100 : D = 16 contre D = 8 + ×2 | 1,1472 | 1,1504 (+0,3 %) | 31 s contre 3 s |
+| Aile, Re = 300, α = 8° : L = 32 contre 16 + ×2 (même calage) | Cx 0,2620, Cz 0,2628 | 0,2618, 0,2634 | 74 s contre 30 s |
+| Aile, Re = 10⁶ : idem | Cx 0,0858, Cz 0,5600 | 0,0858, 0,5444 | — |
+
+« Même calage » : la maquette d'une grille fine tombe à une demi-maille près
+d'un nœud là où la veine la place à un quart ; à L = 32, l'aile (4 mailles
+d'épaisseur) y est sensible (Re = 10⁶ : Cx 0,057 ou 0,086 selon le calage),
+ce qu'atténue justement le raffinement (×4 : Cx 0,056, Cz 0,600).
+
 ## Maquettes STL (3D)
 
 Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le
@@ -321,13 +355,16 @@ de Schiller–Naumann et Clift) :
 
 | Re | Cx, D = 12 mailles | Cx, D = 16 mailles | Référence | Écart à 16 mailles |
 | --- | --- | --- | --- | --- |
-| 20 | 2,849 | 2,841 | 2,610 | +8,9 % |
-| 50 | 1,666 | 1,650 | 1,539 | +7,2 % |
-| 100 | 1,174 | 1,151 | 1,094 | +5,2 % |
-| 200 | 0,870 | 0,833 | 0,810 | +2,8 % |
-| 300 | 0,762 | 0,713 | 0,691 | +3,2 % |
-| 500 | 0,748 | 0,681 | 0,576 | +18 % |
-| 1000 | 0,676 | 0,613 | 0,466 | +32 % |
+| 20 | 2,848 | 2,838 | 2,610 | +8,7 % |
+| 50 | 1,665 | 1,648 | 1,539 | +7,1 % |
+| 100 | 1,168 | 1,145 | 1,094 | +4,7 % |
+| 200 | 0,856 | 0,823 | 0,810 | +1,7 % |
+| 300 | 0,739 | 0,695 | 0,691 | +0,5 % |
+| 500 | 0,671 | 0,617 | 0,576 | +7,2 % |
+| 1000 | 0,580 | 0,533 | 0,466 | +14 % |
+
+(Avant la collision régularisée d'ordre 3 et l'amortissement pariétal de la
+sous-maille : +18 % à Re = 500 et +32 % à Re = 1000.)
 
 L'écart diminue partout quand la grille s'affine. Aux faibles Reynolds, il
 vient surtout du confinement (veine de 6 D, bords périodiques), qui pèse
@@ -345,11 +382,13 @@ la pente 2D du même profil, au même Reynolds, calculée par la soufflerie 2D
 
 | α | Re = 200, 3D | Helmbold + 2D | Re = 1000, 3D | Helmbold + 2D |
 | --- | --- | --- | --- | --- |
-| 4° | 0,102 | 0,149 | 0,094 | 0,101 |
-| 8° | 0,246 | 0,289 | 0,182 | 0,180 |
-| 12° | 0,377 | 0,415 | 0,275 | 0,350 |
+| 4° | 0,103 | 0,149 | 0,111 | 0,101 |
+| 8° | 0,249 | 0,289 | 0,214 | 0,180 |
+| 12° | 0,383 | 0,415 | 0,330 | 0,350 |
 
-À Re = 1000, l'accord est de 7 % à 4° et de 1 % à 8° ; à 12°, le profil 2D
+À Re = 1000, l'aile 3D porte 10 à 19 % de plus que la correction
+d'allongement (elle portait 1 à 7 % de moins avant l'amortissement pariétal
+de la sous-maille, qui épaississait la couche limite) ; à 12°, le profil 2D
 est déjà instationnaire et la comparaison ne tient plus. À Re = 200, l'aile
 3D porte 10 à 30 % de moins que la correction d'allongement : la couche
 limite épaisse et les tourbillons marginaux visqueux sortent du cadre de la

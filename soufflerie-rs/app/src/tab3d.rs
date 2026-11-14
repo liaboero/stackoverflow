@@ -109,6 +109,8 @@ struct Settings {
     iso: bool,
     /// Maquette : lisse, avec la grille, ou mailles du calcul.
     body_view: BodyView,
+    /// Grilles imbriquées autour de la maquette (0 à 2).
+    refine: usize,
     /// Seuil des isosurfaces, en (U/L)².
     iso_level: f64,
     /// Taille de l'image 3D (pixels).
@@ -188,6 +190,7 @@ impl Tab3D {
             dist: 6.0,
             iso: true,
             body_view: BodyView::Smooth,
+            refine: 0,
             iso_level: 0.4,
             img: (800, 450),
         };
@@ -393,6 +396,15 @@ impl Tab3D {
             ui.label("Précision");
             ui.selectable_value(&mut s.fp16, true, "demi (2 octets)");
             ui.selectable_value(&mut s.fp16, false, "simple");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Près de la maquette");
+            ui.selectable_value(&mut s.refine, 0, "uniforme");
+            ui.selectable_value(&mut s.refine, 1, format!("×2 ({})", 2 * s.l))
+                .on_hover_text("Grille deux fois plus fine autour de la maquette");
+            ui.selectable_value(&mut s.refine, 2, format!("×4 ({})", 4 * s.l)).on_hover_text(
+                "Deux grilles imbriquées, 2 et 4 fois plus fines : couche limite et parois minces                  mieux résolues pour une fraction du coût d'une grille uniforme",
+            );
         });
         ui.horizontal(|ui| {
             let label = if s.running { "Pause" } else { "Reprendre" };
@@ -962,6 +974,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     || b.alpha != st.alpha
                     || b.fp16 != st.fp16
                     || b.reset != st.reset
+                    || b.refine != st.refine
                     || (b.re >= lbm::tunnel::RE_SA_AUTO) != (st.re >= lbm::tunnel::RE_SA_AUTO)
                     || (st.shape == Shape3D::Mesh && (b.stl != st.stl || b.setup != st.setup))
             }
@@ -991,7 +1004,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             };
             let nu = U as f64 * st.l as f64 / st.re;
             let sa = st.re >= lbm::tunnel::RE_SA_AUTO;
-            match b.and_then(|b| Gpu3D::with_turbulence(&b, nu, U, st.fp16, sa).map(|g| (g, b))) {
+            match b.and_then(|b| Gpu3D::with_refinement(&b, nu, U, st.fp16, sa, st.refine).map(|g| (g, b))) {
                 Ok((g, b)) => {
                     let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
                     shared.lock().unwrap().frame.warning = match lost {
@@ -1158,7 +1171,17 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 g.wall_count,
                 g.tau0,
                 if g.les { "active" } else { "inactive" },
-                if g.sa { " · Spalart–Allmaras + loi de paroi" } else { "" },
+                match (g.sa, g.finest()) {
+                    (sa, Some((d, w, f))) => format!(
+                        "{} · grille fine ×{f} {}×{}×{}, {w} mailles pariétales",
+                        if sa { " · Spalart–Allmaras + loi de paroi" } else { "" },
+                        d[0],
+                        d[1],
+                        d[2]
+                    ),
+                    (true, None) => " · Spalart–Allmaras + loi de paroi".to_string(),
+                    _ => String::new(),
+                },
                 if g.fp16 { "demi-précision" } else { "simple précision" },
                 g.adapter_name(),
                 perf.2

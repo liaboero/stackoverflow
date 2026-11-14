@@ -58,7 +58,7 @@ fn usage() -> ! {
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
          \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
-         \x20         --raff 1|2 (GPU : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
+         \x20         --raff 1|2 (GPU, 2D et 3D : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
     );
@@ -582,7 +582,8 @@ fn cmd_run3d(a: &Args) {
         "off" | "none" => false,
         _ => re >= lbm::tunnel::RE_SA_AUTO,
     };
-    let mut sim = match Gpu3D::with_turbulence(&body, nu, U, fp16, sa) {
+    let depth = a.get("raff", 0usize).min(2);
+    let mut sim = match Gpu3D::with_refinement(&body, nu, U, fp16, sa, depth) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");
@@ -604,12 +605,22 @@ fn cmd_run3d(a: &Args) {
         if fp16 { "demi-précision" } else { "simple précision" },
         sim.adapter_name()
     );
+    if let Some((d, w, s)) = sim.finest() {
+        eprintln!(
+            "Grille fine ×{s} autour de la maquette : {}×{}×{} = {:.2} M mailles, {w} mailles pariétales, {} mailles par longueur",
+            d[0],
+            d[1],
+            d[2],
+            (d[0] * d[1] * d[2]) as f64 / 1e6,
+            l * s
+        );
+    }
     if sa {
         // y⁺ attendu au premier nœud (plaque plane turbulente, nœud à une demi-maille).
         let cf = 0.026 * re.powf(-1.0 / 7.0);
         eprintln!(
             "Spalart–Allmaras + loi de paroi (Spalding) · y⁺ ≈ {:.0} au premier nœud",
-            0.5 / l as f64 * re * (cf / 2.0).sqrt()
+            0.5 / (l << depth) as f64 * re * (cf / 2.0).sqrt()
         );
     }
     if let Some(lost) = mesh_info.as_ref().and_then(|i| i.volume_lost(sim.solid_count, l)) {

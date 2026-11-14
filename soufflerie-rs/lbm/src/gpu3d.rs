@@ -42,7 +42,7 @@ pub const C3: [[i32; 3]; 19] = [
     [0, -1, 1],
 ];
 
-fn w3(i: usize) -> f64 {
+pub(crate) fn w3(i: usize) -> f64 {
     let c = C3[i];
     match c[0].abs() + c[1].abs() + c[2].abs() {
         0 => 1.0 / 3.0,
@@ -56,10 +56,10 @@ fn opp3(i: usize) -> usize {
     C3.iter().position(|d| d[0] == -c[0] && d[1] == -c[1] && d[2] == -c[2]).unwrap()
 }
 
-const SOLID: u32 = 0xffff_ffff;
+pub(crate) const SOLID: u32 = 0xffff_ffff;
 
 /// Littéral flottant WGSL.
-fn f(v: f64) -> String {
+pub(crate) fn f(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{v:.1}")
     } else {
@@ -90,7 +90,7 @@ struct Params {
   nx: u32, ny: u32, nz: u32, N: u32,
   tau0: f32, tauSponge: f32, spongeStart: u32, uIn: f32,
   accel: f32, c18: f32, writeMacro: u32, les: u32,
-  rows: u32, sa: u32, nu: f32, pad2: u32,
+  rows: u32, sa: u32, nu: f32, lesA: f32,
 };
 ";
 
@@ -167,6 +167,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var out: f32;
   if (wk0 == 0xffffffffu) {
     out = 0.0;
+  } else if (wk0 == 0xfffffffeu) {
+    // Maille fantôme : ν̃ venu de la grille parente.
+    out = nutIn[idx];
   } else if (x == 0) {
     out = 3.0 * nu;
   } else if (x == i32(P.nx) - 1) {
@@ -338,17 +341,37 @@ fn wgsl_step(fp16: bool) -> String {
             f(2.0 * cyf * czf)
         );
         let w = w3(i);
+        // Hermite d'ordre 3 (composantes portées par D3Q19, sans xyz).
+        let h = |a: f64, b: f64| a * (b * b - 1.0 / 3.0);
+        let h3: Vec<String> = [
+            (h(cyf, cxf), "axxy"),
+            (h(cxf, cyf), "axyy"),
+            (h(czf, cxf), "axxz"),
+            (h(cxf, czf), "axzz"),
+            (h(czf, cyf), "ayyz"),
+            (h(cyf, czf), "ayzz"),
+        ]
+        .iter()
+        .filter(|(c, _)| c.abs() > 1e-12)
+        .map(|(c, v)| format!("{} * {v}", f(*c)))
+        .collect();
+        let h3 = if h3.is_empty() { "0.0".to_string() } else { h3.join(" + ") };
         let _ = write!(
             coll,
             "  {{
     let cu = {cu};
     let feq = {wf} * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq);
-    let fnew = feq + k * {w45} * ({qp}) + {w3f} * rho * ({cxs} * P.accel);
+    let fnew = feq + k * {w45} * ({qp}) + {w135} * ({h3}) + {w3f} * rho * ({cxs} * P.accel);
     o[{i}] = fnew - {wf};
+    if (sig > 0.0) {{
+      let ci = {cxs} * P.uIn;
+      o[{i}] -= sig * (o[{i}] - {wf} * (3.0 * ci + 4.5 * ci * ci - 1.5 * P.uIn * P.uIn));
+    }}
   }}
 ",
             wf = f(w),
             w45 = f(4.5 * w),
+            w135 = f(13.5 * w),
             w3f = f(3.0 * w),
             cxs = f(cxf),
         );
@@ -387,6 +410,8 @@ fn wgsl_step(fp16: bool) -> String {
 @group(0) @binding(9) var<storage, read> nut: array<f32>;
 @group(0) @binding(10) var<storage, read> wallGeo: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read_write> utau: array<f32>;
+// Distance à la paroi de chaque maille (amortissement de la sous-maille).
+@group(0) @binding(12) var<storage, read> wdist: array<f32>;
 {sa_fns}
 {load}
 {store}
@@ -398,6 +423,23 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {{
   let zz = (zi + nz) % nz;
   let xx = clamp(xi, 0, i32(P.nx) - 1);
   return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
+}}
+
+fn absorb(x: i32, y: i32, z: i32) -> f32 {{
+  // Aux Reynolds de maille modérés, la viscosité suffit à amortir les ondes ;
+  // les bandes y ajouteraient un confinement (traînée de la sphère +1 % à Re = 20).
+  if (P.les == 0u || (P.rows & 1u) != 0u) {{ return 0.0; }}
+  let wy = max(2.0, f32(P.ny) / 8.0);
+  let wz = max(2.0, f32(P.nz) / 8.0);
+  let wx = max(2.0, f32(P.nx) / 24.0);
+  let dy = f32(min(y, i32(P.ny) - 1 - y));
+  let dz = f32(min(z, i32(P.nz) - 1 - z));
+  var s = max(max(1.0 - dy / wy, 1.0 - dz / wz), 1.0 - f32(x) / wx);
+  if (u32(x) > P.spongeStart) {{
+    s = max(s, f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart)));
+  }}
+  s = clamp(s, 0.0, 1.0);
+  return 0.05 * s * s;
 }}
 
 fn feqIn(i: u32) -> f32 {{
@@ -413,7 +455,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let idx = gid.x + gid.y * nwg.x * 64u;
   if (idx >= P.N) {{ return; }}
   let wk0 = wall[idx];
-  if (wk0 == {SOLID}u) {{ return; }}
+  // Solide, ou maille fantôme d'une grille fine (remplie par refine3d).
+  if (wk0 >= 0xfffffffeu) {{ return; }}
   let wk = select(wk0 - 1u, 0xffffffffu, wk0 == 0u);
   let hasWall = wk != 0xffffffffu;
   let x = i32(idx % P.nx);
@@ -461,9 +504,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var om = 1.0 / tau;
   if (P.les == 1u) {{
     let qn = sqrt(2.0 * (pxx * pxx + pyy * pyy + pzz * pzz + 2.0 * (pxy * pxy + pxz * pxz + pyz * pyz)));
-    om = 2.0 / (tau + sqrt(tau * tau + P.c18 * qn * ir));
+    // Amortissement de Van Driest près de la paroi, (1 − e^(−d/A))², comme en
+    // 2D, sans loi de paroi seulement : avec elle, la sous-maille stabilise les
+    // premiers nœuds à τ ≈ 0,5 (aile à Re = 10⁶, L = 32 : divergence sinon).
+    var damp = 1.0;
+    if (P.sa == 0u) {{ damp = 1.0 - exp(-wdist[idx] / P.lesA); }}
+    om = 2.0 / (tau + sqrt(tau * tau + P.c18 * damp * damp * qn * ir));
   }}
   let k = 1.0 - om;
+  // Régularisation récursive (Malaspinas 2015) : moments d'ordre 3 tirés de
+  // ρ, u et de la partie hors équilibre d'ordre 2 après collision.
+  let bxx = k * pxx;
+  let byy = k * pyy;
+  let bzz = k * pzz;
+  let bxy = k * pxy;
+  let bxz = k * pxz;
+  let byz = k * pyz;
+  let axxy = rho * u.x * u.x * u.y + u.y * bxx + 2.0 * u.x * bxy;
+  let axyy = rho * u.x * u.y * u.y + u.x * byy + 2.0 * u.y * bxy;
+  let axxz = rho * u.x * u.x * u.z + u.z * bxx + 2.0 * u.x * bxz;
+  let axzz = rho * u.x * u.z * u.z + u.x * bzz + 2.0 * u.z * bxz;
+  let ayyz = rho * u.y * u.y * u.z + u.z * byy + 2.0 * u.y * byz;
+  let ayzz = rho * u.y * u.z * u.z + u.y * bzz + 2.0 * u.z * byz;
+  // Bandes absorbantes : rappel vers l'écoulement amont près des bords
+  // latéraux (périodiques), de l'entrée et dans la zone éponge de sortie.
+  let sig = absorb(x, y, z);
   var o: array<f32, 19>;
 {coll}
 {out}
@@ -1030,7 +1095,7 @@ pub enum BodyView {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
+pub(crate) struct Params {
     nx: u32,
     ny: u32,
     nz: u32,
@@ -1046,7 +1111,8 @@ struct Params {
     rows: u32,
     sa: u32,
     nu: f32,
-    pad: u32,
+    /// Longueur d'amortissement pariétal de la sous-maille (mailles).
+    les_a: f32,
 }
 
 #[repr(C)]
@@ -1066,8 +1132,8 @@ struct SliceParams {
 }
 
 /// Pas par soumission (paramètres en décalage dynamique).
-const BATCH: usize = 64;
-const SLOT: u64 = 256;
+pub(crate) const BATCH: usize = 64;
+pub(crate) const SLOT: u64 = 256;
 
 /// Grandeur affichée sur une coupe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1103,8 +1169,8 @@ pub fn bytes_per_cell(fp16: bool) -> usize {
 }
 
 pub struct Gpu3D {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     adapter_name: String,
     pub nx: usize,
     pub ny: usize,
@@ -1117,8 +1183,8 @@ pub struct Gpu3D {
     pub les: bool,
     sponge_start: u32,
     cs: f64,
-    _pops: [[wgpu::Buffer; 2]; 2],
-    wall: wgpu::Buffer,
+    pub(crate) pops: [[wgpu::Buffer; 2]; 2],
+    pub(crate) wall: wgpu::Buffer,
     /// Distance signée à la maquette (affichage) et sa grille (origine, pas ; taille).
     sdf: wgpu::Buffer,
     sdf_geom: ([f32; 4], [f32; 4]),
@@ -1128,20 +1194,23 @@ pub struct Gpu3D {
     /// Spalart–Allmaras avec loi de paroi : ν̃ (deux tampons alternés),
     /// distance à la paroi, géométrie pariétale et u_τ.
     pub sa: bool,
-    nu: f64,
-    nut: [wgpu::Buffer; 2],
+    pub(crate) nu: f64,
+    /// Mailles par longueur de référence (Reynolds de maille, sous-maille).
+    l: usize,
+    les_a: f64,
+    pub(crate) nut: [wgpu::Buffer; 2],
     _dist: wgpu::Buffer,
     _wall_geo: wgpu::Buffer,
     _utau: wgpu::Buffer,
-    sa_pipe: wgpu::ComputePipeline,
-    sa_bind: Vec<wgpu::BindGroup>,
+    pub(crate) sa_pipe: wgpu::ComputePipeline,
+    pub(crate) sa_bind: Vec<wgpu::BindGroup>,
     /// ν̃ initial (3ν dans le fluide, 0 dans le corps), pour `reset`.
     nut0: Vec<f32>,
     force: wgpu::Buffer,
     force_read: wgpu::Buffer,
-    params: wgpu::Buffer,
-    macro_buf: wgpu::Buffer,
-    step_pipe: wgpu::ComputePipeline,
+    pub(crate) params: wgpu::Buffer,
+    pub(crate) macro_buf: wgpu::Buffer,
+    pub(crate) step_pipe: wgpu::ComputePipeline,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
     derive_pipe: wgpu::ComputePipeline,
@@ -1150,18 +1219,23 @@ pub struct Gpu3D {
     deriv: Option<wgpu::Buffer>,
     /// Tampons du rendu réutilisés d'une image à l'autre : taille, image, relecture.
     render_bufs: Option<(usize, usize, wgpu::Buffer, wgpu::Buffer)>,
-    bind: Vec<wgpu::BindGroup>,
+    pub(crate) bind: Vec<wgpu::BindGroup>,
     init_bind: Vec<wgpu::BindGroup>,
-    disp: (u32, u32),
-    cur: usize,
+    pub(crate) disp: (u32, u32),
+    pub(crate) cur: usize,
     pub time: u64,
-    force_steps: u64,
+    pub(crate) force_steps: u64,
     pub wall_count: usize,
     pub solid_count: usize,
     /// Mailles solides (pour l'affichage).
     solid: Vec<bool>,
     /// Le GPU ne répond plus (lecture impossible, pilote réinitialisé).
     pub lost: bool,
+    /// Grille fine imbriquée : enveloppe de mailles fantômes, ni entrée, ni
+    /// sortie, ni bandes absorbantes.
+    pub(crate) nested: bool,
+    /// Grilles fines autour de la maquette (raffinement local).
+    pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -1223,6 +1297,71 @@ impl Gpu3D {
 
     /// Idem, avec Spalart–Allmaras et loi de paroi si `sa`.
     pub fn with_turbulence(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: bool) -> Result<Gpu3D, String> {
+        Self::with_refinement(body, nu, u_in, fp16, sa, 0)
+    }
+
+    /// Idem, avec `depth` grilles imbriquées autour de la maquette (0 à 2),
+    /// chacune deux fois plus fine que la précédente.
+    pub fn with_refinement(
+        body: &Body3D,
+        nu: f64,
+        u_in: f32,
+        fp16: bool,
+        sa: bool,
+        depth: usize,
+    ) -> Result<Gpu3D, String> {
+        let (device, queue, name) = Self::open_device()?;
+        let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false)?;
+        let depth = depth.min(crate::refine3d::EXTENT3.len());
+        if depth == 0 {
+            return Ok(top);
+        }
+        let mut levels: Vec<Gpu3D> = Vec::new();
+        let mut links = Vec::new();
+        let mut parent_body = body.clone();
+        let l0 = body.l as f64;
+        for k in 1..=depth {
+            let (up, down, side) = crate::refine3d::EXTENT3[k - 1];
+            // Emprise en mailles de la grille parente (échelle 2^(k−1)).
+            let sp = (1u64 << (k - 1)) as f64;
+            let pb = parent_body.bounds;
+            let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
+            let lo = [
+                (pb.x0 - up * l0 * sp).floor().max(3.0) as usize,
+                (pb.y0 - side * l0 * sp).floor().max(3.0) as usize,
+                (pb.z0 - side * l0 * sp).floor().max(3.0) as usize,
+            ];
+            let hi = [
+                ((pb.x1 + down * l0 * sp).ceil() as usize).min(pnx - 4),
+                ((pb.y1 + side * l0 * sp).ceil() as usize).min(pny - 4),
+                ((pb.z1 + side * l0 * sp).ceil() as usize).min(pnz - 4),
+            ];
+            let m = 2 * crate::refine3d::MARGIN3 + 2;
+            if (0..3).any(|a| hi[a] <= lo[a] + m) {
+                return Err("grille fine trop petite".into());
+            }
+            let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
+            let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
+            let nu_k = nu * (1u64 << k) as f64;
+            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
+            child.les = top.les;
+            {
+                let parent = if k == 1 { &top } else { &levels[k - 2] };
+                links.push(crate::refine3d::Link3::new(parent, &child, lo));
+            }
+            levels.push(child);
+            parent_body = cb;
+        }
+        top.refine = Some(Box::new(crate::refine3d::Refinement {
+            levels,
+            links,
+            fresh: true,
+        }));
+        Ok(top)
+    }
+
+    /// Ouvre le GPU : Vulkan ou Metal d'abord.
+    fn open_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
         // Vulkan ou Metal d'abord : sous DirectX 12, ce gros shader (tableaux
         // locaux indexés) est environ 100 fois plus lent. La variable
         // WGPU_BACKEND, que le lanceur de l'interface fixe pour la fenêtre, est
@@ -1252,9 +1391,36 @@ impl Gpu3D {
         let adapter = found.ok_or_else(|| format!("aucun adaptateur GPU : {last_err}"))?;
         let info = adapter.get_info();
         let adapter_name = format!("{} ({:?})", info.name, info.backend);
+        let al = adapter.limits();
+        let mut limits = wgpu::Limits::default();
+        limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
+        limits.max_buffer_size = al.max_buffer_size;
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(12);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("soufflerie 3D"),
+            required_limits: limits,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("GPU indisponible : {e}"))?;
+        Ok((device, queue, adapter_name))
+    }
+
+    /// Une grille (veine ou grille fine imbriquée) sur un périphérique ouvert.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_name: String,
+        body: &Body3D,
+        nu: f64,
+        u_in: f32,
+        fp16: bool,
+        sa: bool,
+        nested: bool,
+    ) -> Result<Gpu3D, String> {
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
         let n = nx * ny * nz;
-        let al = adapter.limits();
+        let al = device.limits();
         let words_a = if fp16 { 5 } else { 10 };
         let words_b = if fp16 { 5 } else { 9 };
         let biggest = (words_a * n * 4).max(16 * n) as u64;
@@ -1267,16 +1433,6 @@ impl Gpu3D {
                 max_bind >> 20
             ));
         }
-        let mut limits = wgpu::Limits::default();
-        limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
-        limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(11);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("soufflerie 3D"),
-            required_limits: limits,
-            ..Default::default()
-        }))
-        .map_err(|e| format!("GPU indisponible : {e}"))?;
         let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let mk = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -1367,6 +1523,17 @@ impl Gpu3D {
             }
         }
         let wall_count = k as usize;
+        if nested {
+            for z in 0..nz {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        if x == 0 || y == 0 || z == 0 || x == nx - 1 || y == ny - 1 || z == nz - 1 {
+                            wall[idx(x, y, z)] = crate::refine3d::GHOST;
+                        }
+                    }
+                }
+            }
+        }
         if qs.is_empty() {
             qs.resize(18, 0.0);
         }
@@ -1387,7 +1554,16 @@ impl Gpu3D {
             usage: wgpu::BufferUsages::STORAGE,
         });
         // Affichage : distance signée tous les L/64 (≥ 0,2 maille, ≤ 0,5).
-        let g = body.sdf_grid((body.l as f64 / 64.0).clamp(0.2, 0.5));
+        let g = if nested {
+            crate::bodies3d::SdfGrid {
+                origin: [0.0; 3],
+                h: 1.0,
+                dims: [1, 1, 1],
+                d: vec![1.0],
+            }
+        } else {
+            body.sdf_grid((body.l as f64 / 64.0).clamp(0.2, 0.5))
+        };
         let sdf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sdf3d"),
             contents: bytemuck::cast_slice(&g.d),
@@ -1411,10 +1587,10 @@ impl Gpu3D {
         });
         // Spalart–Allmaras : normale et distance des mailles pariétales (dans
         // l'ordre de leur numéro), distance à la paroi de toutes les mailles.
-        let (geo, dist) = if sa {
+        let (geo,) = if sa {
             let mut cells = vec![0usize; wall_count];
             for (c, &w) in wall.iter().enumerate() {
-                if w != 0 && w != SOLID {
+                if w != 0 && w < crate::refine3d::GHOST {
                     cells[w as usize - 1] = c;
                 }
             }
@@ -1426,11 +1602,12 @@ impl Gpu3D {
                     [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d as f32]
                 })
                 .collect();
-            let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
-            (geo, body.wall_distance(&solid_mask))
+            (geo,)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(),)
         };
+        let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+        let dist = body.wall_distance(&solid_mask);
         let init_or = |label: &str, data: &[u8]| {
             if data.is_empty() {
                 mk(label, 16, st)
@@ -1473,6 +1650,7 @@ impl Gpu3D {
                 storage(9, true),
                 storage(10, true),
                 storage(11, false),
+                storage(12, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1559,6 +1737,7 @@ impl Gpu3D {
                         buf_entry(9, &nut[s], None),
                         buf_entry(10, &wall_geo, None),
                         buf_entry(11, &utau_buf, None),
+                        buf_entry(12, &dist_buf, None),
                     ],
                 })
             })
@@ -1610,9 +1789,9 @@ impl Gpu3D {
             tau0: 0.5,
             tau_sponge: 0.8,
             les: false,
-            sponge_start: (nx as f64 * 0.85).round() as u32,
+            sponge_start: if nested { nx as u32 } else { (nx as f64 * 0.85).round() as u32 },
             cs: 0.15,
-            _pops: pops,
+            pops,
             wall: wall_buf,
             sdf,
             sdf_geom,
@@ -1620,6 +1799,8 @@ impl Gpu3D {
             _qbuf: qbuf,
             sa,
             nu,
+            l: body.l,
+            les_a: 1.0,
             nut,
             _dist: dist_buf,
             _wall_geo: wall_geo,
@@ -1648,6 +1829,8 @@ impl Gpu3D {
             solid_count,
             solid,
             lost: false,
+            nested,
+            refine: None,
         };
         s.set_viscosity(nu);
         s.reset(0.0);
@@ -1659,7 +1842,20 @@ impl Gpu3D {
     }
 
     pub fn set_viscosity(&mut self, nu: f64) {
+        self.set_viscosity_one(nu);
+        if let Some(r) = self.refine.as_mut() {
+            for (k, g) in r.levels.iter_mut().enumerate() {
+                g.set_viscosity_one(nu * (2u64 << k) as f64);
+                g.les = self.les;
+            }
+        }
+    }
+
+    fn set_viscosity_one(&mut self, nu: f64) {
         self.nu = nu;
+        // Longueur d'amortissement pariétal : 8 L/√Re mailles, bornée à [1, 4] (comme en 2D).
+        let re = self.u_in as f64 * self.l as f64 / nu;
+        self.les_a = (8.0 * self.l as f64 / re.sqrt()).clamp(1.0, 4.0);
         self.tau0 = 0.5 + 3.0 * nu;
         self.tau_sponge = self.tau0.max(0.8);
         // Sous-maille seulement aux Reynolds de maille élevés : sans amortissement
@@ -1669,6 +1865,10 @@ impl Gpu3D {
 
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
         self.solid[x + self.nx * (y + self.ny * z)]
+    }
+
+    pub(crate) fn params_for(&self, u: f32, accel: f32, write_macro: bool) -> Params {
+        self.params(u, accel, write_macro)
     }
 
     fn params(&self, u: f32, accel: f32, write_macro: bool) -> Params {
@@ -1685,15 +1885,25 @@ impl Gpu3D {
             c18: (18.0 * self.cs * self.cs) as f32,
             write_macro: write_macro as u32,
             les: self.les as u32,
-            rows: 0,
+            rows: self.nested as u32,
             sa: self.sa as u32,
             nu: self.nu as f32,
-            pad: 0,
+            les_a: self.les_a as f32,
         }
     }
 
     /// Fluide au repos (ou à la vitesse u0).
     pub fn reset(&mut self, u0: f32) {
+        self.reset_one(u0);
+        if let Some(r) = self.refine.as_mut() {
+            for g in r.levels.iter_mut() {
+                g.reset_one(u0);
+            }
+            r.fresh = true;
+        }
+    }
+
+    fn reset_one(&mut self, u0: f32) {
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&self.params(u0, 0.0, false)));
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
@@ -1720,6 +1930,11 @@ impl Gpu3D {
     /// `n` pas ; la vitesse d'entrée suit `ramp`. Le champ macroscopique est
     /// écrit au dernier pas (pour les coupes).
     pub fn run(&mut self, n: usize, ramp: &Ramp) {
+        if let Some(mut r) = self.refine.take() {
+            crate::refine3d::run(self, &mut r, n, ramp);
+            self.refine = Some(r);
+            return;
+        }
         // Soumissions courtes (≈ 3·10⁷ mises à jour de maille) : sous Windows, une
         // soumission de plus de 2 s fait réinitialiser le pilote, ce qui peut
         // arriver sur un GPU lent ou bridé en température.
@@ -1781,7 +1996,34 @@ impl Gpu3D {
 
     /// Force moyenne par pas depuis l'appel précédent (lecture synchrone, attend
     /// la fin du calcul), puis remise à zéro de l'accumulateur.
+    /// Efforts moyens par pas ; avec des grilles fines, ceux de la plus fine,
+    /// ramenés aux unités de la veine (surfaces 4ᴷ fois plus grandes).
     pub fn take_forces(&mut self) -> Force3 {
+        if let Some(mut r) = self.refine.take() {
+            let k = r.levels.len() as i32;
+            let _ = self.take_forces_one();
+            let f = r.levels.last_mut().unwrap().take_forces_one();
+            self.lost |= r.levels.iter().any(|g| g.lost);
+            self.refine = Some(r);
+            let s = 4f64.powi(k);
+            return Force3 {
+                fx: f.fx / s,
+                fy: f.fy / s,
+                fz: f.fz / s,
+                steps: f.steps >> k,
+            };
+        }
+        self.take_forces_one()
+    }
+
+    /// Grilles fines : (dimensions, mailles pariétales) de la plus fine, et facteur.
+    pub fn finest(&self) -> Option<([usize; 3], usize, usize)> {
+        let r = self.refine.as_ref()?;
+        let g = r.levels.last()?;
+        Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.levels.len()))
+    }
+
+    fn take_forces_one(&mut self) -> Force3 {
         let steps = std::mem::take(&mut self.force_steps);
         if steps == 0 || self.wall_count == 0 {
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
