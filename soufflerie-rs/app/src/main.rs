@@ -735,6 +735,11 @@ fn cmd_run3d(a: &Args) {
             l: l as f64,
             background: [0.9, 0.92, 0.93],
             body: [0.2, 0.25, 0.3],
+            body_view: match a.get("maquette", "lisse".to_string()).as_str() {
+                "grille" => lbm::gpu3d::BodyView::Grid,
+                "mailles" => lbm::gpu3d::BodyView::Cells,
+                _ => lbm::gpu3d::BodyView::Smooth,
+            },
         });
         let mut img = format!("P6 {w} {h} 255\n").into_bytes();
         for px in rgba.chunks_exact(4) {

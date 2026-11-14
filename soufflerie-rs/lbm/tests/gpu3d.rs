@@ -54,6 +54,7 @@ fn sphere_re100() {
         l: l as f64,
         background: [1.0, 1.0, 1.0],
         body: [0.2, 0.25, 0.3],
+        body_view: Default::default(),
     });
     let px = |x: usize, y: usize| &img[4 * (x + w * y)..4 * (x + w * y) + 3];
     println!("pixel central {:?}, coin {:?}", px(w / 2, h / 2), px(2, 2));

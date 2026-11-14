@@ -18,7 +18,7 @@ use lbm::bodies3d::{Body3D, Shape3D};
 use lbm::fluid::Fluid;
 use lbm::stl::{Axis, MeshInfo, MeshSetup, Tri, Unit};
 use lbm::cpu::Ramp;
-use lbm::gpu3d::{bytes_per_cell, Camera, Gpu3D, RenderOptions, Slice, SliceField};
+use lbm::gpu3d::{bytes_per_cell, BodyView, Camera, Gpu3D, RenderOptions, Slice, SliceField};
 use lbm::stats::{analyze, Analysis};
 
 /// Reynolds proposés ; Spalart–Allmaras et loi de paroi dès 5·10⁴.
@@ -107,6 +107,8 @@ struct Settings {
     el: f64,
     dist: f64,
     iso: bool,
+    /// Maquette : lisse, avec la grille, ou mailles du calcul.
+    body_view: BodyView,
     /// Seuil des isosurfaces, en (U/L)².
     iso_level: f64,
     /// Taille de l'image 3D (pixels).
@@ -185,6 +187,7 @@ impl Tab3D {
             el: 24.0,
             dist: 6.0,
             iso: true,
+            body_view: BodyView::Smooth,
             iso_level: 0.4,
             img: (800, 450),
         };
@@ -407,6 +410,16 @@ impl Tab3D {
             ui.selectable_value(&mut s.view3d, false, "Coupe à plat");
         });
         if s.view3d {
+            ui.horizontal(|ui| {
+                ui.label("Maquette");
+                ui.selectable_value(&mut s.body_view, BodyView::Smooth, "lisse")
+                    .on_hover_text("Surface exacte de la forme");
+                ui.selectable_value(&mut s.body_view, BodyView::Grid, "grille")
+                    .on_hover_text("Surface exacte, grille du calcul tracée dessus : taille des mailles");
+                ui.selectable_value(&mut s.body_view, BodyView::Cells, "mailles du calcul").on_hover_text(
+                    "Ce que voit le calcul : mailles solides (cubes) et, en orange, mailles qui ne portent                      que des liens de paroi mince (parties plus fines qu'une maille)",
+                );
+            });
             ui.horizontal(|ui| {
                 ui.checkbox(&mut s.iso, "Isosurfaces du critère Q");
             });
@@ -1078,6 +1091,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 l: st.l as f64,
                 background: rgbf(theme::canvas()),
                 body: rgbf(theme::body()),
+                body_view: st.body_view,
             });
             (None, Some(Arc::new((st.img.0, st.img.1, rgba))), Some(cam))
         } else {

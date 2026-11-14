@@ -292,6 +292,12 @@ sans aucune maille solide, donne la traînée d'une plaque de 2 mailles
 l'affichage, les maillages sont épaissis de 0,6 pas de la grille de distance
 pour que ces parois restent visibles.
 
+**Voir le maillage.** Vue 3D, « Maquette » : *lisse* (forme exacte),
+*grille* (forme exacte, grille du calcul tracée dessus), ou *mailles du
+calcul* (ce que voit le solveur : mailles solides en cubes, et en orange les
+mailles qui ne portent que des liens de paroi mince). En ligne de commande :
+`--maquette lisse|grille|mailles` avec `--image`.
+
 **Maillages imparfaits et gros fichiers.** À la lecture, les sommets sont
 soudés (à 10⁻⁷ de la diagonale près), les triangles dégénérés et en double
 retirés, et les arêtes comptées : trous (arêtes ouvertes), arêtes partagées

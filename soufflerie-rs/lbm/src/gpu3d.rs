@@ -684,6 +684,10 @@ struct R {
 // Distance signée à la maquette (affichage) : origine et pas dans sdf0, taille
 // dans sdfn.xyz, épaississement affiché dans sdfn.w.
 @group(0) @binding(5) var<storage, read> sdf: array<f32>;
+// Type de chaque maille du calcul, deux bits : 0 fluide, 1 solide, 2 fluide
+// portant seulement des liens de paroi mince. Mode d'affichage de la
+// maquette dans size.z : 0 lisse, 1 lisse avec la grille, 2 mailles du calcul.
+@group(0) @binding(6) var<storage, read> vox: array<u32>;
 @group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> deriv: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> img: array<u32>;
@@ -711,6 +715,42 @@ fn id(p: vec3<i32>) -> u32 {
   let q = clamp(p, vec3<i32>(0), n - vec3<i32>(1));
   return u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z));
 }
+fn voxKind(c: vec3<i32>) -> u32 {
+  let n = vec3<i32>(V.dims.xyz);
+  if (any(c < vec3<i32>(0)) || any(c >= n)) { return 0u; }
+  let i = u32(c.x) + u32(n.x) * (u32(c.y) + u32(n.y) * u32(c.z));
+  return (vox[i >> 4u] >> ((i & 15u) * 2u)) & 3u;
+}
+
+// Première maille non fluide le long du rayon (traversée d'Amanatides et Woo,
+// mailles centrées sur les entiers) : (t, axe de la face d'entrée, type).
+fn voxHit(o: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32) -> vec3<f32> {
+  let p = o + dir * t0;
+  var c = vec3<i32>(round(p));
+  let st = vec3<i32>(sign(dir));
+  var tmax = vec3<f32>(1e30);
+  var tdel = vec3<f32>(1e30);
+  for (var a = 0; a < 3; a++) {
+    if (abs(dir[a]) > 1e-9) {
+      let b = f32(c[a]) + 0.5 * f32(st[a]);
+      tmax[a] = (b - o[a]) / dir[a];
+      tdel[a] = 1.0 / abs(dir[a]);
+    }
+  }
+  var t = t0;
+  var axis = 0;
+  for (var k = 0; k < 6000; k++) {
+    let kd = voxKind(c);
+    if (kd != 0u) { return vec3<f32>(t, f32(axis), f32(kd)); }
+    if (tmax.x <= tmax.y && tmax.x <= tmax.z) { axis = 0; } else if (tmax.y <= tmax.z) { axis = 1; } else { axis = 2; }
+    t = tmax[axis];
+    if (t > t1) { break; }
+    c[axis] += st[axis];
+    tmax[axis] += tdel[axis];
+  }
+  return vec3<f32>(1e30, 0.0, 0.0);
+}
+
 fn sd(i: vec3<i32>) -> f32 {
   let n = vec3<i32>(V.sdfn.xyz);
   let q = clamp(i, vec3<i32>(0), n - vec3<i32>(1));
@@ -788,11 +828,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var tip = 0.0;
     let level = V.iso.x;
     let isoOn = V.iso.y > 0.5;
+    let mode = u32(V.size.z);
+    var vh = vec3<f32>(1e30, 0.0, 0.0);
+    if (mode == 2u) {
+      vh = voxHit(o, dir, t0, tend);
+      tb = vh.x;
+    }
     for (var k = 0; k < 4000; k++) {
-      if (t > tend) { break; }
+      if (t > min(tend, tb)) { break; }
       let p = o + dir * t;
       if (isoOn && ti > 1e29 && Q(p) > level) { ti = t; tip = tp; }
-      let ds = S(p);
+      let ds = select(S(p), 1e30, mode == 2u);
       if (ds < V.sdfn.w) {
         // Surface exacte de la forme : bisection sur la distance signée.
         var a = tp;
@@ -808,7 +854,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Pas réduit près de la maquette : le bord de fuite est plus mince qu'une maille.
       t += clamp(ds - V.sdfn.w, 0.05, stp);
     }
-    if (tb < 1e29) {
+    if (tb < 1e29 && mode == 2u) {
+      // Mailles du calcul : cubes ombrés par face, arêtes marquées ; liens de
+      // paroi mince en orange.
+      let p = o + dir * tb;
+      let a = i32(vh.y);
+      var n = vec3<f32>(0.0);
+      n[a] = -sign(dir[a]);
+      let lam = abs(dot(n, -dir));
+      let key = max(0.0, dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.85))));
+      var base = V.body.rgb;
+      if (vh.z > 1.5) { base = vec3<f32>(0.93, 0.55, 0.18); }
+      col = base * (0.35 + 0.45 * lam + 0.25 * key);
+      let fr = abs(fract(p + vec3<f32>(0.5)) - vec3<f32>(0.5));
+      var e = 1.0;
+      for (var b = 0; b < 3; b++) {
+        if (b != a) { e = min(e, 0.5 - fr[b]); }
+      }
+      if (e < 0.05) { col = mix(col, V.bg.rgb, 0.55); }
+    } else if (tb < 1e29) {
       let p = o + dir * tb;
       let e = 0.5 * V.sdf0.w;
       let g = vec3<f32>(
@@ -819,9 +883,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let lam = abs(dot(n, -dir));
       let key = max(0.0, dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.85))));
       col = V.body.rgb * (0.35 + 0.45 * lam + 0.25 * key);
+      if (mode == 1u) {
+        // Grille du calcul tracée sur la surface : plans x, y, z = k + ½.
+        let fr = abs(fract(p + vec3<f32>(0.5)) - vec3<f32>(0.5));
+        let e = 0.5 - max(max(fr.x, fr.y), fr.z);
+        if (e < 0.04) { col = mix(col, V.bg.rgb, 0.5); }
+      }
     } else if (ts < 1e29) {
       let p = o + dir * ts;
-      if (S(p) < V.sdfn.w) {
+      let inBody = select(S(p) < V.sdfn.w, voxKind(vec3<i32>(round(p))) != 0u, mode == 2u);
+      if (inBody) {
         col = V.body.rgb * 0.6;
       } else if (V.plane.z < 0.5) {
         col = seqMap(length(Mv(p)) / (1.6 * V.plane.w));
@@ -940,6 +1011,21 @@ pub struct RenderOptions {
     pub l: f64,
     pub background: [f32; 3],
     pub body: [f32; 3],
+    /// Maquette : forme lisse, avec la grille, ou mailles du calcul.
+    pub body_view: BodyView,
+}
+
+/// Représentation de la maquette dans la vue 3D.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BodyView {
+    /// Surface exacte de la forme.
+    #[default]
+    Smooth = 0,
+    /// Surface exacte, grille du calcul tracée dessus.
+    Grid = 1,
+    /// Ce que voit le calcul : mailles solides, et mailles à liens de paroi mince.
+    Cells = 2,
 }
 
 #[repr(C)]
@@ -1036,6 +1122,8 @@ pub struct Gpu3D {
     /// Distance signée à la maquette (affichage) et sa grille (origine, pas ; taille).
     sdf: wgpu::Buffer,
     sdf_geom: ([f32; 4], [f32; 4]),
+    /// Type des mailles pour l'affichage (2 bits par maille).
+    vox: wgpu::Buffer,
     _qbuf: wgpu::Buffer,
     /// Spalart–Allmaras avec loi de paroi : ν̃ (deux tampons alternés),
     /// distance à la paroi, géométrie pariétale et u_τ.
@@ -1232,6 +1320,8 @@ impl Gpu3D {
         }
         let mut qs: Vec<f32> = Vec::new();
         let mut k = 0u32;
+        // Mailles fluides qui ne portent que des liens de paroi mince (affichage).
+        let mut thin: Vec<usize> = Vec::new();
         for z in z0.saturating_sub(1)..=(z1 + 1).min(nz - 1) {
             for y in y0.saturating_sub(1)..=(y1 + 1).min(ny - 1) {
                 for x in (x0 - 1).max(1)..=(x1 + 1).min(nx - 2) {
@@ -1241,6 +1331,7 @@ impl Gpu3D {
                     }
                     let mut row = [0f32; 18];
                     let mut any = false;
+                    let mut beside_solid = false;
                     for i in 1..19 {
                         let [cx, cy, cz] = C3[i];
                         let sx = (x as i32 - cx) as usize;
@@ -1253,6 +1344,7 @@ impl Gpu3D {
                         // (paroi plus mince qu'une maille : aile, dérive…).
                         let hit = body.mesh.as_ref().and_then(|m| m.segment_hit(p, d));
                         let solid = wall[idx(sx, sy, sz)] == SOLID;
+                        beside_solid |= solid;
                         let q = match (hit, solid) {
                             (Some(t), _) => Some((t as f32).clamp(0.02, 1.0)),
                             (None, true) => Some(link_q(body, p, d)),
@@ -1267,6 +1359,9 @@ impl Gpu3D {
                         k += 1;
                         wall[c] = k;
                         qs.extend_from_slice(&row);
+                        if !beside_solid {
+                            thin.push(c);
+                        }
                     }
                 }
             }
@@ -1276,6 +1371,21 @@ impl Gpu3D {
             qs.resize(18, 0.0);
         }
         let solid: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+        // Affichage des mailles du calcul : 2 bits par maille (1 solide, 2 paroi mince).
+        let mut vox = vec![0u32; n.div_ceil(16)];
+        for (c, &s) in solid.iter().enumerate() {
+            if s {
+                vox[c >> 4] |= 1 << ((c & 15) * 2);
+            }
+        }
+        for &c in &thin {
+            vox[c >> 4] |= 2 << ((c & 15) * 2);
+        }
+        let vox_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vox3d"),
+            contents: bytemuck::cast_slice(&vox),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         // Affichage : distance signée tous les L/64 (≥ 0,2 maille, ≤ 0,5).
         let g = body.sdf_grid((body.l as f64 / 64.0).clamp(0.2, 0.5));
         let sdf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1506,6 +1616,7 @@ impl Gpu3D {
             wall: wall_buf,
             sdf,
             sdf_geom,
+            vox: vox_buf,
             _qbuf: qbuf,
             sa,
             nu,
@@ -1810,7 +1921,7 @@ impl Gpu3D {
                 0.8,
                 4.0,
             ],
-            size: [w as f32, h as f32, 0.0, 0.0],
+            size: [w as f32, h as f32, o.body_view as u8 as f32, 0.0],
             sdf0: self.sdf_geom.0,
             sdfn: self.sdf_geom.1,
         };
@@ -1856,6 +1967,7 @@ impl Gpu3D {
                 buf_entry(3, deriv, None),
                 buf_entry(4, img, None),
                 buf_entry(5, &self.sdf, None),
+                buf_entry(6, &self.vox, None),
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
