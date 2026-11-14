@@ -217,3 +217,100 @@ impl Body3D {
         }
     }
 }
+
+/// Distance signée à la maquette (mailles, négative dedans), échantillonnée
+/// tous les `h` mailles : sert seulement à l'affichage d'une surface lisse.
+pub struct SdfGrid {
+    pub origin: [f64; 3],
+    pub h: f64,
+    pub dims: [usize; 3],
+    pub d: Vec<f32>,
+}
+
+/// Distance d'un point à une ligne polygonale fermée.
+fn poly_dist(p: [f64; 2], poly: &[[f64; 2]]) -> f64 {
+    let mut best = f64::INFINITY;
+    for k in 0..poly.len() {
+        let a = poly[k];
+        let b = poly[(k + 1) % poly.len()];
+        let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+        let (wx, wy) = (p[0] - a[0], p[1] - a[1]);
+        let t = ((wx * ex + wy * ey) / (ex * ex + ey * ey).max(1e-30)).clamp(0.0, 1.0);
+        best = best.min((wx - t * ex).hypot(wy - t * ey));
+    }
+    best
+}
+
+impl Body3D {
+    /// Distance signée, `h` mailles entre échantillons, autour de la maquette.
+    pub fn sdf_grid(&self, h: f64) -> SdfGrid {
+        let b = self.bounds;
+        let m = 2.0;
+        let lo = [(b.x0 - m).max(0.0), (b.y0 - m).max(0.0), (b.z0 - m).max(0.0)];
+        let hi = [
+            (b.x1 + m).min(self.nx as f64 - 1.0),
+            (b.y1 + m).min(self.ny as f64 - 1.0),
+            (b.z1 + m).min(self.nz as f64 - 1.0),
+        ];
+        let dims = [0, 1, 2].map(|a| ((hi[a] - lo[a]) / h).ceil() as usize + 1);
+        let [cx, cy, cz] = self.center;
+        let lf = self.l as f64;
+        let r = lf / 2.0;
+        let (sa, ca) = self.alpha.sin_cos();
+        // Profil de l'aile dans son repère (mailles, origine au quart de corde).
+        let foil: Vec<[f64; 2]> = if self.shape == Shape3D::Wing {
+            let n = 160;
+            let xs: Vec<f64> = (0..=n)
+                .map(|k| 0.5 * (1.0 - (k as f64 / n as f64 * std::f64::consts::PI).cos()))
+                .collect();
+            let mut v: Vec<[f64; 2]> = xs.iter().map(|&x| [(x - 0.25) * lf, naca00(0.12, x) * lf]).collect();
+            v.extend(xs.iter().rev().skip(1).map(|&x| [(x - 0.25) * lf, -naca00(0.12, x) * lf]));
+            v
+        } else {
+            Vec::new()
+        };
+        // Section (x, z) de l'aile, indépendante de y : calculée une fois.
+        let section: Vec<f64> = if self.shape == Shape3D::Wing {
+            let mut s = vec![0.0; dims[0] * dims[2]];
+            for k in 0..dims[2] {
+                for i in 0..dims[0] {
+                    let (xx, zz) = (lo[0] + i as f64 * h - cx, lo[2] + k as f64 * h - cz);
+                    let xb = xx * ca - zz * sa;
+                    let zb = xx * sa + zz * ca;
+                    let xc = xb / lf + 0.25;
+                    let inside = (0.0..=1.0).contains(&xc) && (zb / lf).abs() <= naca00(0.12, xc);
+                    let d = poly_dist([xb, zb], &foil);
+                    s[k * dims[0] + i] = if inside { -d } else { d };
+                }
+            }
+            s
+        } else {
+            Vec::new()
+        };
+        let mut d = vec![0f32; dims[0] * dims[1] * dims[2]];
+        for k in 0..dims[2] {
+            for j in 0..dims[1] {
+                for i in 0..dims[0] {
+                    let (x, y, z) = (lo[0] + i as f64 * h, lo[1] + j as f64 * h, lo[2] + k as f64 * h);
+                    let v = match self.shape {
+                        Shape3D::Sphere => ((x - cx).powi(2) + (y - cy).powi(2) + (z - cz).powi(2)).sqrt() - r,
+                        Shape3D::Cylinder => (x - cx).hypot(z - cz) - r,
+                        Shape3D::Cube => {
+                            let (xx, zz) = (x - cx, z - cz);
+                            let q = [(xx * ca - zz * sa).abs() - r, (y - cy).abs() - r, (xx * sa + zz * ca).abs() - r];
+                            let out = q.iter().map(|v| v.max(0.0).powi(2)).sum::<f64>().sqrt();
+                            out + q[0].max(q[1]).max(q[2]).min(0.0)
+                        }
+                        Shape3D::Wing => {
+                            // Extrusion de la section sur l'envergure.
+                            let w = [section[k * dims[0] + i], (y - cy).abs() - self.half];
+                            w[0].max(w[1]).min(0.0) + w[0].max(0.0).hypot(w[1].max(0.0))
+                        }
+                    };
+                    d[i + dims[0] * (j + dims[1] * k)] = v as f32;
+                }
+            }
+        }
+        SdfGrid { origin: lo, h, dims, d }
+    }
+}

@@ -509,10 +509,13 @@ struct R {
   plane: vec4<f32>,
   iso: vec4<f32>,
   size: vec4<f32>,
+  sdf0: vec4<f32>,
+  sdfn: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> V: R;
+// Distance signée à la maquette (affichage) : origine et pas dans sdf0, taille dans sdfn.
+@group(0) @binding(5) var<storage, read> sdf: array<f32>;
 @group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> wall: array<u32>;
 @group(0) @binding(3) var<storage, read> deriv: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> img: array<u32>;
 
@@ -539,16 +542,25 @@ fn id(p: vec3<i32>) -> u32 {
   let q = clamp(p, vec3<i32>(0), n - vec3<i32>(1));
   return u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z));
 }
-fn solidI(p: vec3<i32>) -> f32 { return select(0.0, 1.0, wall[id(p)] == 0xffffffffu); }
-
-// Interpolation trilinéaire (centres de maille aux coordonnées entières).
-fn occ(p: vec3<f32>) -> f32 {
-  let b = vec3<i32>(floor(p));
-  let f = p - floor(p);
-  let c00 = mix(solidI(b), solidI(b + vec3<i32>(1, 0, 0)), f.x);
-  let c10 = mix(solidI(b + vec3<i32>(0, 1, 0)), solidI(b + vec3<i32>(1, 1, 0)), f.x);
-  let c01 = mix(solidI(b + vec3<i32>(0, 0, 1)), solidI(b + vec3<i32>(1, 0, 1)), f.x);
-  let c11 = mix(solidI(b + vec3<i32>(0, 1, 1)), solidI(b + vec3<i32>(1, 1, 1)), f.x);
+fn sd(i: vec3<i32>) -> f32 {
+  let n = vec3<i32>(V.sdfn.xyz);
+  let q = clamp(i, vec3<i32>(0), n - vec3<i32>(1));
+  return sdf[u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z))];
+}
+// Distance signée (mailles) ; hors de la grille, distance à sa boîte.
+fn S(p: vec3<f32>) -> f32 {
+  let g = (p - V.sdf0.xyz) / V.sdf0.w;
+  let n = V.sdfn.xyz - vec3<f32>(1.0);
+  let outside = max(max(-g, g - n), vec3<f32>(0.0));
+  if (any(outside > vec3<f32>(0.0))) {
+    return length(outside) * V.sdf0.w + 1.0;
+  }
+  let b = vec3<i32>(floor(g));
+  let f = g - floor(g);
+  let c00 = mix(sd(b), sd(b + vec3<i32>(1, 0, 0)), f.x);
+  let c10 = mix(sd(b + vec3<i32>(0, 1, 0)), sd(b + vec3<i32>(1, 1, 0)), f.x);
+  let c01 = mix(sd(b + vec3<i32>(0, 0, 1)), sd(b + vec3<i32>(1, 0, 1)), f.x);
+  let c11 = mix(sd(b + vec3<i32>(0, 1, 1)), sd(b + vec3<i32>(1, 1, 1)), f.x);
   return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
 }
 fn D(p: vec3<f32>) -> vec4<f32> {
@@ -611,34 +623,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (t > tend) { break; }
       let p = o + dir * t;
       if (isoOn && ti > 1e29 && Q(p) > level) { ti = t; tip = tp; }
-      if (solidI(vec3<i32>(round(p))) > 0.5) {
-        // Surface lissée : bisection sur l'occupation trilinéaire.
+      let ds = S(p);
+      if (ds < 0.0) {
+        // Surface exacte de la forme : bisection sur la distance signée.
         var a = tp;
         var b = t;
-        for (var j = 0; j < 6; j++) {
+        for (var j = 0; j < 10; j++) {
           let m = 0.5 * (a + b);
-          if (occ(o + dir * m) > 0.5) { b = m; } else { a = m; }
+          if (S(o + dir * m) < 0.0) { b = m; } else { a = m; }
         }
         tb = b;
         break;
       }
       tp = t;
-      t += stp;
+      // Pas réduit près de la maquette : le bord de fuite est plus mince qu'une maille.
+      t += clamp(ds, 0.05, stp);
     }
     if (tb < 1e29) {
       let p = o + dir * tb;
-      let e = 1.0;
+      let e = 0.5 * V.sdf0.w;
       let g = vec3<f32>(
-        occ(p + vec3<f32>(e, 0.0, 0.0)) - occ(p - vec3<f32>(e, 0.0, 0.0)),
-        occ(p + vec3<f32>(0.0, e, 0.0)) - occ(p - vec3<f32>(0.0, e, 0.0)),
-        occ(p + vec3<f32>(0.0, 0.0, e)) - occ(p - vec3<f32>(0.0, 0.0, e)));
-      let n = -normalize(g + vec3<f32>(1e-9));
+        S(p + vec3<f32>(e, 0.0, 0.0)) - S(p - vec3<f32>(e, 0.0, 0.0)),
+        S(p + vec3<f32>(0.0, e, 0.0)) - S(p - vec3<f32>(0.0, e, 0.0)),
+        S(p + vec3<f32>(0.0, 0.0, e)) - S(p - vec3<f32>(0.0, 0.0, e)));
+      let n = normalize(g + vec3<f32>(1e-9));
       let lam = abs(dot(n, -dir));
       let key = max(0.0, dot(n, normalize(vec3<f32>(-0.4, -0.3, 0.85))));
       col = V.body.rgb * (0.35 + 0.45 * lam + 0.25 * key);
     } else if (ts < 1e29) {
       let p = o + dir * ts;
-      if (solidI(vec3<i32>(round(p))) > 0.5) {
+      if (S(p) < 0.0) {
         col = V.body.rgb * 0.6;
       } else if (V.plane.z < 0.5) {
         col = seqMap(length(Mv(p)) / (1.6 * V.plane.w));
@@ -686,6 +700,8 @@ struct RenderUniform {
     plane: [f32; 4],
     iso: [f32; 4],
     size: [f32; 4],
+    sdf0: [f32; 4],
+    sdfn: [f32; 4],
 }
 
 /// Caméra orbitale autour d'un point (mailles) : azimut et élévation en
@@ -845,6 +861,9 @@ pub struct Gpu3D {
     cs: f64,
     _pops: [[wgpu::Buffer; 2]; 2],
     wall: wgpu::Buffer,
+    /// Distance signée à la maquette (affichage) et sa grille (origine, pas ; taille).
+    sdf: wgpu::Buffer,
+    sdf_geom: ([f32; 4], [f32; 4]),
     _qbuf: wgpu::Buffer,
     force: wgpu::Buffer,
     force_read: wgpu::Buffer,
@@ -1060,6 +1079,17 @@ impl Gpu3D {
             qs.resize(18, 0.0);
         }
         let solid: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+        // Affichage : distance signée tous les L/64 (≥ 0,2 maille, ≤ 0,5).
+        let g = body.sdf_grid((body.l as f64 / 64.0).clamp(0.2, 0.5));
+        let sdf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sdf3d"),
+            contents: bytemuck::cast_slice(&g.d),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let sdf_geom = (
+            [g.origin[0] as f32, g.origin[1] as f32, g.origin[2] as f32, g.h as f32],
+            [g.dims[0] as f32, g.dims[1] as f32, g.dims[2] as f32, 0.0],
+        );
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),
             contents: bytemuck::cast_slice(&wall),
@@ -1193,6 +1223,8 @@ impl Gpu3D {
             cs: 0.15,
             _pops: pops,
             wall: wall_buf,
+            sdf,
+            sdf_geom,
             _qbuf: qbuf,
             force,
             force_read,
@@ -1473,6 +1505,8 @@ impl Gpu3D {
                 4.0,
             ],
             size: [w as f32, h as f32, 0.0, 0.0],
+            sdf0: self.sdf_geom.0,
+            sdfn: self.sdf_geom.1,
         };
         let rbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("render_params"),
@@ -1513,9 +1547,9 @@ impl Gpu3D {
             entries: &[
                 buf_entry(0, &rbuf, None),
                 buf_entry(1, &self.macro_buf, None),
-                buf_entry(2, &self.wall, None),
                 buf_entry(3, deriv, None),
                 buf_entry(4, img, None),
+                buf_entry(5, &self.sdf, None),
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
