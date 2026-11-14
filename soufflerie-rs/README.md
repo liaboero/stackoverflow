@@ -101,6 +101,29 @@ valeur de traînée en écoulement attaché. À Re = 10⁶, la traînée LBM d'u
 NACA 0012 à 4° vaut 0,006 à L = 32 et 0,020 à L = 48 (0,008 attendu) : elle
 dépend de la finesse du bord d'attaque, pas d'un défaut de convergence.
 
+**Traînée retenue.** Elle ne converge pas non plus en affinant la grille
+(NACA 2412, Re = 10⁶, α = 4°, panneaux : 0,0078) :
+
+| L (mailles par corde) | 32 | 48 | 64 | 96 |
+| --- | --- | --- | --- | --- |
+| Cx LBM | 0,022 | 0,018 | 0,021 | 0,016 |
+
+Le bilan de quantité de mouvement sur un volume de contrôle donne les mêmes
+valeurs que l'échange aux parois : c'est l'écoulement calculé lui-même qui
+porte cette traînée. Le bord d'attaque tient dans une maille, la loi de paroi
+impose le frottement, et quelques dixièmes de degré d'erreur sur la direction
+de la résultante basculent de la portance (Cz ≈ 1) dans une traînée de
+l'ordre de 0,01. Pour un profil attaché sous loi de paroi, l'interface
+affiche donc le Cx LBM comme non fiable et retient la traînée « panneaux +
+couche limite » (lecture, Cz/Cx, polaire Cz(Cx), colonne `Cx_retenu` du
+CSV). Dès que les panneaux prédisent un décollement, la traînée de pression
+domine et le Cx LBM est de nouveau retenu.
+
+Le moteur GPU 2D choisit désormais Vulkan (ou Metal) avant DirectX 12, comme
+la soufflerie 3D : sous DirectX 12 (pilote NVIDIA), il divergeait dès le
+premier pas, ce qui touchait l'interface, dont la fenêtre est en DirectX 12.
+`SOUFFLERIE_GPU2D=dx12|vulkan|gl` impose un pilote.
+
 **Blocage de la veine.** La veine 2D ne fait que 12 longueurs de haut :
 l'écoulement accélère autour de la maquette et de son sillage, ce qui
 surestimait la traînée d'un cylindre de 14 % à Re = 20 et de 8 % à Re = 100,

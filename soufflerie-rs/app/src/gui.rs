@@ -482,9 +482,26 @@ impl App {
                         String::new()
                     }
                 };
-                ui.colored_label(theme::accent(), "Cx (traînée)");
-                ui.label(format!("{} {}", v(a.cx), amp(a.cx_amp)));
-                ui.end_row();
+                let cx_ok = crate::sweep::cx_reliable(fr);
+                if cx_ok {
+                    ui.colored_label(theme::accent(), "Cx (traînée)");
+                    ui.label(format!("{} {}", v(a.cx), amp(a.cx_amp)));
+                    ui.end_row();
+                } else {
+                    let why = "Profil attaché sous loi de paroi : le bord d'attaque tient dans une maille, \
+                               et quelques dixièmes de degré d'erreur sur la direction de la résultante \
+                               basculent de la portance dans la traînée. La traînée LBM ne converge pas \
+                               en affinant la grille (NACA 2412, Re = 10⁶, 4° : 0,016 à 0,022 de L = 32 à 96, \
+                               pour 0,008 attendu). Traînée retenue : panneaux + couche limite.";
+                    ui.colored_label(theme::warn(), "Cx LBM ⚠").on_hover_text(why);
+                    ui.colored_label(theme::warn(), format!("{} (non fiable)", v(a.cx))).on_hover_text(why);
+                    ui.end_row();
+                    if let Some(r) = &fr.panel {
+                        ui.colored_label(theme::accent(), "Cx retenu");
+                        ui.label(format!("{:.4} (panneaux)", section_coefficients(r).cd));
+                        ui.end_row();
+                    }
+                }
                 ui.colored_label(theme::lift(), "Cz (portance)");
                 ui.label(format!("{} {}", v(a.cz), amp(a.cz_amp)));
                 ui.end_row();
@@ -498,9 +515,13 @@ impl App {
                     "—".into()
                 });
                 ui.end_row();
+                let cx_f = match (&fr.panel, crate::sweep::cx_reliable(fr)) {
+                    (Some(r), false) => section_coefficients(r).cd,
+                    _ => a.cx,
+                };
                 ui.label("Cz/Cx");
-                ui.label(if fr.ready && a.cx.abs() > 1e-6 {
-                    format!("{:.2}", a.cz / a.cx)
+                ui.label(if fr.ready && cx_f.abs() > 1e-6 {
+                    format!("{:.2}", a.cz / cx_f)
                 } else {
                     "—".into()
                 });
@@ -738,7 +759,8 @@ impl App {
             clear = ui.button("Effacer").clicked();
             ui.label(
                 egui::RichText::new(format!(
-                    "{} points · ronds : LBM ; tirets : panneaux + couche limite (profils, Re ≥ 2·10⁴)",
+                    "{} points · ronds : LBM ; tirets : panneaux + couche limite (profils, Re ≥ 2·10⁴) ; \
+                     profil attaché sous loi de paroi : Cx retenu = panneaux, Cx LBM en gris",
                     pts.len()
                 ))
                 .small()
@@ -754,10 +776,13 @@ impl App {
             sel.iter().filter_map(|p| f(p).map(|y| [p.value, y])).collect()
         };
         let cz = xs(&|p| Some(p.cz));
-        let cx = xs(&|p| Some(p.cx));
+        let cx = xs(&|p| p.cx_ok.then_some(p.cx));
+        let cx_bad = xs(&|p| (!p.cx_ok).then_some(p.cx));
         let pcz = xs(&|p| p.panel.map(|q| q.1));
         let pcx = xs(&|p| p.panel.map(|q| q.0));
-        let eiffel: Vec<[f64; 2]> = sel.iter().map(|p| [p.cx, p.cz]).collect();
+        let eiffel: Vec<[f64; 2]> = sel.iter().map(|p| [p.cx_retained(), p.cz]).collect();
+        let eiffel_bad: Vec<[f64; 2]> = sel.iter().filter(|p| !p.cx_ok).map(|p| [p.cx, p.cz]).collect();
+        let grey = Color32::from_gray(140);
         let x_name = if var == SweepVar::Alpha { "α (°)" } else { "ΩR/U" };
         ui.columns(2, |cols| {
             Plot::new("polaire_var")
@@ -769,8 +794,18 @@ impl App {
                     let dash = LineStyle::dashed_dense();
                     p.line(Line::new("Cz", PlotPoints::from(cz.clone())).color(theme::lift()));
                     p.points(Points::new("Cz", PlotPoints::from(cz)).color(theme::lift()).radius(3.0));
-                    p.line(Line::new("Cx", PlotPoints::from(cx.clone())).color(theme::accent()));
-                    p.points(Points::new("Cx", PlotPoints::from(cx)).color(theme::accent()).radius(3.0));
+                    if !cx.is_empty() {
+                        p.line(Line::new("Cx", PlotPoints::from(cx.clone())).color(theme::accent()));
+                        p.points(Points::new("Cx", PlotPoints::from(cx)).color(theme::accent()).radius(3.0));
+                    }
+                    if !cx_bad.is_empty() {
+                        p.points(
+                            Points::new("Cx LBM (non fiable)", PlotPoints::from(cx_bad))
+                                .color(grey)
+                                .filled(false)
+                                .radius(3.0),
+                        );
+                    }
                     if !pcz.is_empty() {
                         p.line(Line::new("Cz panneaux", PlotPoints::from(pcz)).color(theme::lift()).style(dash));
                         p.line(Line::new("Cx panneaux", PlotPoints::from(pcx)).color(theme::accent()).style(dash));
@@ -779,11 +814,21 @@ impl App {
             Plot::new("polaire_eiffel")
                 .height(cols[1].available_height().max(80.0))
                 .allow_scroll(false)
+                .legend(Legend::default())
                 .x_axis_label("Cx")
                 .y_axis_label("Cz")
                 .show(&mut cols[1], |p| {
-                    p.line(Line::new("Cz(Cx)", PlotPoints::from(eiffel.clone())).color(theme::lift()));
-                    p.points(Points::new("Cz(Cx)", PlotPoints::from(eiffel)).color(theme::lift()).radius(3.0));
+                    let name = if eiffel_bad.is_empty() { "Cz(Cx)" } else { "Cz(Cx retenu)" };
+                    p.line(Line::new(name, PlotPoints::from(eiffel.clone())).color(theme::lift()));
+                    p.points(Points::new(name, PlotPoints::from(eiffel)).color(theme::lift()).radius(3.0));
+                    if !eiffel_bad.is_empty() {
+                        p.points(
+                            Points::new("Cx LBM (non fiable)", PlotPoints::from(eiffel_bad))
+                                .color(grey)
+                                .filled(false)
+                                .radius(3.0),
+                        );
+                    }
                 });
         });
         if clear {

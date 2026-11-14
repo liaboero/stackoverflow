@@ -198,12 +198,33 @@ fn storage(read_only: bool, binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 impl GpuSolver {
     pub fn new(cfg: SolverConfig) -> Result<GpuSolver, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .map_err(|e| format!("aucun adaptateur GPU : {e}"))?;
+        // Vulkan ou Metal d'abord : sous DirectX 12 (pilote NVIDIA, GTX 1070),
+        // le calcul diverge dès le premier pas. La variable WGPU_BACKEND, que
+        // le lanceur de l'interface fixe pour la fenêtre, est ignorée ;
+        // SOUFFLERIE_GPU2D=dx12|vulkan|gl en impose un.
+        let forced = std::env::var("SOUFFLERIE_GPU2D").ok().map(|s| wgpu::Backends::from_comma_list(&s));
+        let tries = match forced {
+            Some(b) => vec![b],
+            None => vec![wgpu::Backends::VULKAN | wgpu::Backends::METAL, wgpu::Backends::all()],
+        };
+        let mut found = None;
+        let mut last_err = String::new();
+        for backends in tries {
+            let mut d = wgpu::InstanceDescriptor::new_without_display_handle();
+            d.backends = backends;
+            let instance = wgpu::Instance::new(d);
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })) {
+                Ok(a) => {
+                    found = Some(a);
+                    break;
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        let adapter = found.ok_or_else(|| format!("aucun adaptateur GPU : {last_err}"))?;
         let info = adapter.get_info();
         let adapter_name = format!("{} ({:?})", info.name, info.backend);
         let mut limits = wgpu::Limits::default();

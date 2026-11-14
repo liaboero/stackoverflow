@@ -56,6 +56,32 @@ pub struct PolarPoint {
     pub panel: Option<(f64, f64)>,
     /// Point de balayage ou ajout manuel.
     pub auto: bool,
+    /// Traînée LBM exploitable (faux pour un profil attaché sous loi de paroi).
+    pub cx_ok: bool,
+}
+
+impl PolarPoint {
+    /// Traînée retenue : celle des panneaux quand la traînée LBM n'est pas fiable.
+    pub fn cx_retained(&self) -> f64 {
+        match (self.cx_ok, self.panel) {
+            (false, Some((cd, _))) => cd,
+            _ => self.cx,
+        }
+    }
+}
+
+/// La traînée LBM d'un profil est-elle exploitable ? Non quand la loi de
+/// paroi est active et l'écoulement attaché : le bord d'attaque n'a qu'une
+/// maille ou moins, et une erreur de quelques dixièmes de degré sur la
+/// direction de la résultante bascule de la portance dans la traînée (NACA
+/// 2412, Re = 10⁶, 4° : Cx LBM de 0,016 à 0,022 de L = 32 à 96, sans
+/// converger, pour 0,008 attendu). En écoulement décollé, la traînée de
+/// pression domine et le calcul LBM reste la meilleure estimation.
+pub fn cx_reliable(fr: &Frame) -> bool {
+    match &fr.panel {
+        Some(r) if fr.sa => lbm::panel::section_coefficients(r).kirchhoff,
+        _ => true,
+    }
 }
 
 struct Running {
@@ -236,11 +262,11 @@ impl Sweep {
 
     /// Points en CSV.
     pub fn csv(&self) -> String {
-        let mut s = String::from("maquette,variable,valeur,Re,L,Cx,Cz,Cm,St,Cx_panneaux,Cz_panneaux,mode\n");
+        let mut s = String::from("maquette,variable,valeur,Re,L,Cx,Cz,Cm,St,Cx_panneaux,Cz_panneaux,mode,Cx_retenu\n");
         for p in &self.points {
             let opt = |v: Option<f64>, d: usize| v.map(|x| format!("{x:.d$}")).unwrap_or_default();
             s += &format!(
-                "{},{},{},{},{},{:.5},{:.5},{:.5},{},{},{},{}\n",
+                "{},{},{},{},{},{:.5},{:.5},{:.5},{},{},{},{},{:.5}\n",
                 p.label,
                 match p.var {
                     SweepVar::Alpha => "alpha_deg",
@@ -255,7 +281,8 @@ impl Sweep {
                 opt(p.st, 4),
                 opt(p.panel.map(|q| q.0), 5),
                 opt(p.panel.map(|q| q.1), 4),
-                if p.auto { "polaire" } else { "manuel" }
+                if p.auto { "polaire" } else { "manuel" },
+                p.cx_retained()
             );
         }
         s
@@ -279,6 +306,7 @@ fn point(fr: &Frame, a: &Analysis, var: SweepVar, value: f64, re: f64, l: usize,
         st: (a.periodic && a.st.is_finite()).then_some(a.st),
         panel,
         auto,
+        cx_ok: cx_reliable(fr),
     }
 }
 
