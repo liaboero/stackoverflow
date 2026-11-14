@@ -538,6 +538,51 @@ impl MeshBody {
         2 * votes > self.rays.len()
     }
 
+    /// Première traversée de la surface par le segment p → p + d : fraction
+    /// t ∈ ]0, 1] (Möller et Trumbore), ou None.
+    pub fn segment_hit(&self, p: [f64; 3], d: [f64; 3]) -> Option<f64> {
+        let q = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+        let lo = [0, 1, 2].map(|a| p[a].min(q[a]));
+        let hi = [0, 1, 2].map(|a| p[a].max(q[a]));
+        if (0..3).any(|a| hi[a] < self.lo[a] || lo[a] > self.hi[a]) {
+            return None;
+        }
+        let r = |a: usize, v: f64| (((v - self.lo[a]) / self.cell).floor().max(0.0) as usize).min(self.gdim[a] - 1);
+        let mut best: Option<f64> = None;
+        for gz in r(2, lo[2])..=r(2, hi[2]) {
+            for gy in r(1, lo[1])..=r(1, hi[1]) {
+                for gx in r(0, lo[0])..=r(0, hi[0]) {
+                    for &k in &self.grid[gx + self.gdim[0] * (gy + self.gdim[1] * gz)] {
+                        let [a, b, c] = self.tris[k as usize];
+                        let e1 = sub(b, a);
+                        let e2 = sub(c, a);
+                        let h = cr_of(d, e2);
+                        let det = dot(e1, h);
+                        if det.abs() < 1e-14 {
+                            continue;
+                        }
+                        let inv = 1.0 / det;
+                        let s = sub(p, a);
+                        let u = inv * dot(s, h);
+                        if !(0.0..=1.0).contains(&u) {
+                            continue;
+                        }
+                        let qv = cr_of(s, e1);
+                        let v = inv * dot(d, qv);
+                        if v < 0.0 || u + v > 1.0 {
+                            continue;
+                        }
+                        let t = inv * dot(e2, qv);
+                        if t > 1e-9 && t <= 1.0 && best.is_none_or(|b| t < b) {
+                            best = Some(t);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Distance à la surface, plafonnée à `cap` mailles.
     pub fn distance(&self, p: [f64; 3], cap: f64) -> f64 {
         let mut best = cap * cap;

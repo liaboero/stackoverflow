@@ -513,7 +513,8 @@ struct R {
   sdfn: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> V: R;
-// Distance signée à la maquette (affichage) : origine et pas dans sdf0, taille dans sdfn.
+// Distance signée à la maquette (affichage) : origine et pas dans sdf0, taille
+// dans sdfn.xyz, épaississement affiché dans sdfn.w.
 @group(0) @binding(5) var<storage, read> sdf: array<f32>;
 @group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> deriv: array<vec4<f32>>;
@@ -624,20 +625,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let p = o + dir * t;
       if (isoOn && ti > 1e29 && Q(p) > level) { ti = t; tip = tp; }
       let ds = S(p);
-      if (ds < 0.0) {
+      if (ds < V.sdfn.w) {
         // Surface exacte de la forme : bisection sur la distance signée.
         var a = tp;
         var b = t;
         for (var j = 0; j < 10; j++) {
           let m = 0.5 * (a + b);
-          if (S(o + dir * m) < 0.0) { b = m; } else { a = m; }
+          if (S(o + dir * m) < V.sdfn.w) { b = m; } else { a = m; }
         }
         tb = b;
         break;
       }
       tp = t;
       // Pas réduit près de la maquette : le bord de fuite est plus mince qu'une maille.
-      t += clamp(ds, 0.05, stp);
+      t += clamp(ds - V.sdfn.w, 0.05, stp);
     }
     if (tb < 1e29) {
       let p = o + dir * tb;
@@ -652,7 +653,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       col = V.body.rgb * (0.35 + 0.45 * lam + 0.25 * key);
     } else if (ts < 1e29) {
       let p = o + dir * ts;
-      if (S(p) < 0.0) {
+      if (S(p) < V.sdfn.w) {
         col = V.body.rgb * 0.6;
       } else if (V.plane.z < 0.5) {
         col = seqMap(length(Mv(p)) / (1.6 * V.plane.w));
@@ -1057,12 +1058,20 @@ impl Gpu3D {
                         let sx = (x as i32 - cx) as usize;
                         let sy = ((y as i32 - cy + ny as i32) % ny as i32) as usize;
                         let sz = ((z as i32 - cz + nz as i32) % nz as i32) as usize;
-                        if wall[idx(sx, sy, sz)] == SOLID {
-                            row[i - 1] = link_q(
-                                body,
-                                [x as f64, y as f64, z as f64],
-                                [-cx as f64, -cy as f64, -cz as f64],
-                            );
+                        let p = [x as f64, y as f64, z as f64];
+                        let d = [-cx as f64, -cy as f64, -cz as f64];
+                        // Maillage : intersection exacte du lien avec les
+                        // triangles, y compris entre deux mailles fluides
+                        // (paroi plus mince qu'une maille : aile, dérive…).
+                        let hit = body.mesh.as_ref().and_then(|m| m.segment_hit(p, d));
+                        let solid = wall[idx(sx, sy, sz)] == SOLID;
+                        let q = match (hit, solid) {
+                            (Some(t), _) => Some((t as f32).clamp(0.02, 1.0)),
+                            (None, true) => Some(link_q(body, p, d)),
+                            (None, false) => None,
+                        };
+                        if let Some(q) = q {
+                            row[i - 1] = q;
                             any = true;
                         }
                     }
@@ -1088,7 +1097,9 @@ impl Gpu3D {
         });
         let sdf_geom = (
             [g.origin[0] as f32, g.origin[1] as f32, g.origin[2] as f32, g.h as f32],
-            [g.dims[0] as f32, g.dims[1] as f32, g.dims[2] as f32, 0.0],
+            // Surface affichée : S < w ; les maillages sont épaissis de 0,6 pas de grille
+            // pour que leurs parois plus minces que la grille restent visibles.
+            [g.dims[0] as f32, g.dims[1] as f32, g.dims[2] as f32, if body.mesh.is_some() { 0.6 * g.h as f32 } else { 0.0 }],
         );
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),

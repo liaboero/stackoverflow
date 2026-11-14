@@ -250,6 +250,17 @@ voxelisation que la sphère analytique et une traînée à 1 % près (test
 `sphere_stl`) ; un même fuseau décrit avec d'autres axes (écoulement selon
 −y, haut selon +x) donne des coefficients identiques.
 
+**Parois minces.** Les liens du réseau qui traversent la surface du maillage
+reçoivent une fraction de Bouzidi par intersection exacte avec les triangles,
+y compris entre deux mailles fluides : une aile, une dérive ou une plaque plus
+minces qu'une maille restent des parois (moins précises qu'à une résolution
+qui les résout). Une plaque carrée face au vent de 0,08 maille d'épaisseur,
+sans aucune maille solide, donne la traînée d'une plaque de 2 mailles
+(Cx = 1,829 contre 1,831, test `paroi_mince_stl`) ; sur un A320 à 8°
+(L = 32 mailles, Re = 2000), la portance passe de Cz = 0,10 à 0,24. À
+l'affichage, les maillages sont épaissis de 0,6 pas de la grille de distance
+pour que ces parois restent visibles.
+
 **Maillages imparfaits et gros fichiers.** À la lecture, les sommets sont
 soudés (à 10⁻⁷ de la diagonale près), les triangles dégénérés et en double
 retirés, et les arêtes comptées : trous (arêtes ouvertes), arêtes partagées

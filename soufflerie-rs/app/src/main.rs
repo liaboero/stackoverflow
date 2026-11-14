@@ -601,13 +601,13 @@ fn cmd_run3d(a: &Args) {
     if let Some(lost) = mesh_info.as_ref().and_then(|i| i.volume_lost(sim.solid_count, l)) {
         if lost > 0.2 {
             eprintln!(
-                "Attention : {:.0} % du volume de la maquette disparaît à cette résolution (parties plus fines qu'une maille) : augmenter --l.",
+                "Note : {:.0} % du volume de la maquette tient dans des parties plus fines qu'une maille, traitées en parois minces (moins précises) : augmenter --l pour les résoudre.",
                 100.0 * lost
             );
         }
     }
-    if sim.solid_count == 0 {
-        eprintln!("Aucune maille solide : maquette trop fine pour la grille.");
+    if sim.wall_count == 0 {
+        eprintln!("Aucun lien de paroi : maquette invisible à cette résolution.");
         std::process::exit(1);
     }
     let spt = l as f64 / U as f64;

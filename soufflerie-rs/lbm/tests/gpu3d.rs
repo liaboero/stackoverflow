@@ -93,3 +93,53 @@ fn sphere_stl() {
     }
     assert!((cx[1] / cx[0] - 1.0).abs() < 0.03, "Cx maillé {} contre analytique {}", cx[1], cx[0]);
 }
+
+/// Pavé [x0, x1] × [y0, y1] × [z0, z1] en triangles.
+fn pave(x: [f64; 2], y: [f64; 2], z: [f64; 2]) -> Vec<lbm::stl::Tri> {
+    let p = |i: usize, j: usize, k: usize| [x[i], y[j], z[k]];
+    let faces = [
+        [p(0, 0, 0), p(0, 1, 0), p(0, 1, 1), p(0, 0, 1)],
+        [p(1, 0, 0), p(1, 0, 1), p(1, 1, 1), p(1, 1, 0)],
+        [p(0, 0, 0), p(0, 0, 1), p(1, 0, 1), p(1, 0, 0)],
+        [p(0, 1, 0), p(1, 1, 0), p(1, 1, 1), p(0, 1, 1)],
+        [p(0, 0, 0), p(1, 0, 0), p(1, 1, 0), p(0, 1, 0)],
+        [p(0, 0, 1), p(0, 1, 1), p(1, 1, 1), p(1, 0, 1)],
+    ];
+    faces.iter().flat_map(|[a, b, c, d]| [[*a, *b, *c], [*a, *c, *d]]).collect()
+}
+
+#[test]
+fn paroi_mince_stl() {
+    // Plaque carrée face au vent, 0,08 maille d'épaisseur (aucune maille
+    // solide) : liens de paroi mince, même traînée qu'une plaque épaisse.
+    use lbm::bodies3d::Body3D;
+    use lbm::gpu3d::Gpu3D;
+    let l = 10;
+    let setup = lbm::stl::MeshSetup {
+        ref_length: Some(100.0),
+        ..Default::default()
+    };
+    let u = 0.1f32;
+    let nu = u as f64 * l as f64 / 50.0;
+    let ramp = lbm::cpu::Ramp { steps: 4 * l as u64 * 10, u };
+    let mut cx = Vec::new();
+    for t in [0.8, 20.0] {
+        let tris = pave([0.0, t], [-50.0, 50.0], [-50.0, 50.0]);
+        let (b, _) = Body3D::from_mesh(&tris, l, &setup).unwrap();
+        let Ok(mut g) = Gpu3D::new(&b, nu, u, true) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        let steps = (25.0 * l as f64 / u as f64) as usize;
+        g.run(steps - 500, &ramp);
+        let _ = g.take_forces();
+        g.run(500, &ramp);
+        let f = g.take_forces();
+        cx.push(f.fx / (0.5 * (u as f64).powi(2) * b.area));
+        println!("épaisseur {t} mm : {} mailles solides, {} pariétales, Cx = {:.4}", g.solid_count, g.wall_count, cx.last().unwrap());
+        if t < 1.0 {
+            assert_eq!(g.solid_count, 0);
+        }
+    }
+    assert!((cx[0] / cx[1] - 1.0).abs() < 0.06, "plaque mince {} contre épaisse {}", cx[0], cx[1]);
+}

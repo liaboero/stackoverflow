@@ -973,11 +973,11 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 Ok((g, b)) => {
                     let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
                     shared.lock().unwrap().frame.warning = match lost {
-                        _ if b.mesh.is_some() && g.solid_count == 0 => {
-                            Some("Aucune maille solide : maquette plus fine que la grille, augmenter la résolution.".into())
+                        _ if b.mesh.is_some() && g.wall_count == 0 => {
+                            Some("Aucun lien de paroi : maquette invisible à cette résolution, l'augmenter.".into())
                         }
                         Some(v) if v > 0.2 => Some(format!(
-                            "{:.0} % du volume de la maquette disparaît à cette résolution (parties plus fines qu'une maille) : augmenter la résolution.",
+                            "{:.0} % du volume tient dans des parties plus fines qu'une maille, traitées en parois minces (moins précises) : augmenter la résolution pour les résoudre.",
                             100.0 * v
                         )),
                         _ => None,
