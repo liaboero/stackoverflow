@@ -143,3 +143,32 @@ fn paroi_mince_stl() {
     }
     assert!((cx[0] / cx[1] - 1.0).abs() < 0.06, "plaque mince {} contre épaisse {}", cx[0], cx[1]);
 }
+
+#[test]
+fn loi_de_paroi_3d() {
+    // Aile NACA 0012 d'allongement 4 à 8°, Re = 10⁶ : sans modèle de paroi, la
+    // sous-maille seule écrase la portance ; Spalart–Allmaras et la loi de
+    // Spalding la ramènent près de la ligne portante (CL ≈ 0,56).
+    use lbm::bodies3d::{Body3D, Shape3D};
+    use lbm::gpu3d::Gpu3D;
+    let l = 12;
+    let u = 0.1f32;
+    let spt = l as f64 / u as f64;
+    let body = Body3D::new(Shape3D::Wing, l, 8.0);
+    let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
+    let mut cz = Vec::new();
+    for sa in [false, true] {
+        let Ok(mut g) = Gpu3D::with_turbulence(&body, u as f64 * l as f64 / 1e6, u, true, sa) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        g.run((20.0 * spt) as usize, &ramp);
+        let _ = g.take_forces();
+        g.run((6.0 * spt) as usize, &ramp);
+        let f = g.take_forces();
+        assert!(g.is_finite(&f));
+        cz.push(f.fz / (0.5 * (u as f64).powi(2) * body.area));
+        println!("SA {sa} : Cz = {:.4}", cz.last().unwrap());
+    }
+    assert!(cz[1] > 2.0 * cz[0] && (0.35..0.75).contains(&cz[1]), "Cz {cz:?}");
+}

@@ -21,7 +21,10 @@ use lbm::cpu::Ramp;
 use lbm::gpu3d::{bytes_per_cell, Camera, Gpu3D, RenderOptions, Slice, SliceField};
 use lbm::stats::{analyze, Analysis};
 
-const RE3: [f64; 9] = [10.0, 20.0, 50.0, 100.0, 200.0, 300.0, 500.0, 1000.0, 2000.0];
+/// Reynolds proposés ; Spalart–Allmaras et loi de paroi dès 5·10⁴.
+const RE3: [f64; 14] = [
+    10.0, 20.0, 50.0, 100.0, 200.0, 300.0, 500.0, 1000.0, 2000.0, 5000.0, 1e4, 1e5, 1e6, 1e7,
+];
 const RES3: [(usize, &str); 5] = [
     (8, "Aperçu"),
     (12, "Rapide"),
@@ -361,7 +364,11 @@ impl Tab3D {
                 let mut k = RE3.iter().position(|&r| r == s.re).unwrap_or(5) as f64;
                 ui.add(egui::Slider::new(&mut k, 0.0..=(RE3.len() - 1) as f64).step_by(1.0).show_value(false));
                 s.re = RE3[k.round() as usize];
-                ui.label(format!("{}", s.re));
+                ui.label(if s.re >= 1e5 { format!("{:.0e}", s.re) } else { format!("{}", s.re) });
+                if s.re >= lbm::tunnel::RE_SA_AUTO {
+                    ui.label(egui::RichText::new("loi de paroi").small().weak())
+                        .on_hover_text("Spalart–Allmaras et loi de Spalding : couche limite turbulente supposée dès l'avant");
+                }
             });
         }
         ui.label("Résolution (mailles par longueur de référence)");
@@ -942,6 +949,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     || b.alpha != st.alpha
                     || b.fp16 != st.fp16
                     || b.reset != st.reset
+                    || (b.re >= lbm::tunnel::RE_SA_AUTO) != (st.re >= lbm::tunnel::RE_SA_AUTO)
                     || (st.shape == Shape3D::Mesh && (b.stl != st.stl || b.setup != st.setup))
             }
         };
@@ -969,7 +977,8 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 (k, _) => Ok(Body3D::new(k, st.l, st.alpha)),
             };
             let nu = U as f64 * st.l as f64 / st.re;
-            match b.and_then(|b| Gpu3D::new(&b, nu, U, st.fp16).map(|g| (g, b))) {
+            let sa = st.re >= lbm::tunnel::RE_SA_AUTO;
+            match b.and_then(|b| Gpu3D::with_turbulence(&b, nu, U, st.fp16, sa).map(|g| (g, b))) {
                 Ok((g, b)) => {
                     let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
                     shared.lock().unwrap().frame.warning = match lost {
@@ -1127,7 +1136,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             fr.status = status.into();
             fr.mlups = perf.2;
             fr.info = format!(
-                "Grille {}×{}×{} ({:.2} M mailles) · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {} · {:.0} M mailles/s",
+                "Grille {}×{}×{} ({:.2} M mailles) · {} mailles pariétales · τ = {:.4} · sous-maille {}{} · {} · {} · {:.0} M mailles/s",
                 g.nx,
                 g.ny,
                 g.nz,
@@ -1135,6 +1144,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 g.wall_count,
                 g.tau0,
                 if g.les { "active" } else { "inactive" },
+                if g.sa { " · Spalart–Allmaras + loi de paroi" } else { "" },
                 if g.fp16 { "demi-précision" } else { "simple précision" },
                 g.adapter_name(),
                 perf.2

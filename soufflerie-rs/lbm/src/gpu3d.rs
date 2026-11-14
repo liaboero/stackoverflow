@@ -14,6 +14,7 @@
 use std::fmt::Write as _;
 use std::sync::mpsc;
 
+use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
 use crate::bodies3d::Body3D;
@@ -89,8 +90,145 @@ struct Params {
   nx: u32, ny: u32, nz: u32, N: u32,
   tau0: f32, tauSponge: f32, spongeStart: u32, uIn: f32,
   accel: f32, c18: f32, writeMacro: u32, les: u32,
-  rows: u32, pad0: u32, pad1: u32, pad2: u32,
+  rows: u32, sa: u32, nu: f32, pad2: u32,
 };
+";
+
+/// Spalart–Allmaras : viscosité turbulente et loi de Spalding (comme en 2D).
+const SA_FNS: &str = "
+const KAPPA = 0.41;
+const CV1_3 = 357.911;
+fn nu_turb(v: f32) -> f32 {
+  if (v <= 0.0) { return 0.0; }
+  let chi = v / P.nu;
+  let c3 = chi * chi * chi;
+  return v * c3 / (c3 + CV1_3);
+}
+// u_τ de la loi de Spalding passant par (y, u_t) (Newton sur u⁺).
+fn spalding_utau(ut: f32, y: f32) -> f32 {
+  if (!(ut > 1e-12)) { return 0.0; }
+  let e_kb = 0.12873490;
+  let rey = y * ut / P.nu;
+  var up = sqrt(rey);
+  if (rey >= 30.0) { up = log(rey) / KAPPA; }
+  for (var k = 0; k < 20; k++) {
+    let ku = KAPPA * up;
+    let e = exp(ku);
+    let yy = up + e_kb * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+    let dy = 1.0 + e_kb * KAPPA * (e - 1.0 - ku - ku * ku / 2.0);
+    let h = up * yy - rey;
+    let next = up - h / (yy + up * dy);
+    up = select(0.5 * up, next, next > 0.0);
+    if (abs(h) < 1e-6 * rey) { break; }
+  }
+  return ut / up;
+}
+";
+
+/// Transport explicite de ν̃ (même schéma que sa.wgsl, en 3D) : advection
+/// décentrée amont, diffusion, production et destruction ; paroi : ν̃ = κ u_τ y.
+const SA3_WGSL: &str = "
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> wall: array<u32>;
+@group(0) @binding(3) var<storage, read> wallGeo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> utau: array<f32>;
+@group(0) @binding(5) var<storage, read> dist: array<f32>;
+@group(0) @binding(6) var<storage, read> nutIn: array<f32>;
+@group(0) @binding(7) var<storage, read_write> nutOut: array<f32>;
+
+const CB1 = 0.1355;
+const CB2 = 0.622;
+const SIGMA = 0.6666667;
+const KAPPA = 0.41;
+const CW2 = 0.3;
+const CW3_6 = 64.0;
+const CV1_3 = 357.911;
+const NU_TILDE_MAX = 0.15;
+
+fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
+  let ny = i32(P.ny);
+  let nz = i32(P.nz);
+  let yy = (yi + ny) % ny;
+  let zz = (zi + nz) % nz;
+  let xx = clamp(xi, 0, i32(P.nx) - 1);
+  return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let idx = gid.x + gid.y * nwg.x * 64u;
+  if (idx >= P.N) { return; }
+  let x = i32(idx % P.nx);
+  let y = i32((idx / P.nx) % P.ny);
+  let z = i32(idx / (P.nx * P.ny));
+  let wk0 = wall[idx];
+  let nu = P.nu;
+  var out: f32;
+  if (wk0 == 0xffffffffu) {
+    out = 0.0;
+  } else if (x == 0) {
+    out = 3.0 * nu;
+  } else if (x == i32(P.nx) - 1) {
+    out = nutIn[idx - 1u];
+  } else if (wk0 != 0u) {
+    // Premier nœud : ν̃ ≈ ν_t = κ u_τ y (zone logarithmique).
+    let k = wk0 - 1u;
+    out = min(NU_TILDE_MAX, KAPPA * utau[k] * max(0.1, wallGeo[k].w));
+  } else {
+    let ixm = cell(x - 1, y, z);
+    let ixp = cell(x + 1, y, z);
+    let iym = cell(x, y - 1, z);
+    let iyp = cell(x, y + 1, z);
+    let izm = cell(x, y, z - 1);
+    let izp = cell(x, y, z + 1);
+    let v = nutIn[idx];
+    let vxm = nutIn[ixm];
+    let vxp = nutIn[ixp];
+    let vym = nutIn[iym];
+    let vyp = nutIn[iyp];
+    let vzm = nutIn[izm];
+    let vzp = nutIn[izp];
+    let u = macroBuf[idx].xyz;
+    var adv = select(u.x * (vxp - v), u.x * (v - vxm), u.x > 0.0);
+    adv += select(u.y * (vyp - v), u.y * (v - vym), u.y > 0.0);
+    adv += select(u.z * (vzp - v), u.z * (v - vzm), u.z > 0.0);
+    var diff = (nu + 0.5 * (v + vxp)) * (vxp - v) - (nu + 0.5 * (v + vxm)) * (v - vxm)
+      + (nu + 0.5 * (v + vyp)) * (vyp - v) - (nu + 0.5 * (v + vym)) * (v - vym)
+      + (nu + 0.5 * (v + vzp)) * (vzp - v) - (nu + 0.5 * (v + vzm)) * (v - vzm);
+    let g = 0.5 * vec3<f32>(vxp - vxm, vyp - vym, vzp - vzm);
+    diff = (diff + CB2 * dot(g, g)) / SIGMA;
+    let uxm = macroBuf[ixm].xyz;
+    let uxp = macroBuf[ixp].xyz;
+    let uym = macroBuf[iym].xyz;
+    let uyp = macroBuf[iyp].xyz;
+    let uzm = macroBuf[izm].xyz;
+    let uzp = macroBuf[izp].xyz;
+    let w = 0.5 * vec3<f32>(
+      (uyp.z - uym.z) - (uzp.y - uzm.y),
+      (uzp.x - uzm.x) - (uxp.z - uxm.z),
+      (uxp.y - uxm.y) - (uyp.x - uym.x));
+    let omega = length(w);
+    let d = max(0.5, dist[idx]);
+    let kd2 = KAPPA * KAPPA * d * d;
+    let chi = v / nu;
+    let c3 = chi * chi * chi;
+    let fv1 = c3 / (c3 + CV1_3);
+    let fv2 = 1.0 - chi / (1.0 + chi * fv1);
+    let s_tilde = max(omega + v / kd2 * fv2, 0.3 * omega);
+    let prod = CB1 * s_tilde * v;
+    var r = 10.0;
+    if (s_tilde > 1e-12) { r = min(10.0, v / (s_tilde * kd2)); }
+    let r2 = r * r;
+    let gg = r + CW2 * (r2 * r2 * r2 - r);
+    let g2 = gg * gg;
+    let fw = gg * pow((1.0 + CW3_6) / (g2 * g2 * g2 + CW3_6), 1.0 / 6.0);
+    let cw1 = CB1 / (KAPPA * KAPPA) + (1.0 + CB2) / SIGMA;
+    let nv = (v + prod + diff - adv) / (1.0 + cw1 * fw * v / (d * d));
+    out = clamp(nv, 0.0, NU_TILDE_MAX);
+  }
+  nutOut[idx] = out;
+}
 ";
 
 fn wgsl_step(fp16: bool) -> String {
@@ -141,16 +279,18 @@ fn wgsl_step(fp16: bool) -> String {
     if (q > 0.0) {{
       let fj = pop({j}u, idx);
       let qo = qbuf[wk * 18u + {jm1}u];
+      // Paroi mobile (glissement de la loi de paroi) : 6 w_i ρ (c_i · u_w).
+      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uw);
       if (q < 0.5 && qo == 0.0) {{
         let nb = cell(x + {cx}, y + {cy}, z + {cz});
-        v = 2.0 * q * fj + (1.0 - 2.0 * q) * pop({j}u, nb);
+        v = 2.0 * q * fj + (1.0 - 2.0 * q) * pop({j}u, nb) + corr;
       }} else if (q < 0.5) {{
-        v = fj;
+        v = fj + corr;
       }} else {{
-        v = (fj + (2.0 * q - 1.0) * pop({i}u, idx)) / (2.0 * q);
+        v = (fj + (2.0 * q - 1.0) * pop({i}u, idx) + corr) / (2.0 * q);
       }}
       let mom = fj + v + {w2};
-      fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom;
+      fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uw * (fj - v);
     }} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
@@ -164,6 +304,10 @@ fn wgsl_step(fp16: bool) -> String {
             im1 = i - 1,
             jm1 = j - 1,
             w2 = f(2.0 * w3(i)),
+            w6 = f(6.0 * w3(i)),
+            ccx = f(cx as f64),
+            ccy = f(cy as f64),
+            ccz = f(cz as f64),
             mcx = f(-cx as f64),
             mcy = f(-cy as f64),
             mcz = f(-cz as f64),
@@ -238,7 +382,12 @@ fn wgsl_step(fp16: bool) -> String {
 @group(0) @binding(6) var<storage, read> qbuf: array<f32>;
 @group(0) @binding(7) var<storage, read_write> force: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> macroBuf: array<vec4<f32>>;
-
+// Spalart–Allmaras : ν̃ par maille ; par maille pariétale, normale et distance
+// du nœud à la paroi (x, y, z, d), et u_τ écrit pour la passe de transport.
+@group(0) @binding(9) var<storage, read> nut: array<f32>;
+@group(0) @binding(10) var<storage, read> wallGeo: array<vec4<f32>>;
+@group(0) @binding(11) var<storage, read_write> utau: array<f32>;
+{sa_fns}
 {load}
 {store}
 
@@ -272,6 +421,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let z = i32(idx / (P.nx * P.ny));
   var g: array<f32, 19>;
   var fsum = vec3<f32>(0.0);
+  // Loi de paroi : glissement tangentiel tiré de la vitesse du pas précédent.
+  var uw = vec3<f32>(0.0);
+  if (P.sa == 1u && hasWall) {{
+    let gw = wallGeo[wk];
+    let u0 = macroBuf[idx].xyz;
+    let tv = u0 - dot(u0, gw.xyz) * gw.xyz;
+    let ut = length(tv);
+    let yw = max(0.1, gw.w);
+    let ut2 = spalding_utau(ut, yw);
+    utau[wk] = ut2;
+    if (ut >= 1e-12) {{
+      let us = max(0.0, ut - ut2 * ut2 * yw / (P.nu + KAPPA * ut2 * yw));
+      uw = tv * (us / ut);
+    }}
+  }}
   g[0] = pop(0u, idx);
 {pull}
   var fv: array<f32, 19>;
@@ -287,6 +451,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let pxz = {pxz} - rho * u.x * u.z;
   let pyz = {pyz} - rho * u.y * u.z;
   var tau = P.tau0;
+  if (P.sa == 1u) {{
+    tau += 3.0 * nu_turb(nut[idx]);
+  }}
   if (u32(x) > P.spongeStart) {{
     let s = f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart));
     tau += (P.tauSponge - P.tau0) * s * s;
@@ -303,11 +470,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (hasWall) {{
     force[wk] += vec4<f32>(fsum, 0.0);
   }}
-  if (P.writeMacro == 1u) {{
+  if (P.writeMacro == 1u || P.sa == 1u) {{
     macroBuf[idx] = vec4<f32>(u, rho);
   }}
 }}
 ",
+        sa_fns = SA_FNS,
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
         jy = sum_expr(|i| C3[i][1]),
@@ -789,7 +957,10 @@ struct Params {
     c18: f32,
     write_macro: u32,
     les: u32,
-    pad: [u32; 4],
+    rows: u32,
+    sa: u32,
+    nu: f32,
+    pad: u32,
 }
 
 #[repr(C)]
@@ -866,6 +1037,18 @@ pub struct Gpu3D {
     sdf: wgpu::Buffer,
     sdf_geom: ([f32; 4], [f32; 4]),
     _qbuf: wgpu::Buffer,
+    /// Spalart–Allmaras avec loi de paroi : ν̃ (deux tampons alternés),
+    /// distance à la paroi, géométrie pariétale et u_τ.
+    pub sa: bool,
+    nu: f64,
+    nut: [wgpu::Buffer; 2],
+    _dist: wgpu::Buffer,
+    _wall_geo: wgpu::Buffer,
+    _utau: wgpu::Buffer,
+    sa_pipe: wgpu::ComputePipeline,
+    sa_bind: Vec<wgpu::BindGroup>,
+    /// ν̃ initial (3ν dans le fluide, 0 dans le corps), pour `reset`.
+    nut0: Vec<f32>,
     force: wgpu::Buffer,
     force_read: wgpu::Buffer,
     params: wgpu::Buffer,
@@ -947,6 +1130,11 @@ fn link_q(body: &Body3D, p: [f64; 3], d: [f64; 3]) -> f32 {
 impl Gpu3D {
     /// Veine de la maquette `body`, viscosité `nu` (réseau), vitesse d'entrée `u_in`.
     pub fn new(body: &Body3D, nu: f64, u_in: f32, fp16: bool) -> Result<Gpu3D, String> {
+        Self::with_turbulence(body, nu, u_in, fp16, false)
+    }
+
+    /// Idem, avec Spalart–Allmaras et loi de paroi si `sa`.
+    pub fn with_turbulence(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: bool) -> Result<Gpu3D, String> {
         // Vulkan ou Metal d'abord : sous DirectX 12, ce gros shader (tableaux
         // locaux indexés) est environ 100 fois plus lent. La variable
         // WGPU_BACKEND, que le lanceur de l'interface fixe pour la fenêtre, est
@@ -994,7 +1182,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(8);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(11);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -1111,6 +1299,50 @@ impl Gpu3D {
             contents: bytemuck::cast_slice(&qs),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        // Spalart–Allmaras : normale et distance des mailles pariétales (dans
+        // l'ordre de leur numéro), distance à la paroi de toutes les mailles.
+        let (geo, dist) = if sa {
+            let mut cells = vec![0usize; wall_count];
+            for (c, &w) in wall.iter().enumerate() {
+                if w != 0 && w != SOLID {
+                    cells[w as usize - 1] = c;
+                }
+            }
+            let geo: Vec<[f32; 4]> = cells
+                .par_iter()
+                .map(|&c| {
+                    let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
+                    let (nrm, d) = body.wall_normal(p);
+                    [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d as f32]
+                })
+                .collect();
+            let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+            (geo, body.wall_distance(&solid_mask))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let init_or = |label: &str, data: &[u8]| {
+            if data.is_empty() {
+                mk(label, 16, st)
+            } else {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: data,
+                    usage: st,
+                })
+            }
+        };
+        let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
+        let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist));
+        let utau_buf = mk("utau3d", (4 * wall_count) as u64, st);
+        let nsa = if sa { 4 * n as u64 } else { 16 };
+        let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
+        let nut0: Vec<f32> = if sa {
+            let inf = crate::sa::nu_tilde_inf(nu);
+            wall.iter().map(|&w| if w == SOLID { 0.0 } else { inf }).collect()
+        } else {
+            Vec::new()
+        };
         let fsize = (16 * wall_count).max(16) as u64;
         let force = mk("force3d", fsize, st);
         let force_read = mk("force3d_read", fsize, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
@@ -1128,6 +1360,22 @@ impl Gpu3D {
                 storage(6, true),
                 storage(7, false),
                 storage(8, false),
+                storage(9, true),
+                storage(10, true),
+                storage(11, false),
+            ],
+        });
+        let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sa3d"),
+            entries: &[
+                uniform(0, true, psize),
+                storage(1, true),
+                storage(2, true),
+                storage(3, true),
+                storage(4, true),
+                storage(5, true),
+                storage(6, true),
+                storage(7, false),
             ],
         });
         let init_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1155,6 +1403,7 @@ impl Gpu3D {
         };
         let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16));
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16));
+        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{SA3_WGSL}"));
         let slice_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("slice"),
             entries: &[
@@ -1197,6 +1446,27 @@ impl Gpu3D {
                         buf_entry(6, &qbuf, None),
                         buf_entry(7, &force, None),
                         buf_entry(8, &macro_buf, None),
+                        buf_entry(9, &nut[s], None),
+                        buf_entry(10, &wall_geo, None),
+                        buf_entry(11, &utau_buf, None),
+                    ],
+                })
+            })
+            .collect();
+        let sa_bind = (0..2)
+            .map(|s| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sa3d"),
+                    layout: &sa_layout,
+                    entries: &[
+                        buf_entry(0, &params, pb),
+                        buf_entry(1, &macro_buf, None),
+                        buf_entry(2, &wall_buf, None),
+                        buf_entry(3, &wall_geo, None),
+                        buf_entry(4, &utau_buf, None),
+                        buf_entry(5, &dist_buf, None),
+                        buf_entry(6, &nut[s], None),
+                        buf_entry(7, &nut[1 - s], None),
                     ],
                 })
             })
@@ -1237,6 +1507,15 @@ impl Gpu3D {
             sdf,
             sdf_geom,
             _qbuf: qbuf,
+            sa,
+            nu,
+            nut,
+            _dist: dist_buf,
+            _wall_geo: wall_geo,
+            _utau: utau_buf,
+            sa_pipe,
+            sa_bind,
+            nut0,
             force,
             force_read,
             params,
@@ -1269,6 +1548,7 @@ impl Gpu3D {
     }
 
     pub fn set_viscosity(&mut self, nu: f64) {
+        self.nu = nu;
         self.tau0 = 0.5 + 3.0 * nu;
         self.tau_sponge = self.tau0.max(0.8);
         // Sous-maille seulement aux Reynolds de maille élevés : sans amortissement
@@ -1294,7 +1574,10 @@ impl Gpu3D {
             c18: (18.0 * self.cs * self.cs) as f32,
             write_macro: write_macro as u32,
             les: self.les as u32,
-            pad: [0; 4],
+            rows: 0,
+            sa: self.sa as u32,
+            nu: self.nu as f32,
+            pad: 0,
         }
     }
 
@@ -1313,6 +1596,11 @@ impl Gpu3D {
         enc.clear_buffer(&self.force, 0, None);
         enc.clear_buffer(&self.macro_buf, 0, None);
         self.queue.submit([enc.finish()]);
+        if self.sa {
+            for b in &self.nut {
+                self.queue.write_buffer(b, 0, bytemuck::cast_slice(&self.nut0));
+            }
+        }
         self.cur = 0;
         self.time = 0;
         self.force_steps = 0;
@@ -1341,8 +1629,15 @@ impl Gpu3D {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&self.step_pipe);
                 for s in 0..k {
-                    pass.set_bind_group(0, &self.bind[self.cur], &[(s as u64 * SLOT) as u32]);
+                    let off = (s as u64 * SLOT) as u32;
+                    pass.set_bind_group(0, &self.bind[self.cur], &[off]);
                     pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+                    if self.sa {
+                        pass.set_pipeline(&self.sa_pipe);
+                        pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
+                        pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+                        pass.set_pipeline(&self.step_pipe);
+                    }
                     self.cur = 1 - self.cur;
                 }
             }

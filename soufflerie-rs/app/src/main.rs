@@ -53,7 +53,7 @@ fn usage() -> ! {
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
          \x20         --collision rr|bgk --les auto|on|off --u 0.1\n\
-         \x20         --turb auto|sa|off (Spalart–Allmaras dès Re = 5·10⁴ en auto)\n\
+         \x20         --turb auto|sa|off (Spalart–Allmaras et loi de paroi dès Re = 5·10⁴ en auto, 2D et 3D)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
@@ -576,7 +576,13 @@ fn cmd_run3d(a: &Args) {
     };
     let nu = U as f64 * l as f64 / re;
     let t0 = Instant::now();
-    let mut sim = match Gpu3D::new(&body, nu, U, fp16) {
+    // Spalart–Allmaras et loi de paroi : dès Re = 5·10⁴ en automatique, comme en 2D.
+    let sa = match a.get("turb", "auto".to_string()).as_str() {
+        "sa" => true,
+        "off" | "none" => false,
+        _ => re >= lbm::tunnel::RE_SA_AUTO,
+    };
+    let mut sim = match Gpu3D::with_turbulence(&body, nu, U, fp16, sa) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");
@@ -598,6 +604,14 @@ fn cmd_run3d(a: &Args) {
         if fp16 { "demi-précision" } else { "simple précision" },
         sim.adapter_name()
     );
+    if sa {
+        // y⁺ attendu au premier nœud (plaque plane turbulente, nœud à une demi-maille).
+        let cf = 0.026 * re.powf(-1.0 / 7.0);
+        eprintln!(
+            "Spalart–Allmaras + loi de paroi (Spalding) · y⁺ ≈ {:.0} au premier nœud",
+            0.5 / l as f64 * re * (cf / 2.0).sqrt()
+        );
+    }
     if let Some(lost) = mesh_info.as_ref().and_then(|i| i.volume_lost(sim.solid_count, l)) {
         if lost > 0.2 {
             eprintln!(

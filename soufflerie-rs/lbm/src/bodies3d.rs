@@ -43,7 +43,7 @@ impl Shape3D {
             Shape3D::Cube => "arête a",
             Shape3D::Cylinder => "diamètre D (envergure périodique 4D)",
             Shape3D::Wing => "corde c (NACA 0012, allongement 4)",
-            Shape3D::Mesh => "longueur hors tout L selon l'écoulement ; surface : maître-couple",
+            Shape3D::Mesh => "références de la mise en place",
         }
     }
 
@@ -380,6 +380,163 @@ fn poly_dist(p: [f64; 2], poly: &[[f64; 2]]) -> f64 {
 }
 
 impl Body3D {
+    /// Profil NACA 0012 de l'aile dans son repère (mailles, origine au quart de corde).
+    fn foil(&self) -> Vec<[f64; 2]> {
+        let lf = self.l as f64;
+        let n = 160;
+        let xs: Vec<f64> = (0..=n)
+            .map(|k| 0.5 * (1.0 - (k as f64 / n as f64 * std::f64::consts::PI).cos()))
+            .collect();
+        let mut v: Vec<[f64; 2]> = xs.iter().map(|&x| [(x - 0.25) * lf, naca00(0.12, x) * lf]).collect();
+        v.extend(xs.iter().rev().skip(1).map(|&x| [(x - 0.25) * lf, -naca00(0.12, x) * lf]));
+        v
+    }
+
+    /// Distance à la surface (mailles, sans signe), plafonnée à `cap`.
+    /// `foil` : profil de l'aile (`Body3D::foil`), ignoré pour les autres formes.
+    fn surface_distance(&self, p: [f64; 3], cap: f64, foil: &[[f64; 2]]) -> f64 {
+        if let Some(m) = &self.mesh {
+            return m.distance(p, cap);
+        }
+        let [cx, cy, cz] = self.center;
+        let (x, y, z) = (p[0], p[1], p[2]);
+        let lf = self.l as f64;
+        let r = lf / 2.0;
+        let (sa, ca) = self.alpha.sin_cos();
+        let d = match self.shape {
+            Shape3D::Sphere => ((x - cx).powi(2) + (y - cy).powi(2) + (z - cz).powi(2)).sqrt() - r,
+            Shape3D::Cylinder => (x - cx).hypot(z - cz) - r,
+            Shape3D::Cube => {
+                let (xx, zz) = (x - cx, z - cz);
+                let q = [(xx * ca - zz * sa).abs() - r, (y - cy).abs() - r, (xx * sa + zz * ca).abs() - r];
+                let out = q.iter().map(|v| v.max(0.0).powi(2)).sum::<f64>().sqrt();
+                out + q[0].max(q[1]).max(q[2]).min(0.0)
+            }
+            Shape3D::Wing => {
+                let (xx, zz) = (x - cx, z - cz);
+                let xb = xx * ca - zz * sa;
+                let zb = xx * sa + zz * ca;
+                let sec = poly_dist([xb, zb], foil);
+                let w = [sec, (y - cy).abs() - self.half];
+                w[0].max(w[1]).min(0.0) + w[0].max(0.0).hypot(w[1].max(0.0))
+            }
+            Shape3D::Mesh => cap,
+        };
+        d.abs().min(cap)
+    }
+
+    /// Distance à la paroi de chaque maille (mailles) pour Spalart–Allmaras :
+    /// exacte à moins de 3 mailles du corps, propagée au-delà par une
+    /// transformée de chanfrein (1, √2, √3) dans une boîte de 1,5 L autour de
+    /// la maquette ; 10⁴ plus loin, 0 dans les mailles solides.
+    pub fn wall_distance(&self, solid: &[bool]) -> Vec<f32> {
+        let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        let foil = if self.shape == Shape3D::Wing { self.foil() } else { Vec::new() };
+        let b = self.bounds;
+        let r = 1.5 * self.l as f64;
+        let lo = [
+            (b.x0 - r).floor().max(0.0) as usize,
+            (b.y0 - r).floor().max(0.0) as usize,
+            (b.z0 - r).floor().max(0.0) as usize,
+        ];
+        let hi = [
+            ((b.x1 + r).ceil() as usize).min(nx - 1),
+            ((b.y1 + r).ceil() as usize).min(ny - 1),
+            ((b.z1 + r).ceil() as usize).min(nz - 1),
+        ];
+        let far = 1e4f32;
+        let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
+        let mut d = vec![far; nx * ny * nz];
+        // Graines exactes près du corps (en parallèle, tranche par tranche).
+        let near = [
+            (b.x0 - 3.0).floor().max(0.0) as usize,
+            (b.y0 - 3.0).floor().max(0.0) as usize,
+            (b.z0 - 3.0).floor().max(0.0) as usize,
+        ];
+        let near_hi = [
+            ((b.x1 + 3.0).ceil() as usize).min(nx - 1),
+            ((b.y1 + 3.0).ceil() as usize).min(ny - 1),
+            ((b.z1 + 3.0).ceil() as usize).min(nz - 1),
+        ];
+        let seeds: Vec<(usize, f32)> = (near[2]..=near_hi[2])
+            .into_par_iter()
+            .flat_map_iter(|z| {
+                let foil = &foil;
+                (near[1]..=near_hi[1]).flat_map(move |y| {
+                    (near[0]..=near_hi[0]).filter_map(move |x| {
+                        let c = idx(x, y, z);
+                        if solid[c] {
+                            return Some((c, 0.0));
+                        }
+                        let v = self.surface_distance([x as f64, y as f64, z as f64], 3.0, foil);
+                        (v < 3.0).then_some((c, v as f32))
+                    })
+                })
+            })
+            .collect();
+        for (c, v) in seeds {
+            d[c] = v;
+        }
+        // Chanfrein : passe avant puis arrière dans la boîte.
+        let (s2, s3) = (2f32.sqrt(), 3f32.sqrt());
+        let nb: Vec<([i64; 3], f32)> = (-1..=1i64)
+            .flat_map(|k| (-1..=1i64).flat_map(move |j| (-1..=1i64).map(move |i| [i, j, k])))
+            .filter(|o| *o != [0, 0, 0])
+            .map(|o| {
+                let m = o.iter().map(|v| v.abs()).sum::<i64>();
+                (o, [0.0, 1.0, s2, s3][m as usize])
+            })
+            .collect();
+        let before = |o: &[i64; 3]| o[2] < 0 || (o[2] == 0 && (o[1] < 0 || (o[1] == 0 && o[0] < 0)));
+        let fwd: Vec<_> = nb.iter().filter(|(o, _)| before(o)).cloned().collect();
+        let bwd: Vec<_> = nb.iter().filter(|(o, _)| !before(o)).cloned().collect();
+        let pass = |d: &mut Vec<f32>, offs: &[([i64; 3], f32)], rev: bool| {
+            let zs: Vec<usize> = if rev { (lo[2]..=hi[2]).rev().collect() } else { (lo[2]..=hi[2]).collect() };
+            for z in zs {
+                let ys: Vec<usize> = if rev { (lo[1]..=hi[1]).rev().collect() } else { (lo[1]..=hi[1]).collect() };
+                for y in ys {
+                    let xs: Vec<usize> = if rev { (lo[0]..=hi[0]).rev().collect() } else { (lo[0]..=hi[0]).collect() };
+                    for x in xs {
+                        let c = idx(x, y, z);
+                        let mut best = d[c];
+                        for (o, w) in offs {
+                            let (px, py, pz) = (x as i64 + o[0], y as i64 + o[1], z as i64 + o[2]);
+                            if px < lo[0] as i64 || py < lo[1] as i64 || pz < lo[2] as i64 {
+                                continue;
+                            }
+                            if px > hi[0] as i64 || py > hi[1] as i64 || pz > hi[2] as i64 {
+                                continue;
+                            }
+                            best = best.min(d[idx(px as usize, py as usize, pz as usize)] + w);
+                        }
+                        d[c] = best;
+                    }
+                }
+            }
+        };
+        pass(&mut d, &fwd, false);
+        pass(&mut d, &bwd, true);
+        d
+    }
+
+    /// Normale sortante de la paroi et distance à celle-ci au nœud p (mailles) :
+    /// gradient de la distance exacte, pour la loi de paroi.
+    pub fn wall_normal(&self, p: [f64; 3]) -> ([f64; 3], f64) {
+        let foil = if self.shape == Shape3D::Wing { self.foil() } else { Vec::new() };
+        let dist = |q: [f64; 3]| self.surface_distance(q, 4.0, &foil);
+        let e = 0.2;
+        let mut g = [0.0; 3];
+        for a in 0..3 {
+            let (mut pp, mut pm) = (p, p);
+            pp[a] += e;
+            pm[a] -= e;
+            g[a] = dist(pp) - dist(pm);
+        }
+        let n = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+        let g = if n > 1e-9 { g.map(|v| v / n) } else { [0.0, 0.0, 1.0] };
+        (g, dist(p))
+    }
+
     /// Distance signée, `h` mailles entre échantillons, autour de la maquette.
     pub fn sdf_grid(&self, h: f64) -> SdfGrid {
         let b = self.bounds;

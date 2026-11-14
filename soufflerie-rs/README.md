@@ -214,6 +214,37 @@ durées, efforts par mètre d'envergure, alerte de Mach réel). Le moteur GPU
 0,1 à 0,2 % sur les efforts moyens (cylindre Re = 100, NACA 0012 Re = 10⁶
 avec Spalart–Allmaras), 3 % sur l'amplitude de Cz'.
 
+## Loi de paroi en 3D
+
+Comme en 2D, la soufflerie 3D passe à Spalart–Allmaras avec loi de paroi dès
+Re = 5·10⁴ (`--turb auto|sa|off`) : ν_t = ν̃ f_v1 s'ajoute à la viscosité
+de la collision, ν̃ est transporté par une seconde passe (advection décentrée
+amont, diffusion, production et destruction de Spalart–Allmaras, ν̃ = κ u_τ y
+au premier nœud), et la paroi glisse : chaque maille pariétale tire u_τ de la
+loi de Spalding à partir de sa vitesse tangentielle et de sa distance à la
+paroi, puis le rebond de Bouzidi la traite en paroi mobile à la vitesse de
+glissement (efforts avec le terme correspondant). Distance à la paroi :
+exacte à moins de 3 mailles du corps (triangles ou formes analytiques),
+propagée au-delà par une transformée de chanfrein ; normales par gradient de
+la distance exacte. La couche limite est supposée turbulente dès l'avant
+(pas de transition en 3D).
+
+| L = 16 mailles, Re = 10⁶ | Sous-maille seule | Spalart–Allmaras + loi de paroi | Référence |
+| --- | --- | --- | --- |
+| Sphère, Cx | 0,594 | 0,254 | ≈ 0,2 (après la crise de traînée) |
+| Aile NACA 0012, allongement 4, α = 8°, Cz | 0,153 | 0,494 | ≈ 0,56 (ligne portante) |
+
+À Re = 10⁵, la sphère réelle a une couche limite laminaire (Cx ≈ 0,47) :
+Spalart–Allmaras, turbulent partout, donne alors le régime d'après la crise
+(0,28). Test `loi_de_paroi_3d`.
+
+A320 (STL) en approche : 70 m/s au niveau de la mer, α = 8°, Re = 1,7·10⁸,
+L = 48 mailles (0,75 m), coefficients rapportés à la surface alaire
+(122,6 m²) : CL = 0,22 et CD = 0,54 sans modèle de paroi, CL = 0,72 et
+CD = 0,31 avec (ordre de grandeur réel en lisse : CL ≈ 0,9, CD de quelques
+centièmes, davantage train sorti). La traînée reste trop forte à cette
+résolution, et la coupe de vorticité garde un bruit en damier à τ ≈ 0,5.
+
 ## Maquettes STL (3D)
 
 Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le
