@@ -9,10 +9,11 @@ struct M {
 
 @compute @workgroup_size(64, 1, 1)
 fn macros(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
-  if (idx >= P.n) {
+  // Une ligne de la veine par groupe y (au plus 65 535 groupes par dimension).
+  if (gid.x >= P.nx || gid.y >= P.ny) {
     return;
   }
+  let idx = gid.y * P.nx + gid.x;
   if ((kind[idx] & 3u) == 1u) {
     outm[idx] = 1.0;
     outm[P.n + idx] = 0.0;

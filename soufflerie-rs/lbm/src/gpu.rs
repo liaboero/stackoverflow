@@ -754,8 +754,11 @@ impl GpuSolver {
     pub fn run(&mut self, n: usize, ramp: &Ramp) {
         let (nx, ny) = (self.cfg.nx as u32, self.cfg.ny as u32);
         let mut left = n;
+        // Soumissions courtes sur les grandes grilles (≈ 3·10⁷ mailles·pas) :
+        // Windows réinitialise le pilote au-delà de 2 s de calcul (TDR).
+        let per_submit = (30_000_000 / (nx * ny).max(1) as usize).clamp(1, BATCH);
         while left > 0 {
-            let k = left.min(BATCH);
+            let k = left.min(per_submit);
             let mut bytes = vec![0u8; SLOT as usize * k];
             for s in 0..k {
                 let (u, a) = ramp.at(self.time + s as u64);
@@ -925,7 +928,7 @@ impl GpuSolver {
             let mut pass = enc.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.macro_pipe);
             pass.set_bind_group(0, &self.macro_bind[self.cur], &[]);
-            pass.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+            pass.dispatch_workgroups((nx as u32).div_ceil(64), ny as u32, 1);
         }
         self.queue.submit([enc.finish()]);
         let v = self.read_buffer(&self.macro_buf, &self.macro_read, 12 * n as u64);
