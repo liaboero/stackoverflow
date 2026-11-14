@@ -141,6 +141,21 @@ pub struct MeshInfo {
     pub frontal_m2: f64,
     /// Rapport du maître-couple à la section de la veine.
     pub blockage: f64,
+    /// Volume enclos (m³).
+    pub volume_m3: f64,
+    /// Défauts du maillage.
+    pub diag: MeshDiag,
+}
+
+impl MeshInfo {
+    /// Part du volume perdue à la voxelisation (`solid` mailles solides, `l`
+    /// mailles par longueur de référence) : parties plus fines qu'une maille.
+    /// None si le volume est inconnu.
+    pub fn volume_lost(&self, solid: usize, l: usize) -> Option<f64> {
+        let h = self.ref_length_m / l as f64;
+        let v = self.volume_m3 / (h * h * h);
+        (v > 0.0).then(|| 1.0 - solid as f64 / v)
+    }
 }
 
 /// Triangles lus dans un fichier STL (coordonnées du fichier).
@@ -154,7 +169,9 @@ pub fn read_stl(path: &Path) -> Result<Vec<Tri>, String> {
 pub fn parse_stl(data: &[u8]) -> Result<Vec<Tri>, String> {
     if data.len() >= 84 {
         let n = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
-        if data.len() == 84 + 50 * n {
+        // Taille exacte ; ou octets en trop après les triangles, sauf texte ASCII.
+        let ascii = data.starts_with(b"solid") && std::str::from_utf8(data).is_ok();
+        if data.len() == 84 + 50 * n || (n > 0 && data.len() > 84 + 50 * n && !ascii) {
             let mut tris = Vec::with_capacity(n);
             for k in 0..n {
                 let o = 84 + 50 * k + 12;
@@ -278,10 +295,190 @@ fn tri_dist2(p: [f64; 3], t: &Tri) -> f64 {
     dot(d, d)
 }
 
-/// Décalage du rayon d'appartenance : évite de passer exactement par une
+/// Décalage des rayons d'appartenance : évite de passer exactement par une
 /// arête ou un sommet (coordonnées entières des mailles).
-const JY: f64 = 1.37e-5;
-const JZ: f64 = 2.71e-5;
+const JU: f64 = 1.37e-5;
+const JV: f64 = 2.71e-5;
+
+/// Défauts d'un maillage, après nettoyage.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshDiag {
+    /// Triangles retirés : dégénérés (aire nulle) et en double.
+    pub degenerate: usize,
+    pub duplicates: usize,
+    /// Arêtes bordant un seul triangle (trous), plus de deux (non variété).
+    pub open_edges: usize,
+    pub nonmanifold_edges: usize,
+    /// Arêtes dont les deux triangles sont orientés en sens contraires.
+    pub flipped_edges: usize,
+    /// Volume enclos (unités du fichier au cube), par le théorème de la divergence.
+    pub volume: f64,
+}
+
+impl MeshDiag {
+    /// Volume fermé et bien orienté.
+    pub fn watertight(&self) -> bool {
+        self.open_edges == 0 && self.nonmanifold_edges == 0
+    }
+
+    /// Résumé des défauts (vide si aucun).
+    pub fn summary(&self) -> String {
+        let mut v = Vec::new();
+        if self.open_edges > 0 {
+            v.push(format!("{} arêtes ouvertes (trous)", self.open_edges));
+        }
+        if self.nonmanifold_edges > 0 {
+            v.push(format!("{} arêtes partagées par plus de deux faces", self.nonmanifold_edges));
+        }
+        if self.flipped_edges > 0 {
+            v.push(format!("{} arêtes entre faces d'orientations opposées", self.flipped_edges));
+        }
+        if self.degenerate + self.duplicates > 0 {
+            v.push(format!(
+                "{} triangles dégénérés et {} en double retirés",
+                self.degenerate, self.duplicates
+            ));
+        }
+        v.join(" · ")
+    }
+}
+
+/// Retire les triangles dégénérés et en double (sommets soudés à 10⁻⁷ de la
+/// diagonale près) et dresse le bilan des arêtes.
+pub fn clean(tris: Vec<Tri>) -> (Vec<Tri>, MeshDiag) {
+    use std::collections::HashMap;
+    let (lo, hi) = bbox(&tris);
+    let diag = dot(sub(hi, lo), sub(hi, lo)).sqrt().max(1e-30);
+    let eps = 1e-7 * diag;
+    let mut ids: HashMap<[i64; 3], u32> = HashMap::new();
+    let mut id = |p: [f64; 3]| -> u32 {
+        let k = p.map(|c| (c / eps).round() as i64);
+        let n = ids.len() as u32;
+        *ids.entry(k).or_insert(n)
+    };
+    let mut d = MeshDiag::default();
+    let mut seen = std::collections::HashSet::new();
+    let mut edges: HashMap<(u32, u32), (u32, i32)> = HashMap::new();
+    let mut out = Vec::with_capacity(tris.len());
+    for t in tris {
+        let v = t.map(&mut id);
+        let ab = sub(t[1], t[0]);
+        let ac = sub(t[2], t[0]);
+        let cr = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        if v[0] == v[1] || v[1] == v[2] || v[0] == v[2] || dot(cr, cr).sqrt() < 1e-12 * diag * diag {
+            d.degenerate += 1;
+            continue;
+        }
+        let mut key = v;
+        key.sort_unstable();
+        if !seen.insert(key) {
+            d.duplicates += 1;
+            continue;
+        }
+        for (a, b) in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
+            let e = edges.entry((a.min(b), a.max(b))).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += if a < b { 1 } else { -1 };
+        }
+        d.volume += dot(t[0], cr_of(t[1], t[2])) / 6.0;
+        out.push(t);
+    }
+    for &(n, s) in edges.values() {
+        match n {
+            1 => d.open_edges += 1,
+            2 if s != 0 => d.flipped_edges += 1,
+            2 => {}
+            _ => d.nonmanifold_edges += 1,
+        }
+    }
+    d.volume = d.volume.abs();
+    (out, d)
+}
+
+fn cr_of(b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    [b[1] * c[2] - b[2] * c[1], b[2] * c[0] - b[0] * c[2], b[0] * c[1] - b[1] * c[0]]
+}
+
+/// Rangement des triangles pour des rayons parallèles à l'axe `axis` : cases
+/// unité dans le plan des deux autres axes (u, v).
+#[derive(Debug)]
+struct RayBins {
+    axis: usize,
+    u: usize,
+    v: usize,
+    lo: [f64; 2],
+    n: [usize; 2],
+    bins: Vec<Vec<u32>>,
+}
+
+impl RayBins {
+    fn new(tris: &[Tri], lo: [f64; 3], hi: [f64; 3], axis: usize) -> RayBins {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        let n = [
+            (hi[u] - lo[u]).floor() as usize + 1,
+            (hi[v] - lo[v]).floor() as usize + 1,
+        ];
+        let mut bins = vec![Vec::new(); n[0] * n[1]];
+        for (k, t) in tris.iter().enumerate() {
+            let (tl, th) = bbox(std::slice::from_ref(t));
+            let i0 = ((tl[u] - lo[u]).floor() as usize).min(n[0] - 1);
+            let i1 = ((th[u] - lo[u] + JU).floor() as usize).min(n[0] - 1);
+            let j0 = ((tl[v] - lo[v]).floor() as usize).min(n[1] - 1);
+            let j1 = ((th[v] - lo[v] + JV).floor() as usize).min(n[1] - 1);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    bins[j * n[0] + i].push(k as u32);
+                }
+            }
+        }
+        RayBins {
+            axis,
+            u,
+            v,
+            lo: [lo[u], lo[v]],
+            n,
+            bins,
+        }
+    }
+
+    fn bin(&self, pu: f64, pv: f64) -> Option<&[u32]> {
+        let (fu, fv) = (pu - self.lo[0], pv - self.lo[1]);
+        if fu < 0.0 || fv < 0.0 {
+            return None;
+        }
+        let (i, j) = (fu.floor() as usize, fv.floor() as usize);
+        (i < self.n[0] && j < self.n[1]).then(|| self.bins[j * self.n[0] + i].as_slice())
+    }
+
+    /// Coordonnée selon l'axe où la droite (pu, pv) traverse le triangle, si elle le traverse.
+    fn cross(&self, t: &Tri, pu: f64, pv: f64) -> Option<f64> {
+        let [a, b, c] = *t;
+        let (u, v, w) = (self.u, self.v, self.axis);
+        let det = (b[u] - a[u]) * (c[v] - a[v]) - (c[u] - a[u]) * (b[v] - a[v]);
+        if det.abs() < 1e-14 {
+            return None;
+        }
+        let s = ((pu - a[u]) * (c[v] - a[v]) - (c[u] - a[u]) * (pv - a[v])) / det;
+        let r = ((b[u] - a[u]) * (pv - a[v]) - (pu - a[u]) * (b[v] - a[v])) / det;
+        if s < 0.0 || r < 0.0 || s + r > 1.0 {
+            return None;
+        }
+        Some(a[w] + s * (b[w] - a[w]) + r * (c[w] - a[w]))
+    }
+
+    /// Nombre de traversées du rayon partant de p vers les coordonnées croissantes.
+    fn crossings(&self, tris: &[Tri], p: [f64; 3]) -> usize {
+        let (pu, pv) = (p[self.u] + JU, p[self.v] + JV);
+        let Some(bin) = self.bin(pu, pv) else { return 0 };
+        bin.iter()
+            .filter(|&&k| self.cross(&tris[k as usize], pu, pv).is_some_and(|c| c > p[self.axis]))
+            .count()
+    }
+}
 
 /// Maillage placé dans la veine (coordonnées réseau), avec ses grilles de rangement.
 #[derive(Debug)]
@@ -289,10 +486,8 @@ pub struct MeshBody {
     pub tris: Vec<Tri>,
     pub lo: [f64; 3],
     pub hi: [f64; 3],
-    /// Rangement en (y, z), mailles unité : triangles dont la projection touche la case.
-    yz: Vec<Vec<u32>>,
-    ny: usize,
-    nz: usize,
+    /// Rayons selon x ; avec un maillage ouvert, aussi selon y et z (vote).
+    rays: Vec<RayBins>,
     /// Rangement 3D, cases de `cell` mailles, pour la distance.
     grid: Vec<Vec<u32>>,
     gdim: [usize; 3],
@@ -300,25 +495,15 @@ pub struct MeshBody {
 }
 
 impl MeshBody {
-    pub fn new(tris: Vec<Tri>) -> MeshBody {
+    /// `robust` : maillage ouvert ou mal formé, appartenance votée sur trois
+    /// rayons (x, y, z) au lieu de la parité d'un seul.
+    pub fn new(tris: Vec<Tri>, robust: bool) -> MeshBody {
         let (lo, hi) = bbox(&tris);
-        let ny = (hi[1] - lo[1]).floor() as usize + 1;
-        let nz = (hi[2] - lo[2]).floor() as usize + 1;
-        let mut yz = vec![Vec::new(); ny * nz];
-        let cell = 2.0;
+        let cell = 1.0;
         let gdim = [0, 1, 2].map(|a| ((hi[a] - lo[a]) / cell).floor() as usize + 1);
         let mut grid = vec![Vec::new(); gdim[0] * gdim[1] * gdim[2]];
         for (k, t) in tris.iter().enumerate() {
             let (tl, th) = bbox(std::slice::from_ref(t));
-            let j0 = ((tl[1] - lo[1]).floor() as usize).min(ny - 1);
-            let j1 = ((th[1] - lo[1] + JY).floor() as usize).min(ny - 1);
-            let k0 = ((tl[2] - lo[2]).floor() as usize).min(nz - 1);
-            let k1 = ((th[2] - lo[2] + JZ).floor() as usize).min(nz - 1);
-            for kz in k0..=k1 {
-                for jy in j0..=j1 {
-                    yz[kz * ny + jy].push(k as u32);
-                }
-            }
             let g0 = [0, 1, 2].map(|a| (((tl[a] - lo[a]) / cell).floor() as usize).min(gdim[a] - 1));
             let g1 = [0, 1, 2].map(|a| (((th[a] - lo[a]) / cell).floor() as usize).min(gdim[a] - 1));
             for gz in g0[2]..=g1[2] {
@@ -329,60 +514,28 @@ impl MeshBody {
                 }
             }
         }
+        let axes: &[usize] = if robust { &[0, 1, 2] } else { &[0] };
+        let rays = axes.iter().map(|&a| RayBins::new(&tris, lo, hi, a)).collect();
         MeshBody {
             tris,
             lo,
             hi,
-            yz,
-            ny,
-            nz,
+            rays,
             grid,
             gdim,
             cell,
         }
     }
 
-    /// Abscisse où la droite (y, z) parallèle à x traverse le triangle k, si elle le traverse.
-    fn cross_x(&self, k: u32, y: f64, z: f64) -> Option<f64> {
-        let [a, b, c] = self.tris[k as usize];
-        // Coordonnées barycentriques dans la projection (y, z).
-        let det = (b[1] - a[1]) * (c[2] - a[2]) - (c[1] - a[1]) * (b[2] - a[2]);
-        if det.abs() < 1e-14 {
-            return None;
-        }
-        let u = ((y - a[1]) * (c[2] - a[2]) - (c[1] - a[1]) * (z - a[2])) / det;
-        let v = ((b[1] - a[1]) * (z - a[2]) - (y - a[1]) * (b[2] - a[2])) / det;
-        if u < 0.0 || v < 0.0 || u + v > 1.0 {
-            return None;
-        }
-        Some(a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0]))
-    }
-
-    fn yz_bin(&self, y: f64, z: f64) -> Option<&[u32]> {
-        let (fy, fz) = (y - self.lo[1], z - self.lo[2]);
-        if fy < 0.0 || fz < 0.0 {
-            return None;
-        }
-        let (j, k) = (fy.floor() as usize, fz.floor() as usize);
-        (j < self.ny && k < self.nz).then(|| self.yz[k * self.ny + j].as_slice())
-    }
-
-    /// Point dans le volume fermé : parité des traversées d'un rayon vers +x.
+    /// Point dans le volume : parité des traversées d'un rayon selon x, ou
+    /// vote à la majorité sur trois rayons pour un maillage ouvert.
     pub fn inside(&self, x: f64, y: f64, z: f64) -> bool {
-        if x < self.lo[0] || x > self.hi[0] {
+        let p = [x, y, z];
+        if (0..3).any(|a| p[a] < self.lo[a] || p[a] > self.hi[a]) {
             return false;
         }
-        let (y, z) = (y + JY, z + JZ);
-        let Some(bin) = self.yz_bin(y, z) else { return false };
-        let mut n = 0;
-        for &k in bin {
-            if let Some(xc) = self.cross_x(k, y, z) {
-                if xc > x {
-                    n += 1;
-                }
-            }
-        }
-        n % 2 == 1
+        let votes = self.rays.iter().filter(|r| r.crossings(&self.tris, p) % 2 == 1).count();
+        2 * votes > self.rays.len()
     }
 
     /// Distance à la surface, plafonnée à `cap` mailles.
@@ -409,6 +562,7 @@ impl MeshBody {
     /// Maître-couple : aire (mailles²) de la projection sur le plan (y, z),
     /// échantillonnée au quart de maille.
     pub fn frontal_area(&self) -> f64 {
+        let r = &self.rays[0];
         let s = 0.25;
         let (my, mz) = (
             ((self.hi[1] - self.lo[1]) / s).ceil() as usize,
@@ -417,10 +571,10 @@ impl MeshBody {
         let mut count = 0usize;
         for k in 0..mz {
             for j in 0..my {
-                let y = self.lo[1] + (j as f64 + 0.5) * s + JY;
-                let z = self.lo[2] + (k as f64 + 0.5) * s + JZ;
-                if let Some(bin) = self.yz_bin(y, z) {
-                    if bin.iter().any(|&t| self.cross_x(t, y, z).is_some()) {
+                let y = self.lo[1] + (j as f64 + 0.5) * s + JU;
+                let z = self.lo[2] + (k as f64 + 0.5) * s + JV;
+                if let Some(bin) = r.bin(y, z) {
+                    if bin.iter().any(|&t| r.cross(&self.tris[t as usize], y, z).is_some()) {
                         count += 1;
                     }
                 }
@@ -494,7 +648,7 @@ mod tests {
 
     #[test]
     fn sphere_maillee() {
-        let m = MeshBody::new(icosphere(10.0, [20.0, 20.0, 20.0], 4));
+        let m = MeshBody::new(icosphere(10.0, [20.0, 20.0, 20.0], 4), false);
         assert!(m.inside(20.0, 20.0, 20.0));
         assert!(m.inside(29.0, 20.0, 20.0));
         assert!(!m.inside(31.0, 20.0, 20.0));
@@ -515,6 +669,40 @@ mod tests {
         }
         let v = 4.0 / 3.0 * std::f64::consts::PI * 1000.0;
         assert!((n as f64 / v - 1.0).abs() < 0.03, "volume {n} contre {v}");
+    }
+
+    #[test]
+    fn maillage_troue() {
+        let mut tris = icosphere(10.0, [20.0, 20.0, 20.0], 4);
+        let full = tris.len();
+        // Défauts : un triangle en double, un dégénéré, puis des trous.
+        tris.push(tris[7]);
+        tris.push([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]);
+        let (ok, d) = clean(tris.clone());
+        assert_eq!((ok.len(), d.duplicates, d.degenerate), (full, 1, 1));
+        assert!(d.watertight() && d.flipped_edges == 0, "{d:?}");
+        let v = 4.0 / 3.0 * std::f64::consts::PI * 1000.0;
+        assert!((d.volume / v - 1.0).abs() < 0.01, "volume {}", d.volume);
+        // Une triangle sur 40 retiré : maillage ouvert.
+        let holed: Vec<Tri> = ok.iter().enumerate().filter(|(k, _)| k % 40 != 0).map(|(_, t)| *t).collect();
+        let (holed, d) = clean(holed);
+        assert!(d.open_edges > 0);
+        let count = |m: &MeshBody| {
+            let mut n = 0;
+            for z in 5..36 {
+                for y in 5..36 {
+                    for x in 5..36 {
+                        n += m.inside(x as f64, y as f64, z as f64) as usize;
+                    }
+                }
+            }
+            n as f64
+        };
+        let single = count(&MeshBody::new(holed.clone(), false));
+        let voted = count(&MeshBody::new(holed, true));
+        println!("volume exact {v:.0}, un rayon {single}, vote {voted}");
+        assert!((voted / v - 1.0).abs() < 0.03, "vote {voted} contre {v}");
+        assert!((voted / v - 1.0).abs() < (single / v - 1.0).abs(), "un rayon {single}, vote {voted}");
     }
 
     #[test]

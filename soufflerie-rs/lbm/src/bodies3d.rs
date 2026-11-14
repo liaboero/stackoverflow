@@ -108,6 +108,8 @@ pub struct Body3D {
     half: f64,
     /// Maillage placé dans la veine (forme `Mesh`).
     pub mesh: Option<Arc<MeshBody>>,
+    /// Volume du maillage (mailles³) ; 0 pour les formes analytiques.
+    pub mesh_volume: f64,
 }
 
 use std::sync::Arc;
@@ -200,6 +202,7 @@ impl Body3D {
             alpha,
             half,
             mesh: None,
+            mesh_volume: 0.0,
         }
     }
 
@@ -210,6 +213,10 @@ impl Body3D {
     /// 2,5 M de part et d'autre (M : la plus grande de L et des dimensions de
     /// la maquette dans la direction concernée), au moins 6 L de large et de haut.
     pub fn from_mesh(tris: &[Tri], l: usize, setup: &MeshSetup) -> Result<(Body3D, MeshInfo), String> {
+        let (tris, diag) = crate::stl::clean(tris.to_vec());
+        if tris.is_empty() {
+            return Err("aucun triangle valable dans le maillage".into());
+        }
         let ef = setup.flow.vec();
         let ez = setup.up.vec();
         if dot3(ef, ez) != 0.0 {
@@ -271,7 +278,7 @@ impl Body3D {
                 }
             }
         }
-        let mesh = MeshBody::new(placed);
+        let mesh = MeshBody::new(placed, !diag.watertight());
         let bounds = Bounds {
             x0: mesh.lo[0],
             x1: mesh.hi[0],
@@ -289,12 +296,14 @@ impl Body3D {
         // Mètres par maille.
         let h = setup.unit.meters() / s;
         let info = MeshInfo {
-            triangles: tris.len(),
+            triangles: tris.len() + diag.degenerate + diag.duplicates,
             size_m: e.map(|v| v * h),
             ref_length_m: lref * setup.unit.meters(),
             ref_area_m2: area * h * h,
             frontal_m2: frontal * h * h,
             blockage: frontal / (ny as f64 * nz as f64),
+            volume_m3: diag.volume * setup.unit.meters().powi(3),
+            diag: diag.clone(),
         };
         let b = Body3D {
             shape: Shape3D::Mesh,
@@ -308,6 +317,7 @@ impl Body3D {
             alpha,
             half: 0.0,
             mesh: Some(Arc::new(mesh)),
+            mesh_volume: diag.volume * s * s * s,
         };
         Ok((b, info))
     }
@@ -417,13 +427,13 @@ impl Body3D {
         };
         let mut d = vec![0f32; dims[0] * dims[1] * dims[2]];
         if let Some(m) = &self.mesh {
-            // Distance aux triangles (plafonnée à 3 mailles), signe par appartenance.
+            // Distance aux triangles (plafonnée à une maille : seule la surface compte pour l'affichage), signe par appartenance.
             d.par_iter_mut().enumerate().for_each(|(n, v)| {
                 let i = n % dims[0];
                 let j = (n / dims[0]) % dims[1];
                 let k = n / (dims[0] * dims[1]);
                 let p = [lo[0] + i as f64 * h, lo[1] + j as f64 * h, lo[2] + k as f64 * h];
-                let dist = m.distance(p, 3.0);
+                let dist = m.distance(p, 1.0);
                 *v = if m.inside(p[0], p[1], p[2]) { -dist } else { dist } as f32;
             });
             return SdfGrid { origin: lo, h, dims, d };

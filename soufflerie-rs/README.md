@@ -250,6 +250,19 @@ voxelisation que la sphère analytique et une traînée à 1 % près (test
 `sphere_stl`) ; un même fuseau décrit avec d'autres axes (écoulement selon
 −y, haut selon +x) donne des coefficients identiques.
 
+**Maillages imparfaits et gros fichiers.** À la lecture, les sommets sont
+soudés (à 10⁻⁷ de la diagonale près), les triangles dégénérés et en double
+retirés, et les arêtes comptées : trous (arêtes ouvertes), arêtes partagées
+par plus de deux faces, orientations incohérentes. Un maillage ouvert est
+signalé et l'appartenance y est votée à la majorité sur trois rayons (x, y,
+z) au lieu de la parité d'un seul : une sphère privée d'un triangle sur 500
+donne la même traînée que la sphère fermée (1,1470 contre 1,1472, D = 16
+mailles). Quand plus de 20 % du volume du maillage disparaît à la
+voxelisation (parties plus fines qu'une maille), un avertissement invite à
+augmenter la résolution. Une sphère de 327 680 triangles se prépare en 4 s
+(D = 16 mailles) ; dans l'interface, l'aperçu de mise en place d'un gros
+maillage attend que le réglage soit stable.
+
 ## Validation 3D
 
 Résultats bruts dans `validation/` ; `tools/validation3d.sh` refait les

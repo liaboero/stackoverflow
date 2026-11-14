@@ -502,6 +502,7 @@ fn cmd_run3d(a: &Args) {
     });
     // Échelle physique (maquettes STL) : vitesse (m/s), longueur et surface de référence (m, m²).
     let mut phys: Option<(f64, f64)> = None;
+    let mut mesh_info: Option<lbm::stl::MeshInfo> = None;
     let body = match &stl {
         Some(path) => {
             use lbm::stl::{Axis, MeshSetup, Unit};
@@ -550,6 +551,13 @@ fn cmd_run3d(a: &Args) {
             if info.blockage > 0.05 {
                 eprintln!("Attention : blocage de la veine supérieur à 5 %, coefficients surestimés.");
             }
+            let d = info.diag.summary();
+            if !d.is_empty() {
+                eprintln!(
+                    "Maillage : {d}{}",
+                    if info.diag.watertight() { "" } else { " ; appartenance votée sur trois rayons (x, y, z)" }
+                );
+            }
             if let Some(v) = a.opts.get("vitesse").map(|_| a.get("vitesse", 0.0f64)) {
                 let (nu_f, _) = fluid.props();
                 re = v * info.ref_length_m / nu_f;
@@ -561,6 +569,7 @@ fn cmd_run3d(a: &Args) {
                     if mach > 0.3 { format!(" · Mach {mach:.2} : compressibilité ignorée") } else { String::new() }
                 );
             }
+            mesh_info = Some(info);
             b
         }
         None => Body3D::new(shape, l, a.get("alpha", 0.0f64)),
@@ -589,6 +598,18 @@ fn cmd_run3d(a: &Args) {
         if fp16 { "demi-précision" } else { "simple précision" },
         sim.adapter_name()
     );
+    if let Some(lost) = mesh_info.as_ref().and_then(|i| i.volume_lost(sim.solid_count, l)) {
+        if lost > 0.2 {
+            eprintln!(
+                "Attention : {:.0} % du volume de la maquette disparaît à cette résolution (parties plus fines qu'une maille) : augmenter --l.",
+                100.0 * lost
+            );
+        }
+    }
+    if sim.solid_count == 0 {
+        eprintln!("Aucune maille solide : maquette trop fine pour la grille.");
+        std::process::exit(1);
+    }
     let spt = l as f64 / U as f64;
     let ramp = Ramp {
         steps: (RAMP_T * spt).round() as u64,

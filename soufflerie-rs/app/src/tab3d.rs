@@ -131,6 +131,8 @@ struct Frame {
     status: String,
     info: String,
     error: Option<String>,
+    /// Avertissement sur la maquette (parties perdues à la voxelisation).
+    warning: Option<String>,
     mlups: f64,
 }
 
@@ -150,6 +152,8 @@ pub struct Tab3D {
     /// Mise en place calculée pour l'aperçu : (fichier, réglage, incidence) →
     /// dimensions de la veine à L = 32 et grandeurs de référence.
     preview: Option<((u64, MeshSetup, f64), Preview)>,
+    /// Réglage en attente de stabilisation (gros maillages) et depuis quand.
+    pending: Option<((u64, MeshSetup, f64), Instant)>,
     texture: Option<egui::TextureHandle>,
     slice_id: u64,
     started: bool,
@@ -191,6 +195,7 @@ impl Tab3D {
             stl_count: 0,
             stl_error: None,
             preview: None,
+            pending: None,
             texture: None,
             slice_id: 0,
             started: false,
@@ -233,12 +238,28 @@ impl Tab3D {
         }
     }
 
-    /// Mise en place de la maquette STL (recalculée quand le réglage change).
-    fn mesh_preview(&mut self) -> Option<Preview> {
+    /// Mise en place de la maquette STL, recalculée quand le réglage change ;
+    /// pour un gros maillage, une fois le réglage stable depuis 0,25 s (le
+    /// curseur reste fluide, l'aperçu précédent reste affiché entre-temps).
+    fn mesh_preview(&mut self, ctx: &egui::Context) -> Option<Preview> {
         let s = &self.settings;
         let f = s.stl.as_ref()?;
         let key = (f.id, s.setup.clone(), s.alpha);
-        if self.preview.as_ref().is_none_or(|(k, _)| *k != key) {
+        let stale = self.preview.as_ref().is_none_or(|(k, _)| *k != key);
+        let mut due = self.preview.is_none() || f.tris.len() < 20_000;
+        if stale && !due {
+            if self.pending.as_ref().is_none_or(|(k, _)| *k != key) {
+                self.pending = Some((key.clone(), Instant::now()));
+            }
+            let wait = Duration::from_millis(250);
+            let since = self.pending.as_ref().map_or(wait, |(_, t)| t.elapsed());
+            due = since >= wait;
+            if !due {
+                ctx.request_repaint_after(wait - since);
+            }
+        }
+        if stale && due {
+            self.pending = None;
             let setup = MeshSetup {
                 alpha_deg: s.alpha,
                 ..s.setup.clone()
@@ -311,7 +332,7 @@ impl Tab3D {
             ui.colored_label(Color32::RED, e);
         }
         let mesh = self.settings.shape == Shape3D::Mesh && self.settings.stl.is_some();
-        let preview = if mesh { self.mesh_preview() } else { None };
+        let preview = if mesh { self.mesh_preview(ui.ctx()) } else { None };
         let s = &mut self.settings;
         if s.shape.has_alpha() {
             ui.add(egui::Slider::new(&mut s.alpha, -10.0..=20.0).step_by(1.0).text("incidence (°)"));
@@ -481,6 +502,9 @@ impl Tab3D {
         ui.label(egui::RichText::new(reference(s.shape, s.re)).small());
         ui.add_space(4.0);
         ui.label(egui::RichText::new(&f.info).small().weak());
+        if let Some(w) = &f.warning {
+            ui.colored_label(theme::warn(), w);
+        }
         if let Some(e) = &f.error {
             ui.colored_label(Color32::RED, e);
         }
@@ -824,6 +848,15 @@ fn mesh_controls(ui: &mut egui::Ui, s: &mut Settings, preview: Option<&Preview>)
             if i.blockage > 0.05 {
                 ui.colored_label(theme::warn(), "Blocage de la veine supérieur à 5 % : coefficients surestimés.");
             }
+            let d = i.diag.summary();
+            if !d.is_empty() {
+                let more = if i.diag.watertight() {
+                    ""
+                } else {
+                    " : maillage ouvert, appartenance votée sur trois rayons (x, y, z)"
+                };
+                ui.colored_label(theme::warn(), format!("{d}{more}"));
+            }
         }
         Some(Err(e)) => {
             ui.colored_label(Color32::RED, e);
@@ -920,13 +953,17 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 s.frame.error = None;
             }
             repaint();
+            let mut mesh_info = None;
             let b = match (st.shape, &st.stl) {
                 (Shape3D::Mesh, Some(f)) => {
                     let setup = MeshSetup {
                         alpha_deg: st.alpha,
                         ..st.setup.clone()
                     };
-                    Body3D::from_mesh(&f.tris, st.l, &setup).map(|(b, _)| b)
+                    Body3D::from_mesh(&f.tris, st.l, &setup).map(|(b, i)| {
+                        mesh_info = Some(i);
+                        b
+                    })
                 }
                 (Shape3D::Mesh, None) => Err("aucun fichier STL chargé".into()),
                 (k, _) => Ok(Body3D::new(k, st.l, st.alpha)),
@@ -934,6 +971,17 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             let nu = U as f64 * st.l as f64 / st.re;
             match b.and_then(|b| Gpu3D::new(&b, nu, U, st.fp16).map(|g| (g, b))) {
                 Ok((g, b)) => {
+                    let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
+                    shared.lock().unwrap().frame.warning = match lost {
+                        _ if b.mesh.is_some() && g.solid_count == 0 => {
+                            Some("Aucune maille solide : maquette plus fine que la grille, augmenter la résolution.".into())
+                        }
+                        Some(v) if v > 0.2 => Some(format!(
+                            "{:.0} % du volume de la maquette disparaît à cette résolution (parties plus fines qu'une maille) : augmenter la résolution.",
+                            100.0 * v
+                        )),
+                        _ => None,
+                    };
                     sim = Some(g);
                     body = Some(b);
                 }
