@@ -16,6 +16,79 @@ use crate::geometry::Geometry;
 use crate::shapes::Body;
 
 const STEP_WGSL: &str = include_str!("d2q9.wgsl");
+
+/// Populations en simple précision : f[i·n + maille].
+const STEP_F32: &str = "
+@group(0) @binding(1) var<storage, read> src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+fn ld(i: u32, x: u32, y: u32) -> f32 { return src[i * P.n + y * P.nx + x]; }
+fn ldd(i: u32, c: u32) -> f32 { return dst[i * P.n + c]; }
+fn st9(c: u32, p: array<f32, 9>) {
+  dst[c] = p[0]; dst[P.n + c] = p[1]; dst[2u * P.n + c] = p[2];
+  dst[3u * P.n + c] = p[3]; dst[4u * P.n + c] = p[4]; dst[5u * P.n + c] = p[5];
+  dst[6u * P.n + c] = p[6]; dst[7u * P.n + c] = p[7]; dst[8u * P.n + c] = p[8];
+}
+";
+
+/// Populations en demi-précision, décalées de leur poids (g = f − w), deux
+/// par mot de 32 bits : mot k = (g[2k], g[2k+1]), cinq mots par maille.
+const STEP_F16: &str = "
+@group(0) @binding(1) var<storage, read> src: array<u32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<u32>;
+fn hget(v: u32, i: u32) -> f32 {
+  let h = unpack2x16float(v);
+  return select(h.x, h.y, (i & 1u) == 1u) + W[i];
+}
+fn ld(i: u32, x: u32, y: u32) -> f32 { return hget(src[(i >> 1u) * P.n + y * P.nx + x], i); }
+fn ldd(i: u32, c: u32) -> f32 { return hget(dst[(i >> 1u) * P.n + c], i); }
+fn st9(c: u32, p: array<f32, 9>) {
+  dst[c] = pack2x16float(vec2<f32>(p[0] - W[0], p[1] - W[1]));
+  dst[P.n + c] = pack2x16float(vec2<f32>(p[2] - W[2], p[3] - W[3]));
+  dst[2u * P.n + c] = pack2x16float(vec2<f32>(p[4] - W[4], p[5] - W[5]));
+  dst[3u * P.n + c] = pack2x16float(vec2<f32>(p[6] - W[6], p[7] - W[7]));
+  dst[4u * P.n + c] = pack2x16float(vec2<f32>(p[8] - W[8], 0.0));
+}
+";
+
+const MACRO_F32: &str = "
+@group(0) @binding(1) var<storage, read> f: array<f32>;
+fn ldm(i: u32, c: u32) -> f32 { return f[i * P.n + c]; }
+";
+
+const MACRO_F16: &str = "
+@group(0) @binding(1) var<storage, read> f: array<u32>;
+const WM = array<f32, 9>(0.44444445, 0.11111111, 0.11111111, 0.11111111, 0.11111111, 0.027777778, 0.027777778, 0.027777778, 0.027777778);
+fn ldm(i: u32, c: u32) -> f32 {
+  let h = unpack2x16float(f[(i >> 1u) * P.n + c]);
+  return select(h.x, h.y, (i & 1u) == 1u) + WM[i];
+}
+";
+
+/// Simple vers demi-précision (IEEE 754 binary16, arrondi au plus proche).
+fn f32_to_f16(v: f32) -> u16 {
+    let b = v.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let man = b & 0x7f_ffff;
+    if exp == 255 {
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = (man | 0x80_0000) >> (1 - e);
+        let r = (m >> 13) + ((m >> 12) & 1);
+        return sign | r as u16;
+    }
+    let r = ((e as u32) << 10) | (man >> 13);
+    let r = r + ((man >> 12) & 1);
+    sign | r as u16
+}
 const MACRO_WGSL: &str = include_str!("macros.wgsl");
 const SA_WGSL: &str = include_str!("sa.wgsl");
 /// Pas par soumission (emplacements de paramètres).
@@ -138,7 +211,9 @@ impl GpuSolver {
             })
         };
         let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
-        let f = [mk("f0", 36 * n as u64, st), mk("f1", 36 * n as u64, st)];
+        // Populations : 9 × 4 octets par maille, ou 5 mots en demi-précision.
+        let fbytes = if cfg.half { 20 } else { 36 } * n as u64;
+        let f = [mk("f0", fbytes, st), mk("f1", fbytes, st)];
         let kind = mk("kind", 4 * n as u64, st);
         let wq = mk("wq", 36 * n as u64, st);
         let aux = mk("aux", 4 * (nx + ny) as u64, st);
@@ -218,7 +293,9 @@ impl GpuSolver {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("d2q9"),
-            source: wgpu::ShaderSource::Wgsl(STEP_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", STEP_WGSL, if cfg.half { STEP_F16 } else { STEP_F32 }).into(),
+            ),
         });
         let pipe = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -251,7 +328,9 @@ impl GpuSolver {
         });
         let mmod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("macros"),
-            source: wgpu::ShaderSource::Wgsl(MACRO_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", MACRO_WGSL, if cfg.half { MACRO_F16 } else { MACRO_F32 }).into(),
+            ),
         });
         let macro_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("macros"),
@@ -592,8 +671,28 @@ impl GpuSolver {
                 }
             }
         }
-        for b in &self.f {
-            self.queue.write_buffer(b, 0, bytemuck::cast_slice(&f));
+        if self.cfg.half {
+            // g = f − w en demi-précision, deux populations par mot.
+            let w = crate::d2q9::W;
+            let mut h = vec![0u32; 5 * n];
+            for k in 0..5 {
+                for c in 0..n {
+                    let a = f32_to_f16(f[2 * k * n + c] - w[2 * k]) as u32;
+                    let b = if 2 * k + 1 < 9 {
+                        f32_to_f16(f[(2 * k + 1) * n + c] - w[2 * k + 1]) as u32
+                    } else {
+                        0
+                    };
+                    h[k * n + c] = a | (b << 16);
+                }
+            }
+            for b in &self.f {
+                self.queue.write_buffer(b, 0, bytemuck::cast_slice(&h));
+            }
+        } else {
+            for b in &self.f {
+                self.queue.write_buffer(b, 0, bytemuck::cast_slice(&f));
+            }
         }
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.clear_buffer(&self.force, 0, None);

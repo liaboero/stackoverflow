@@ -40,6 +40,8 @@ pub struct SolverConfig {
     pub collision: Collision,
     pub bouzidi: bool,
     pub sponge_fraction: f64,
+    /// Moteur GPU : populations en demi-précision (deux fois moins de mémoire).
+    pub half: bool,
 }
 
 /// Somme des efforts sur un nombre de pas.

@@ -132,7 +132,7 @@ impl Args {
                 Transition::Turbulent
             } else {
                 Transition::Free
-            },
+            },            gpu_half: self.get("half", 0u8) == 1,
         }
     }
 }
@@ -682,11 +682,12 @@ fn cmd_bench(a: &Args) {
     };
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut cases = vec![
-        ("CPU, 1 fil".to_string(), EngineKind::Cpu { threads: 1 }),
-        (format!("CPU, {cores} fils"), EngineKind::Cpu { threads: cores }),
+        ("CPU, 1 fil".to_string(), EngineKind::Cpu { threads: 1 }, false),
+        (format!("CPU, {cores} fils"), EngineKind::Cpu { threads: cores }, false),
     ];
     if a.get("gpu", 1u8) == 1 {
-        cases.push(("GPU".to_string(), EngineKind::Gpu));
+        cases.push(("GPU".to_string(), EngineKind::Gpu, false));
+        cases.push(("GPU demi".to_string(), EngineKind::Gpu, true));
     }
     println!(
         "NACA 0012, α = 4°, Re = 1000, L = {l} : grille {}×{} = {:.2} M mailles",
@@ -694,8 +695,12 @@ fn cmd_bench(a: &Args) {
         12 * l,
         (24 * l * 12 * l) as f64 / 1e6
     );
-    for (name, engine) in cases {
-        let mut wt = match WindTunnel::new(TunnelConfig { engine, ..base.clone() }) {
+    for (name, engine, gpu_half) in cases {
+        let mut wt = match WindTunnel::new(TunnelConfig {
+            engine,
+            gpu_half,
+            ..base.clone()
+        }) {
             Ok(w) => w,
             Err(e) => {
                 println!("{name:12} : indisponible ({e})");

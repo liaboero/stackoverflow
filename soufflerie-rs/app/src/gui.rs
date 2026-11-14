@@ -375,6 +375,16 @@ impl App {
                     ui.selectable_value(&mut self.settings.cfg.engine, EngineKind::Gpu, "GPU");
                 }
             });
+            if self.settings.cfg.engine == EngineKind::Gpu {
+                let h0 = self.settings.cfg.gpu_half;
+                ui.horizontal(|ui| {
+                    ui.label("Précision GPU");
+                    ui.selectable_value(&mut self.settings.cfg.gpu_half, false, "simple");
+                    ui.selectable_value(&mut self.settings.cfg.gpu_half, true, "demi")
+                        .on_hover_text("Populations sur 2 octets : deux fois moins de mémoire, plus rapide ; écart ≈ 0,2 % sur les efforts moyens");
+                });
+                rebuild |= self.settings.cfg.gpu_half != h0;
+            }
             rebuild |= self.settings.cfg.engine != e0;
             let c0 = (self.settings.cfg.collision, self.settings.cfg.les);
             ui.horizontal(|ui| {

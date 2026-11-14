@@ -3,7 +3,7 @@ struct M {
   nx: u32, ny: u32, n: u32, pad: u32,
 };
 @group(0) @binding(0) var<uniform> P: M;
-@group(0) @binding(1) var<storage, read> f: array<f32>;
+// Binding 1 (populations f) et fonction ldm : préambule ajouté par gpu.rs.
 @group(0) @binding(2) var<storage, read> kind: array<u32>;
 @group(0) @binding(3) var<storage, read_write> outm: array<f32>;
 
@@ -21,7 +21,7 @@ fn macros(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   var v: array<f32, 9>;
   for (var i = 0u; i < 9u; i++) {
-    v[i] = f[i * P.n + idx];
+    v[i] = ldm(i, idx);
   }
   let rho = v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7] + v[8];
   outm[idx] = rho;

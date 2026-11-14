@@ -75,6 +75,8 @@ pub struct TunnelConfig {
     pub engine: EngineKind,
     pub turbulence: Turbulence,
     pub transition: Transition,
+    /// Moteur GPU : populations en demi-précision.
+    pub gpu_half: bool,
 }
 
 impl Default for TunnelConfig {
@@ -91,6 +93,7 @@ impl Default for TunnelConfig {
             engine: EngineKind::Cpu { threads: 0 },
             turbulence: Turbulence::Auto,
             transition: Transition::Free,
+            gpu_half: false,
         }
     }
 }
@@ -224,6 +227,7 @@ impl WindTunnel {
             collision: cfg.collision,
             bouzidi: cfg.bouzidi,
             sponge_fraction: 0.12,
+            half: cfg.gpu_half,
         };
         let body = Body::new(cfg.shape, &cfg.params, l as f64, x0, y0, cfg.u_in as f64);
         let mut engine = match cfg.engine {

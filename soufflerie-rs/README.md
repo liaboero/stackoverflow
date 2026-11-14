@@ -123,9 +123,63 @@ la version web ; Q est annulé à moins de deux mailles du corps, où la
 couche limite mal résolue donne des valeurs parasites. Une coupe « à plat »
 (vitesse, vorticité, Q) reste disponible.
 
-Pas encore porté : balayage automatique dans
-l'interface (les commandes `polar` et `panel` le remplacent), unités
-physiques (fluide, corde, vitesse) et Mach réel dans l'interface.
+L'interface 2D a aussi la polaire automatique (balayage d'incidence ou de
+rotation, stabilisation puis mesure adaptatives, onglet « Polaire », copie
+CSV) et l'échelle physique (air ou eau, longueur de référence : vitesse,
+durées, efforts par mètre d'envergure, alerte de Mach réel). Le moteur GPU
+2D peut stocker ses populations en demi-précision (`--half 1`, ou
+« Précision GPU » dans l'interface) : deux fois moins de mémoire, écarts de
+0,1 à 0,2 % sur les efforts moyens (cylindre Re = 100, NACA 0012 Re = 10⁶
+avec Spalart–Allmaras), 3 % sur l'amplitude de Cz'.
+
+## Validation 3D
+
+Résultats bruts dans `validation/` ; `tools/validation3d.sh` refait les
+calculs (GTX 1070, une pause entre deux calculs pour limiter l'échauffement).
+
+**Sphère, traînée selon Re** (50 t*, moyenne sur les 20 derniers ; référence
+de Schiller–Naumann et Clift) :
+
+| Re | Cx, D = 12 mailles | Cx, D = 16 mailles | Référence | Écart à 16 mailles |
+| --- | --- | --- | --- | --- |
+| 20 | 2,849 | 2,841 | 2,610 | +8,9 % |
+| 50 | 1,666 | 1,650 | 1,539 | +7,2 % |
+| 100 | 1,174 | 1,151 | 1,094 | +5,2 % |
+| 200 | 0,870 | 0,833 | 0,810 | +2,8 % |
+| 300 | 0,762 | 0,713 | 0,691 | +3,2 % |
+| 500 | 0,748 | 0,681 | 0,576 | +18 % |
+| 1000 | 0,676 | 0,613 | 0,466 | +32 % |
+
+L'écart diminue partout quand la grille s'affine. Aux faibles Reynolds, il
+vient surtout du confinement (veine de 6 D, bords périodiques), qui pèse
+plus quand la zone d'influence visqueuse s'étend loin. Au-delà de Re = 300,
+la couche limite n'a plus que 2 à 3 mailles à D = 16, et la sous-maille
+(active dès τ < 0,51) ajoute de la traînée : il faut D = 24 à 32 pour ces
+Reynolds. Au-delà de Re ≈ 210, la portance latérale apparaît comme attendu
+(sillage oblique) ; le lâcher périodique à Re = 300 (St ≈ 0,13) n'est pas
+encore détecté en 50 t*.
+
+**Aile rectangulaire NACA 0012 d'allongement 4** : portance 3D (corde
+16 mailles) comparée à la correction d'allongement de Helmbold appliquée à
+la pente 2D du même profil, au même Reynolds, calculée par la soufflerie 2D
+(`polar`, L = 16) :
+
+| α | Re = 200, 3D | Helmbold + 2D | Re = 1000, 3D | Helmbold + 2D |
+| --- | --- | --- | --- | --- |
+| 4° | 0,102 | 0,149 | 0,094 | 0,101 |
+| 8° | 0,246 | 0,289 | 0,182 | 0,180 |
+| 12° | 0,377 | 0,415 | 0,275 | 0,350 |
+
+À Re = 1000, l'accord est de 7 % à 4° et de 1 % à 8° ; à 12°, le profil 2D
+est déjà instationnaire et la comparaison ne tient plus. À Re = 200, l'aile
+3D porte 10 à 30 % de moins que la correction d'allongement : la couche
+limite épaisse et les tourbillons marginaux visqueux sortent du cadre de la
+ligne portante. La surface portante alimentée par les panneaux n'est valable
+qu'à partir de Re = 5·10⁴ (CL = 0,253 à 4°, deux fois et demie plus que
+l'aile 3D à Re = 1000) : l'écart mesure l'effet du Reynolds, pas une erreur.
+À incidence nulle, l'aile 3D garde un Cz de −0,03 à Re = 1000 (−0,007 à
+Re = 200) alors qu'il devrait être nul : à examiner (décalage d'un quart de
+maille de la maquette, ou sillage instationnaire).
 
 ## Installation
 
@@ -216,6 +270,8 @@ soufflerie-rs/
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
 │   └── tests/          validation, panneaux, aile finie, 3D, comparaison GPU/CPU
+├── validation/         résultats de validation 3D (CSV)
+├── tools/validation3d.sh  calculs de validation 3D
 └── app/                application : interface (egui) et commandes
     ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, bench)
     ├── src/gui.rs      interface graphique, onglets

@@ -15,8 +15,8 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> src: array<f32>;
-@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+// Bindings 1 et 2 (populations src, dst) et fonctions ld, ldd, st9 : préambule
+// ajouté par gpu.rs, en simple précision ou en demi-précision (g = f − w).
 @group(0) @binding(3) var<storage, read> kind: array<u32>;
 @group(0) @binding(4) var<storage, read> wq: array<f32>;
 @group(0) @binding(5) var<storage, read> aux: array<f32>;
@@ -69,10 +69,6 @@ const CY = array<i32, 9>(0, 0, 1, 0, -1, 1, 1, -1, -1);
 const W = array<f32, 9>(0.44444445, 0.11111111, 0.11111111, 0.11111111, 0.11111111, 0.027777778, 0.027777778, 0.027777778, 0.027777778);
 const OPP = array<u32, 9>(0u, 3u, 4u, 1u, 2u, 7u, 8u, 5u, 6u);
 const REFY = array<u32, 9>(0u, 1u, 4u, 3u, 2u, 8u, 7u, 6u, 5u);
-
-fn ld(i: u32, x: u32, y: u32) -> f32 {
-  return src[i * P.n + y * P.nx + x];
-}
 
 fn feq(rho: f32, ux: f32, uy: f32) -> array<f32, 9> {
   var e: array<f32, 9>;
@@ -279,9 +275,7 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
     tau += 3.0 * nu_turb(s.w);
   }
   let p = collide(f, tau, c18, aux[P.nx + y]);
-  for (var i = 0u; i < 9u; i++) {
-    dst[i * P.n + idx] = p[i];
-  }
+  st9(idx, p);
   let wid = k >> 2u;
   if (wid != 0u) {
     force[wid - 1u] += vec4<f32>(fsum, 0.0);
@@ -305,7 +299,7 @@ fn boundary(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var fn_: array<f32, 9>;
     for (var i = 0u; i < 9u; i++) {
-      fn_[i] = dst[i * P.n + y * P.nx + nb];
+      fn_[i] = ldd(i, y * P.nx + nb);
     }
     let rho = fn_[0] + fn_[1] + fn_[2] + fn_[3] + fn_[4] + fn_[5] + fn_[6] + fn_[7] + fn_[8];
     let ux = (fn_[1] - fn_[3] + fn_[5] - fn_[6] - fn_[7] + fn_[8]) / rho;
@@ -317,9 +311,11 @@ fn boundary(@builtin(global_invocation_id) gid: vec3<u32>) {
       eb = feq(1.0, ux, uy);
     }
     let en = feq(rho, ux, uy);
+    var fb: array<f32, 9>;
     for (var i = 0u; i < 9u; i++) {
-      dst[i * P.n + y * P.nx + b] = eb[i] + fn_[i] - en[i];
+      fb[i] = eb[i] + fn_[i] - en[i];
     }
+    st9(y * P.nx + b, fb);
     if ((P.flags & 8u) != 0u) {
       let ib = y * P.nx + b;
       var u = vec2<f32>(ux, uy);

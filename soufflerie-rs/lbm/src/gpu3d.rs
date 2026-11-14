@@ -856,6 +856,8 @@ pub struct Gpu3D {
     render_pipe: wgpu::ComputePipeline,
     /// ω et Q par maille (alloué au premier rendu 3D).
     deriv: Option<wgpu::Buffer>,
+    /// Tampons du rendu réutilisés d'une image à l'autre : taille, image, relecture.
+    render_bufs: Option<(usize, usize, wgpu::Buffer, wgpu::Buffer)>,
     bind: Vec<wgpu::BindGroup>,
     init_bind: Vec<wgpu::BindGroup>,
     disp: (u32, u32),
@@ -1201,6 +1203,7 @@ impl Gpu3D {
             derive_pipe,
             render_pipe,
             deriv: None,
+            render_bufs: None,
             bind,
             init_bind,
             disp,
@@ -1445,7 +1448,6 @@ impl Gpu3D {
                 mapped_at_creation: false,
             }));
         }
-        let deriv = self.deriv.as_ref().unwrap();
         let dims = [self.nx as u32, self.ny as u32, self.nz as u32, self.n as u32];
         let dbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("derive_params"),
@@ -1477,18 +1479,23 @@ impl Gpu3D {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let size = (4 * w * h) as u64;
-        let img = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("image3d"),
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("image3d_read"),
-            size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        if !matches!(&self.render_bufs, Some((bw, bh, _, _)) if *bw == w && *bh == h) {
+            let img = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("image3d"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("image3d_read"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.render_bufs = Some((w, h, img, staging));
+        }
+        let (_, _, img, staging) = self.render_bufs.as_ref().unwrap();
+        let deriv = self.deriv.as_ref().unwrap();
         let dbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("derive3d"),
             layout: &self.derive_pipe.get_bind_group_layout(0),
@@ -1507,7 +1514,7 @@ impl Gpu3D {
                 buf_entry(1, &self.macro_buf, None),
                 buf_entry(2, &self.wall, None),
                 buf_entry(3, deriv, None),
-                buf_entry(4, &img, None),
+                buf_entry(4, img, None),
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -1521,7 +1528,7 @@ impl Gpu3D {
             pass.dispatch_workgroups((w as u32).div_ceil(8), (h as u32).div_ceil(8), 1);
         }
         self.queue.submit([enc.finish()]);
-        let v = self.read(&img, &staging, size);
+        let v = self.read(img, staging, size);
         if v.is_empty() {
             self.lost = true;
             return vec![0; 4 * w * h];

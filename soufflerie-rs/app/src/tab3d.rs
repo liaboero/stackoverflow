@@ -480,8 +480,10 @@ impl Tab3D {
             (self.settings.az, self.settings.el, self.settings.dist) = (62.0, 24.0, 6.0);
             changed = true;
         }
-        // Image à ~900 pixels de large au plus (le lancer de rayons coûte par pixel).
-        let k = (900.0 / rect.width()).min(1.0);
+        // Image à ~900 pixels de large au plus (le lancer de rayons coûte par
+        // pixel), à demi-résolution pendant qu'on tourne ou rapproche la vue.
+        let moving = resp.dragged() || changed;
+        let k = (900.0 / rect.width()).min(1.0) * if moving { 0.5 } else { 1.0 };
         let want = (
             ((rect.width() * k) as usize).max(64),
             ((rect.height() * k) as usize).max(64),
