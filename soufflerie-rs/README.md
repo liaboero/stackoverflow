@@ -398,6 +398,24 @@ sans loi de paroi (Re = 1000, sous-maille seule : +19 % sur la correction
 d'allongement), ce qui oriente vers la résolution du bord de fuite et du
 sillage près de l'aile plutôt que vers la seule loi de paroi.
 
+**Aile infinie : le 3D contre le 2D.** Une aile NACA 0012 qui occupe
+toute la largeur périodique de la veine 3D (veine haute de 12 cordes,
+L = 32, Re = 10⁶, α = 4°) porte Cz 0,547 contre 0,505 pour la soufflerie
+2D au même maillage (panneaux et couche limite : 0,471). Avec la
+sous-maille amortie près de la paroi comme en 2D, elle porte exactement
+0,505. L'aile d'allongement 4 porte alors 0,321, soit 0,63 fois l'aile
+infinie, le rapport de la ligne portante d'Helmbold (0,62) : le passage
+du 2D au 3D est juste, et l'excès par rapport à VSPAERO et à la mesure
+vient du profil lui-même, qui porte déjà 7 % de trop en 2D avec la loi de
+paroi (épaisseur de couche limite et décambrage visqueux mal rendus par
+le glissement). Cet amortissement n'est pas gardé par défaut : sans
+plancher, il diverge (aile finie, L = 32, 8°) ; avec un plancher, il
+augmente la portance de l'aile finie (0,621 → 0,655). Prochaine étape :
+corriger la portance du profil en 2D (comparaison panneaux + couche limite
+déjà en place), le 3D suivra. Dans ce montage, la traînée de l'aile
+infinie (0,041 à 0°, contre 0,009 en 2D, une fois les bandes latérales
+retirées) reste à comprendre.
+
 **Traînée et taille de la veine.** Sur l'aile d'allongement 4, la traînée
 est établie dès t* = 5 et ne bouge plus jusqu'à t* = 40, mais vaut 0,042
 dans une veine serrée et 0,062 dans une veine 2,5 fois plus large : un biais
