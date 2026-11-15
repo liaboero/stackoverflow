@@ -116,6 +116,8 @@ pub struct MeshSetup {
     /// amont, 7,5 M en aval, 2,5 M de côté). Une aile très allongée tient dans
     /// une veine plus serrée : le blocage affiché dit si c'est raisonnable.
     pub margin: f64,
+    /// Sol mobile : garde au sol (unités du fichier) ; None : veine libre.
+    pub ground: Option<f64>,
 }
 
 impl Default for MeshSetup {
@@ -129,6 +131,7 @@ impl Default for MeshSetup {
             ref_length: None,
             ref_area: None,
             margin: 1.0,
+            ground: None,
         }
     }
 }

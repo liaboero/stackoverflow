@@ -1,0 +1,54 @@
+// Aile NACA TR-1208 (flèche 45°, allongement 8,02, effilement 0,45,
+// NACA 63A012), d'après le tutoriel OpenVSP « Swept_Wing_API » : géométrie
+// exportée en STL pour la soufflerie, puis balayage VSPAERO (VLM) à
+// Re = 4·10⁶ sur la corde moyenne, Mach 0,2. Écrit « vlm <α> <CL> <CD> ».
+void main()
+{
+    string w = AddGeom( "WING" );
+    SetGeomName( w, "TR1208" );
+    SetParmVal( w, "Sym_Planar_Flag", "Sym", SYM_XZ );
+    SetDriverGroup( w, 1, SPAN_WSECT_DRIVER, TAPER_WSECT_DRIVER, ROOTC_WSECT_DRIVER );
+    SetParmVal( w, "SectTess_U", "XSec_1", 20 );
+    SetParmVal( w, "Span", "XSec_1", 63.63 );
+    SetParmVal( w, "Taper", "XSec_1", 0.45 );
+    SetParmVal( w, "Root_Chord", "XSec_1", 21.941 );
+    SetParmVal( w, "Sweep", "XSec_1", 45.0 );
+    SetParmVal( w, "Sweep_Location", "XSec_1", 0.25 );
+    Update();
+    string xs = GetXSecSurf( w, 0 );
+    ChangeXSecShape( xs, 0, XS_FILE_AIRFOIL );
+    ReadFileAirfoil( GetXSec( xs, 0 ), "NACA63A012.af" );
+    ChangeXSecShape( xs, 1, XS_FILE_AIRFOIL );
+    ReadFileAirfoil( GetXSec( xs, 1 ), "NACA63A012.af" );
+    Update();
+    WriteVSPFile( "TR1208.vsp3", SET_ALL );
+    ExportFile( "TR1208.stl", SET_ALL, EXPORT_STL );
+    ClearVSPModel();
+    ReadVSPFile( "TR1208.vsp3" );
+    Update();
+    string cg = "VSPAEROComputeGeometry";
+    SetAnalysisInputDefaults( cg );
+    ExecAnalysis( cg );
+    string an = "VSPAEROSweep";
+    SetAnalysisInputDefaults( an );
+    array<double> v( 1 );
+    v[0] = 2024.35; SetDoubleAnalysisInput( an, "Sref", v );
+    v[0] = 127.26; SetDoubleAnalysisInput( an, "bref", v );
+    v[0] = 16.672; SetDoubleAnalysisInput( an, "cref", v );
+    v[0] = 0.0; SetDoubleAnalysisInput( an, "AlphaStart", v );
+    v[0] = 8.0; SetDoubleAnalysisInput( an, "AlphaEnd", v );
+    array<int> n( 1, 5 ); SetIntAnalysisInput( an, "AlphaNpts", n );
+    v[0] = 0.2; SetDoubleAnalysisInput( an, "MachStart", v );
+    v[0] = 4.0e6; SetDoubleAnalysisInput( an, "ReCref", v );
+    ExecAnalysis( an );
+    array<string> ids = FindResultsIDs( "VSPAERO_History" );
+    for ( int k = 0; k < int( ids.size() ); k++ )
+    {
+        array<double> a = GetDoubleResults( ids[k], "Alpha", 0 );
+        array<double> cl = GetDoubleResults( ids[k], "CLtot", 0 );
+        array<double> cdi = GetDoubleResults( ids[k], "CDi", 0 );
+        array<double> cdo = GetDoubleResults( ids[k], "CDo", 0 );
+        int j = int( a.size() ) - 1;
+        Print( "vlm " + a[j] + " " + cl[j] + " " + ( cdi[j] + cdo[j] ) );
+    }
+}

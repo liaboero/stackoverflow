@@ -110,6 +110,8 @@ pub struct Body3D {
     pub mesh: Option<Arc<MeshBody>>,
     /// Volume du maillage (mailles³) ; 0 pour les formes analytiques.
     pub mesh_volume: f64,
+    /// Sol mobile sous la maquette (plancher de la veine en z = −½).
+    pub ground: bool,
 }
 
 use std::sync::Arc;
@@ -203,6 +205,7 @@ impl Body3D {
             half,
             mesh: None,
             mesh_volume: 0.0,
+            ground: false,
         }
     }
 
@@ -257,7 +260,13 @@ impl Body3D {
         let ms = k * e[1].max(e[2]).max(lf);
         let nx = (3.5 * mx + e[0] + 7.5 * mx).round() as usize;
         let ny = (6.0 * k * lf).max(e[1] + 5.0 * ms).round() as usize;
-        let nz = (6.0 * k * lf).max(e[2] + 5.0 * ms).round() as usize;
+        // Avec sol : maquette posée à `ground` (unités du fichier) au-dessus du
+        // plancher, 2,5 M d'air au-dessus.
+        let clear = setup.ground.map(|g| g * s);
+        let nz = match clear {
+            Some(c) => (3.0 * k * lf).max(c + e[2] + 2.5 * ms).round() as usize,
+            None => (6.0 * k * lf).max(e[2] + 5.0 * ms).round() as usize,
+        };
         let cells = nx as f64 * ny as f64 * nz as f64;
         if cells > 4e8 {
             return Err(format!(
@@ -270,7 +279,10 @@ impl Body3D {
         let shift = [
             3.5 * mx - rl[0] + 0.25,
             0.5 * ny as f64 - 0.5 * (rl[1] + rh[1]) + 0.25,
-            0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25,
+            match clear {
+                Some(c) => c - 0.5 - rl[2] + 0.25,
+                None => 0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25,
+            },
         ];
         for t in &mut placed {
             for p in t.iter_mut() {
@@ -319,6 +331,7 @@ impl Body3D {
             half: 0.0,
             mesh: Some(Arc::new(mesh)),
             mesh_volume: diag.volume * s * s * s,
+            ground: setup.ground.is_some(),
         };
         Ok((b, info))
     }
@@ -401,6 +414,7 @@ impl Body3D {
             half: 2.0 * self.half,
             mesh: self.mesh.as_ref().map(|m| Arc::new(m.transformed(|p| t(p)))),
             mesh_volume: 8.0 * self.mesh_volume,
+            ground: false,
         }
     }
 

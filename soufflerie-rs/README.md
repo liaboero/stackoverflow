@@ -342,6 +342,89 @@ Ce que cela montre :
   (0,042 ou 0,062 selon la marge) : en 3D, seule la portance se compare
   aujourd'hui, et la traînée reste qualitative.
 
+## Suites de la comparaison
+
+**Outils ajoutés.**
+
+- `run3d --envergure fichier.csv` : répartition de la portance en
+  envergure (c·cl/c_ref par tranche, efforts de la grille la plus fine sur
+  deux temps convectifs de plus).
+- Moment de tangage Cm des maquettes STL (et avec `--xref`), autour du
+  point situé à xref longueur de référence de l'avant (quart de corde par
+  défaut), positif à cabrer.
+- `--sol <garde au sol>` : sol mobile (plancher qui défile à la vitesse
+  amont, plafond glissant) pour les véhicules ; pas encore avec le
+  raffinement local.
+- `--marge` : veine resserrée autour d'une maquette très allongée.
+- Raffinement 3D jusqu'à ×8 (`--raff 3`, interface « ×8 ») : aile
+  d'allongement 4 à 4°, L = 8 + ×8 → Cz 0,298, Cx 0,032, contre L = 16 + ×4
+  (même résolution près de l'aile) → 0,306, 0,032. À L = 16 + ×8 (128
+  mailles par corde), le calcul dépasse 30 min sur une GTX 1070.
+- `tools/comparaison_vspaero.sh` : construit l'aile de TR-1208 dans
+  OpenVSP (`tools/vsp/`), lance VSPAERO, exporte le STL, lance la soufflerie
+  à 0–8° et écrit le tableau mesure / VSPAERO / soufflerie.
+
+**Répartition en envergure** (TR-1208, α = 4,7°,
+`validation/tr1208_envergure.csv`) : l'excès de portance de la soufflerie
+est réparti sur toute la mi-envergure (c·cl/(CL·c̄) ≈ 1,2 entre 25 et 50 %
+de la demi-envergure, contre 1,1 mesuré et 1,07 pour VSPAERO), pas
+concentré au saumon ni à l'emplanture. Les efforts par maille sont bruités
+par l'escalier des bords : il faut des tranches d'environ 0,13 demi-envergure.
+
+**Loi de paroi : ce qui a été essayé** (aile d'allongement 4, α = 4°,
+référence ≈ 0,26 à 0,27) :
+
+| Variante | Cz |
+| --- | --- |
+| Glissement de Spalding à la première maille (actuel) | 0,306 |
+| Sans glissement dans les 2 ou 4 dernières mailles (bord de fuite) | 0,299 / 0,288 |
+| Vitesse échantillonnée à 2 ou 3 mailles de la paroi | 0,391 / 0,345 |
+| Sans glissement du tout (Spalart–Allmaras gardé) | 0,147 |
+
+Le glissement encadre la bonne valeur mais en fait trop, et la cause n'est
+ni le bord de fuite seul ni une rétroaction de la première maille : la
+correction reste à trouver (piste suivante : imposer la contrainte
+pariétale comme une force plutôt qu'un glissement de paroi). Aucune de ces
+variantes n'est gardée.
+
+**Traînée et taille de la veine.** Sur l'aile d'allongement 4, la traînée
+est établie dès t* = 5 et ne bouge plus jusqu'à t* = 40, mais vaut 0,042
+dans une veine serrée et 0,062 dans une veine 2,5 fois plus large : un biais
+de domaine stable, à l'opposé d'un effet de blocage (la veine plus large
+traîne plus), à expliquer avant toute correction de blocage.
+
+**Sphère à travers la crise de traînée** (D = 16 + ×2) :
+
+| Re | Loi de paroi | Sans loi de paroi | Achenbach (mesure) |
+| --- | --- | --- | --- |
+| 10⁵ | 0,151 | 0,334 | ≈ 0,47 |
+| 3·10⁵ | 0,136 | 0,336 | ≈ 0,1 (crise) |
+| 10⁶ | 0,123 | 0,334 | ≈ 0,13 |
+| 3·10⁶ | 0,114 | 0,339 | ≈ 0,18 |
+
+La loi de paroi donne le bon ordre de grandeur au-delà de la crise, mais
+ni la crise ni la remontée ; sans elle, la sphère reste sous-critique.
+
+**Corps d'Ahmed à 25° sur sol mobile** (60 m/s, Re = 4,3·10⁶, garde au sol
+50 mm, sans pieds ; mesure : Cx = 0,285) : Cx 0,78 à L = 32 (garde au sol
+d'une maille et demie : soubassement bouché, Cz = 1,5), 0,60 à L = 64
+(Cz = 1,0, lâcher périodique). Hors de portée sans raffinement près du sol.
+Une sphère à un diamètre du sol garde une portance faible (Cz = 0,03) :
+la condition de sol elle-même est saine.
+
+**Transition sur TR-1208** (α = 4°, laminaire jusqu'à 30 % de la corde) :
+Cz 0,317 au lieu de 0,314, Cx 0,0396 au lieu de 0,0415 : effet faible,
+l'excès de portance ne vient pas de là.
+
+**Moment de tangage.** Le point par défaut (quart de la longueur de
+référence depuis l'avant de la maquette) n'est pas le quart de la corde
+moyenne d'une aile en flèche : pour comparer à une mesure, donner `--xref`
+(TR-1208 à 4° : Cm = −0,58 autour de ce point par défaut, très en avant du
+foyer).
+
+**Non fait.** Ailes de Sivells : les géométries et mesures sont dans des
+rapports NACA scannés, non extraits.
+
 ## Maquettes STL (3D)
 
 Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le

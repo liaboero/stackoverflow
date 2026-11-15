@@ -427,6 +427,8 @@ impl Tab3D {
             ui.selectable_value(&mut s.refine, 2, format!("×4 ({})", 4 * s.l)).on_hover_text(
                 "Deux grilles imbriquées, 2 et 4 fois plus fines : couche limite et parois minces                  mieux résolues pour une fraction du coût d'une grille uniforme",
             );
+            ui.selectable_value(&mut s.refine, 3, format!("×8 ({})", 8 * s.l))
+                .on_hover_text("Trois grilles imbriquées : calcul plus long, mémoire GPU à surveiller");
         });
         ui.horizontal(|ui| {
             let label = if s.running { "Pause" } else { "Reprendre" };

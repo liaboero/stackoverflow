@@ -527,6 +527,7 @@ fn cmd_run3d(a: &Args) {
                 ref_length: a.opts.get("lref").map(|_| a.get("lref", 0.0f64)),
                 ref_area: a.opts.get("sref").map(|_| a.get("sref", 0.0f64)),
                 margin: a.get("marge", 1.0f64),
+                ground: a.opts.get("sol").map(|_| a.get("sol", 0.0f64)),
             };
             let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
                 eprintln!("{e}");
@@ -584,7 +585,7 @@ fn cmd_run3d(a: &Args) {
         "off" | "none" => false,
         _ => re >= lbm::tunnel::RE_SA_AUTO,
     };
-    let depth = a.get("raff", 0usize).min(2);
+    let depth = a.get("raff", 0usize).min(3);
     let mut sim = match Gpu3D::with_refinement(&body, nu, U, fp16, sa, depth) {
         Ok(s) => s,
         Err(e) => {
@@ -676,9 +677,33 @@ fn cmd_run3d(a: &Args) {
     }
     // Répartition de la portance en envergure : efforts par maille pariétale
     // moyennés sur deux temps convectifs de plus, regroupés par demi-maille en y.
-    if let Some(path) = a.opts.get("envergure") {
+    // Moment de tangage (efforts par maille pariétale sur deux temps convectifs
+    // de plus), autour du point situé à xref longueur de référence de l'avant
+    // de la maquette (quart de corde par défaut), au centre en y et z ;
+    // positif à cabrer.
+    let wf = if a.opts.contains_key("envergure") || a.opts.contains_key("xref") || shape == Shape3D::Mesh {
         sim.run((2.0 * spt) as usize, &ramp);
-        let w = sim.take_wall_forces();
+        Some(sim.take_wall_forces())
+    } else {
+        None
+    };
+    if let Some(w) = &wf {
+        let bb = body.bounds;
+        let xr = bb.x0 + a.get("xref", 0.25f64) * l as f64;
+        let zr = 0.5 * (bb.z0 + bb.z1);
+        let my: f64 = w
+            .pos
+            .iter()
+            .zip(&w.force)
+            .map(|(p, f)| (p[2] - zr) * f[0] - (p[0] - xr) * f[2])
+            .sum();
+        eprintln!(
+            "Cm = {:.4} (autour de {:.2} L de l'avant, rapporté à la surface et à la longueur de référence)",
+            my / (q * l as f64),
+            a.get("xref", 0.25f64)
+        );
+    }
+    if let (Some(path), Some(w)) = (a.opts.get("envergure"), &wf) {
         let bb = body.bounds;
         let (yc, half) = (0.5 * (bb.y0 + bb.y1), 0.5 * (bb.y1 - bb.y0));
         let dy = 0.5;

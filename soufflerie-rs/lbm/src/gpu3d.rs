@@ -165,7 +165,8 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
   let ny = i32(P.ny);
   let nz = i32(P.nz);
   let yy = (yi + ny) % ny;
-  let zz = (zi + nz) % nz;
+  var zz = (zi + nz) % nz;
+  if ((P.rows & 2u) != 0u) { zz = clamp(zi, 0, nz - 1); }
   let xx = clamp(xi, 0, i32(P.nx) - 1);
   return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
 }
@@ -253,6 +254,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ";
 
+/// Sol (bit 2 de `rows`) : population venant de sous le plancher (z = −½),
+/// renvoyée par une paroi qui défile à la vitesse amont ; venant d'au-dessus
+/// du plafond, réfléchie (paroi glissante).
+fn ground_code(i: usize) -> String {
+    let [cx, cy, cz] = C3[i];
+    if cz == 0 {
+        return String::new();
+    }
+    if cz > 0 {
+        let j = opp3(i);
+        format!(
+            " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
+      v = pop({j}u, idx) + {} * P.uIn;
+    }}",
+            f(6.0 * w3(i) * cx as f64)
+        )
+    } else {
+        let m = C3.iter().position(|d| d[0] == cx && d[1] == cy && d[2] == -cz).unwrap();
+        format!(
+            " else if ((P.rows & 2u) != 0u && z + 1 >= i32(P.nz)) {{
+      v = pop({m}u, idx);
+    }}"
+        )
+    }
+}
+
 fn wgsl_step(fp16: bool) -> String {
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
@@ -313,7 +340,7 @@ fn wgsl_step(fp16: bool) -> String {
       }}
       let mom = fj + v + {w2};
       fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uw * (fj - v);
-    }} else if (x - {cx} < 0) {{
+    }}{ground} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
       v = pop({i}u, idx);
@@ -325,6 +352,7 @@ fn wgsl_step(fp16: bool) -> String {
 ",
             im1 = i - 1,
             jm1 = j - 1,
+            ground = ground_code(i),
             w2 = f(2.0 * w3(i)),
             w6 = f(6.0 * w3(i)),
             ccx = f(cx as f64),
@@ -456,7 +484,9 @@ fn absorb(x: i32, y: i32, z: i32) -> f32 {{
   let wx = max(2.0, f32(P.nx) / 24.0);
   let dy = f32(min(y, i32(P.ny) - 1 - y));
   let dz = f32(min(z, i32(P.nz) - 1 - z));
-  var s = max(max(1.0 - dy / wy, 1.0 - dz / wz), 1.0 - f32(x) / wx);
+  var sz = 1.0 - dz / wz;
+  if ((P.rows & 2u) != 0u) {{ sz = 1.0 - f32(i32(P.nz) - 1 - z) / wz; }}
+  var s = max(max(1.0 - dy / wy, sz), 1.0 - f32(x) / wx);
   if (u32(x) > P.spongeStart) {{
     s = max(s, f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart)));
   }}
@@ -1274,6 +1304,8 @@ pub struct Gpu3D {
     /// Grille fine imbriquée : enveloppe de mailles fantômes, ni entrée, ni
     /// sortie, ni bandes absorbantes.
     pub(crate) nested: bool,
+    /// Sol mobile en z = −½ et plafond glissant (au lieu de bords périodiques en z).
+    ground: bool,
     /// Grilles fines autour de la maquette (raffinement local).
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
     /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
@@ -1364,6 +1396,9 @@ impl Gpu3D {
         let depth = depth.min(crate::refine3d::EXTENT3.len());
         if depth == 0 {
             return Ok(top);
+        }
+        if body.ground {
+            return Err("le raffinement local ne gère pas encore le sol mobile".into());
         }
         let mut levels: Vec<Gpu3D> = Vec::new();
         let mut links = Vec::new();
@@ -1914,6 +1949,7 @@ impl Gpu3D {
             solid,
             lost: false,
             nested,
+            ground: body.ground && !nested,
             refine: None,
             wall_cells,
         };
@@ -1970,7 +2006,7 @@ impl Gpu3D {
             c18: (18.0 * self.cs * self.cs) as f32,
             write_macro: write_macro as u32,
             les: self.les as u32,
-            rows: self.nested as u32,
+            rows: self.nested as u32 | ((self.ground as u32) << 1),
             sa: self.sa as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
