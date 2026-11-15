@@ -580,6 +580,8 @@ pub(crate) struct Refinement {
     pub(crate) levels: Vec<Gpu3D>,
     pub(crate) links: Vec<Link3>,
     pub(crate) fresh: bool,
+    /// Nœud 0 de chaque grille fine, en mailles de la veine.
+    pub(crate) origin: Vec<[f64; 3]>,
 }
 
 /// Emprise des grilles fines autour de la maquette, en longueurs de

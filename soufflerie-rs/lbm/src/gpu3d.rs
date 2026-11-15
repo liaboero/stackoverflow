@@ -1276,6 +1276,15 @@ pub struct Gpu3D {
     pub(crate) nested: bool,
     /// Grilles fines autour de la maquette (raffinement local).
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
+    /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
+    wall_cells: Vec<u32>,
+}
+
+/// Efforts par maille pariétale, moyennés par pas, en unités de la veine :
+/// position (mailles de la veine) et force.
+pub struct WallForces {
+    pub pos: Vec<[f64; 3]>,
+    pub force: Vec<[f64; 3]>,
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -1360,6 +1369,8 @@ impl Gpu3D {
         let mut links = Vec::new();
         let mut parent_body = body.clone();
         let l0 = body.l as f64;
+        let mut origin: Vec<[f64; 3]> = Vec::new();
+        let mut porg = [0.0f64; 3];
         for k in 1..=depth {
             let (up, down, side) = crate::refine3d::EXTENT3[k - 1];
             // Emprise en mailles de la grille parente (échelle 2^(k−1)).
@@ -1391,11 +1402,14 @@ impl Gpu3D {
             }
             levels.push(child);
             parent_body = cb;
+            porg = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
+            origin.push(porg);
         }
         top.refine = Some(Box::new(crate::refine3d::Refinement {
             levels,
             links,
             fresh: true,
+            origin,
         }));
         Ok(top)
     }
@@ -1563,6 +1577,13 @@ impl Gpu3D {
             }
         }
         let wall_count = k as usize;
+        // Maille de chaque lien pariétal (numéro → maille), pour les efforts par maille.
+        let mut wall_cells = vec![0u32; wall_count];
+        for (c, &w) in wall.iter().enumerate() {
+            if w != 0 && w < SOLID - 1 {
+                wall_cells[w as usize - 1] = c as u32;
+            }
+        }
         if nested {
             for z in 0..nz {
                 for y in 0..ny {
@@ -1894,6 +1915,7 @@ impl Gpu3D {
             lost: false,
             nested,
             refine: None,
+            wall_cells,
         };
         s.set_viscosity(nu);
         s.reset(0.0);
@@ -2100,6 +2122,40 @@ impl Gpu3D {
         let r = self.refine.as_ref()?;
         let g = r.levels.last()?;
         Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.levels.len()))
+    }
+
+    /// Efforts par maille pariétale depuis le dernier relevé (grille la plus
+    /// fine), moyennés par pas et ramenés aux unités de la veine.
+    pub fn take_wall_forces(&mut self) -> WallForces {
+        let (g, org, s) = match self.refine.as_mut() {
+            Some(r) => {
+                let k = r.levels.len();
+                let org = r.origin[k - 1];
+                (r.levels.last_mut().unwrap(), org, (1u64 << k) as f64)
+            }
+            None => (&mut *self, [0.0; 3], 1.0),
+        };
+        let steps = std::mem::take(&mut g.force_steps).max(1) as f64;
+        let mut out = WallForces { pos: Vec::new(), force: Vec::new() };
+        if g.wall_count == 0 {
+            return out;
+        }
+        let v = g.read(&g.force, &g.force_read, 16 * g.wall_count as u64);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        enc.clear_buffer(&g.force, 0, None);
+        g.queue.submit([enc.finish()]);
+        let (nx, ny) = (g.nx, g.ny);
+        for (k, c) in v.chunks_exact(4).enumerate() {
+            let cell = g.wall_cells[k] as usize;
+            let p = [(cell % nx) as f64, ((cell / nx) % ny) as f64, (cell / (nx * ny)) as f64];
+            out.pos.push([0, 1, 2].map(|a| org[a] + p[a] / s));
+            let f = s * s * steps;
+            out.force.push([c[0] as f64 / f, c[1] as f64 / f, c[2] as f64 / f]);
+        }
+        if self.refine.is_some() {
+            self.force_steps = 0;
+        }
+        out
     }
 
     fn take_forces_one(&mut self) -> Force3 {

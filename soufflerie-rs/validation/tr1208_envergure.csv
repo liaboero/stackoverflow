@@ -1,0 +1,38 @@
+source,eta,ccl_sur_CL_cbar
+mesure TR-1208 fig. 3 (alpha 4.7),0.03,1.07
+mesure TR-1208 fig. 3 (alpha 4.7),0.1,1.12
+mesure TR-1208 fig. 3 (alpha 4.7),0.2,1.13
+mesure TR-1208 fig. 3 (alpha 4.7),0.3,1.12
+mesure TR-1208 fig. 3 (alpha 4.7),0.4,1.1
+mesure TR-1208 fig. 3 (alpha 4.7),0.5,1.05
+mesure TR-1208 fig. 3 (alpha 4.7),0.6,0.98
+mesure TR-1208 fig. 3 (alpha 4.7),0.7,0.9
+mesure TR-1208 fig. 3 (alpha 4.7),0.8,0.8
+mesure TR-1208 fig. 3 (alpha 4.7),0.9,0.68
+mesure TR-1208 fig. 3 (alpha 4.7),0.95,0.57
+VSPAERO VLM,0.0263,1.0750
+VSPAERO VLM,0.0789,1.1022
+VSPAERO VLM,0.1316,1.1210
+VSPAERO VLM,0.1842,1.1314
+VSPAERO VLM,0.2368,1.1338
+VSPAERO VLM,0.2895,1.1301
+VSPAERO VLM,0.3421,1.1207
+VSPAERO VLM,0.3947,1.1069
+VSPAERO VLM,0.4474,1.0888
+VSPAERO VLM,0.5000,1.0666
+VSPAERO VLM,0.5526,1.0421
+VSPAERO VLM,0.6053,1.0129
+VSPAERO VLM,0.6579,0.9820
+VSPAERO VLM,0.7105,0.9461
+VSPAERO VLM,0.7632,0.9061
+VSPAERO VLM,0.8158,0.8577
+VSPAERO VLM,0.8684,0.7949
+VSPAERO VLM,0.9211,0.6985
+VSPAERO VLM,0.9737,0.7234
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.1136,0.6374
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.2446,1.1997
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.3756,1.2216
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.5066,1.1595
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.6376,0.9280
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.7686,0.6343
+soufflerie L=8 raff 2 (bandes de 0.13 b/2),0.8996,0.7999

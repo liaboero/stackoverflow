@@ -674,6 +674,36 @@ fn cmd_run3d(a: &Args) {
             next_print += 5.0;
         }
     }
+    // Répartition de la portance en envergure : efforts par maille pariétale
+    // moyennés sur deux temps convectifs de plus, regroupés par demi-maille en y.
+    if let Some(path) = a.opts.get("envergure") {
+        sim.run((2.0 * spt) as usize, &ramp);
+        let w = sim.take_wall_forces();
+        let bb = body.bounds;
+        let (yc, half) = (0.5 * (bb.y0 + bb.y1), 0.5 * (bb.y1 - bb.y0));
+        let dy = 0.5;
+        let nb = ((bb.y1 - bb.y0) / dy).ceil() as usize + 2;
+        let mut fz = vec![0.0f64; nb];
+        let mut fx = vec![0.0f64; nb];
+        for (p, f) in w.pos.iter().zip(&w.force) {
+            let k = (((p[1] - bb.y0) / dy).floor().max(0.0) as usize).min(nb - 1);
+            fz[k] += f[2];
+            fx[k] += f[0];
+        }
+        // c·cl/c_ref = (dL/dy) / (q c_ref), c_ref = L mailles.
+        let qc = 0.5 * (U as f64).powi(2) * l as f64;
+        let mut csv = String::from("eta,ccl_cref,ccd_cref\n");
+        for k in 0..nb {
+            let y = bb.y0 + (k as f64 + 0.5) * dy;
+            if fz[k] != 0.0 || fx[k] != 0.0 {
+                csv += &format!("{:.4},{:.5},{:.5}\n", (y - yc) / half, fz[k] / dy / qc, fx[k] / dy / qc);
+            }
+        }
+        match std::fs::write(path, csv) {
+            Ok(()) => eprintln!("Répartition en envergure écrite dans {path}"),
+            Err(e) => eprintln!("Écriture de {path} impossible : {e}"),
+        }
+    }
     let secs = t_run.elapsed().as_secs_f64();
     let from = ts.iter().position(|&t| t >= t_end - avg).unwrap_or(0);
     let r = analyze(&ts[from..], &cx[from..], &cz[from..], &cy[from..]);
