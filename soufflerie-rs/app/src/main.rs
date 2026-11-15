@@ -526,6 +526,7 @@ fn cmd_run3d(a: &Args) {
                 beta_deg: a.get("beta", 0.0f64),
                 ref_length: a.opts.get("lref").map(|_| a.get("lref", 0.0f64)),
                 ref_area: a.opts.get("sref").map(|_| a.get("sref", 0.0f64)),
+                margin: a.get("marge", 1.0f64),
             };
             let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
                 eprintln!("{e}");

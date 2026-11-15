@@ -584,7 +584,7 @@ pub(crate) struct Refinement {
 
 /// Emprise des grilles fines autour de la maquette, en longueurs de
 /// référence de la veine : amont, aval, de part et d'autre.
-pub(crate) const EXTENT3: [(f64, f64, f64); 2] = [(0.6, 1.5, 0.5), (0.3, 0.6, 0.25)];
+pub(crate) const EXTENT3: [(f64, f64, f64); 2] = [(0.6, 1.5, 0.6), (0.35, 0.7, 0.4)];
 pub(crate) const MARGIN3: usize = MARGIN;
 
 /// Un pas de la grille k, suivi de deux pas de chaque grille plus fine.

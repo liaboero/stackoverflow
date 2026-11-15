@@ -266,7 +266,7 @@ stabilise les premiers nœuds à τ ≈ 0,5.
 **Raffinement local** (`run3d --raff 1|2`, interface : « Près de la
 maquette »). Une ou deux grilles imbriquées autour de la maquette, deux fois
 plus fines en espace et en temps (emprise : 0,6 L en amont, 1,5 L en aval,
-0,5 L de côté, puis 0,3 / 0,6 / 0,25 L), couplées comme en 2D : moments
+0,6 L de côté, puis 0,35 / 0,7 / 0,4 L), couplées comme en 2D : moments
 (ρ, u, Π hors équilibre remis à l'échelle, ν̃) interpolés en cubique sur
 l'enveloppe de mailles fantômes et en linéaire dans le temps, recopie vers
 la veine sous la zone raffinée ; efforts de la grille la plus fine.
@@ -295,6 +295,52 @@ laminaire des corps épais n'est pas capturé (sphère à Re = 10⁵ : 0,25
 turbulente, 0,21 laminaire, au lieu de 0,47) : pour ce régime sous-critique,
 couper la loi de paroi (« Paroi : sans », `--turb off`) donne une couche
 limite épaisse qui décolle tôt (sphère à Re = 10⁶ : Cx = 0,46).
+
+## Comparaison avec VSPAERO et la mesure
+
+VSPAERO 7.2.2 (OpenVSP 3.56, NASA, méthodes des tourbillons et des
+panneaux, traînée de profil estimée) sur deux ailes publiques, contre la
+soufflerie 3D avec loi de paroi et raffinement local. Données complètes :
+`validation/comparaison_vspaero.csv`. FlightStream (commercial) n'a pas pu
+être utilisé.
+
+**Aile NACA TR-1208** (Schneider, 1951 : flèche 45°, allongement 8,02,
+effilement 0,45, NACA 63A012, Re = 4·10⁶ sur la corde moyenne ; géométrie
+du tutoriel OpenVSP exportée en STL, `--unite in --lref 16.672
+--sref 2024.35 --marge 0.4`, L = 8 + ×4, soit 32 mailles par corde moyenne) :
+
+| α | Mesure (figure 2, ±0,01) | VSPAERO VLM | Soufflerie |
+| --- | --- | --- | --- |
+| 2° | CL 0,136 | 0,132 | 0,161 |
+| 4° | CL 0,257, CD ≈ 0,011 | 0,266, CD 0,015 | 0,314, CD 0,042 |
+| 6° | CL 0,378 | 0,399 | 0,460 |
+| 8° | CL 0,499, CD ≈ 0,021 | 0,531, CD 0,026 | 0,575, CD 0,052 |
+
+**Aile rectangulaire NACA 0012, allongement 4**, Re = 10⁶ (pas de mesure ;
+ligne portante d'Helmbold : CL ≈ 0,27 à 4°) :
+
+| α | VSPAERO VLM | VSPAERO panneaux | Soufflerie L = 16 + ×2 | + ×4 |
+| --- | --- | --- | --- | --- |
+| 4° | 0,251 (CD 0,021) | 0,265 | 0,306 (CD 0,059) | 0,306 (0,032) |
+| 8° | 0,500 (0,039) | 0,529 | 0,545 (0,086) | 0,600 (0,056) |
+| 12° | 0,747 (0,070) | 0,787 | 0,958 (0,143) | 0,839 (0,100) |
+
+Ce que cela montre :
+
+- VSPAERO suit la mesure de TR-1208 à 5 % près sur la pente de portance
+  (0,066 contre 0,060 par degré, le surcroît habituel d'une méthode non
+  visqueuse).
+- La soufflerie porte trop : +20 à 30 % sur la pente, au-dessus même de la
+  méthode non visqueuse. Ce n'est pas le confinement de la veine (même aile
+  en STL : Cz = 0,295 dans une veine serrée, 0,306 dans une veine 2,5 fois
+  plus large) ; c'est la loi de paroi : à y⁺ de l'ordre de 10³, le
+  glissement de Spalding devient presque total et le bord de fuite tient mal
+  la condition de Kutta (déjà +7 % sur le NACA 2412 en 2D). Piste : une loi
+  de paroi qui impose la contrainte pariétale sans laisser glisser la paroi
+  au bord de fuite.
+- La traînée est 2 à 4 fois trop forte et dépend de la taille de la veine
+  (0,042 ou 0,062 selon la marge) : en 3D, seule la portance se compare
+  aujourd'hui, et la traînée reste qualitative.
 
 ## Maquettes STL (3D)
 

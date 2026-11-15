@@ -112,6 +112,10 @@ pub struct MeshSetup {
     pub ref_length: Option<f64>,
     /// Surface de référence (unités du fichier au carré) ; None : maître-couple.
     pub ref_area: Option<f64>,
+    /// Facteur sur les marges de la veine autour de la maquette (1 : 3,5 M en
+    /// amont, 7,5 M en aval, 2,5 M de côté). Une aile très allongée tient dans
+    /// une veine plus serrée : le blocage affiché dit si c'est raisonnable.
+    pub margin: f64,
 }
 
 impl Default for MeshSetup {
@@ -124,6 +128,7 @@ impl Default for MeshSetup {
             beta_deg: 0.0,
             ref_length: None,
             ref_area: None,
+            margin: 1.0,
         }
     }
 }

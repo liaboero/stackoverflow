@@ -252,11 +252,12 @@ impl Body3D {
         let mut placed: Vec<Tri> = body.iter().map(|t| t.map(place)).collect();
         let (rl, rh) = crate::stl::bbox(&placed);
         let e = [rh[0] - rl[0], rh[1] - rl[1], rh[2] - rl[2]];
-        let mx = e[0].max(lf);
-        let ms = e[1].max(e[2]).max(lf);
+        let k = setup.margin.clamp(0.2, 2.0);
+        let mx = k * e[0].max(lf);
+        let ms = k * e[1].max(e[2]).max(lf);
         let nx = (3.5 * mx + e[0] + 7.5 * mx).round() as usize;
-        let ny = (6.0 * lf).max(e[1] + 5.0 * ms).round() as usize;
-        let nz = (6.0 * lf).max(e[2] + 5.0 * ms).round() as usize;
+        let ny = (6.0 * k * lf).max(e[1] + 5.0 * ms).round() as usize;
+        let nz = (6.0 * k * lf).max(e[2] + 5.0 * ms).round() as usize;
         let cells = nx as f64 * ny as f64 * nz as f64;
         if cells > 4e8 {
             return Err(format!(
