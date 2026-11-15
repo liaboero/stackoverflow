@@ -2234,6 +2234,20 @@ impl Gpu3D {
 
     /// Coupe normale à l'axe `axis` (0 : x, 1 : y, 2 : z) en `pos` (maille).
     /// Plan x : (y, z) ; plan y : (x, z) ; plan z : (x, y).
+    /// Champ macroscopique de la veine (u_x, u_y, u_z, ρ) par maille, tel
+    /// qu'écrit au dernier pas (sous la zone raffinée : recopie de la grille fine).
+    pub fn macros(&mut self) -> Vec<[f32; 4]> {
+        let size = 16 * self.n as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("macro3d_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let v = self.read(&self.macro_buf, &staging, size);
+        v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+    }
+
     pub fn slice(&mut self, axis: usize, pos: usize, field: SliceField, l: f64) -> Slice {
         let (w, h) = match axis {
             0 => (self.ny, self.nz),

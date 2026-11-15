@@ -382,10 +382,21 @@ référence ≈ 0,26 à 0,27) :
 | Sans glissement du tout (Spalart–Allmaras gardé) | 0,147 |
 
 Le glissement encadre la bonne valeur mais en fait trop, et la cause n'est
-ni le bord de fuite seul ni une rétroaction de la première maille : la
-correction reste à trouver (piste suivante : imposer la contrainte
-pariétale comme une force plutôt qu'un glissement de paroi). Aucune de ces
+ni le bord de fuite seul ni une rétroaction de la première maille. Une
+paroi adhérente avec une force tangentielle qui rend au fluide l'excédent
+de frottement du rebond diverge (la composante tangentielle des liens d'une
+paroi en escalier mêle pression et frottement) ; plafonnée, elle donne
+Cz 0,205 et une traînée de 0,17 : un réglage, pas un modèle. Aucune de ces
 variantes n'est gardée.
+
+Les efforts eux-mêmes sont justes : un bilan de quantité de mouvement sur
+une boîte autour de l'aile (flux de ρuu + p à travers les faces, champ de
+la veine) donne Cz 0,314 à 0,321 contre 0,308 par l'échange aux parois à
+Re = 10⁶, et 0,212 à 0,216 contre 0,213 à Re = 1000 (`Gpu3D::macros`).
+L'excès de portance est donc dans l'écoulement calculé ; il existe aussi
+sans loi de paroi (Re = 1000, sous-maille seule : +19 % sur la correction
+d'allongement), ce qui oriente vers la résolution du bord de fuite et du
+sillage près de l'aile plutôt que vers la seule loi de paroi.
 
 **Traînée et taille de la veine.** Sur l'aile d'allongement 4, la traînée
 est établie dès t* = 5 et ne bouge plus jusqu'à t* = 40, mais vaut 0,042
