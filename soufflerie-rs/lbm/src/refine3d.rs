@@ -656,7 +656,7 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
             let mut bytes = vec![0u8; crate::gpu3d::SLOT as usize * kc];
             for s in 0..kc {
                 let (u, a) = ramp.at(t0 + s as u64);
-                let last = k == 0 && left == kc && s == kc - 1;
+                let last = left == kc && s == kc - 1;
                 let p = g.params_for(u, a / (1u64 << k) as f32, last);
                 let o = s * crate::gpu3d::SLOT as usize;
                 bytes[o..o + std::mem::size_of_val(&p)].copy_from_slice(bytemuck::bytes_of(&p));

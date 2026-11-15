@@ -25,3 +25,7 @@ AR4_NACA0012,8,soufflerie L=16 raff 2,0.6002,0.0557,
 AR4_NACA0012,12,soufflerie L=16 raff 2,0.8391,0.1001,
 AR4_NACA0012,4,soufflerie STL L=16 raff 1 marge 0.4,0.2951,0.0421,veine 2.15 M mailles
 AR4_NACA0012,4,soufflerie STL L=16 raff 1 marge 1.0,0.3062,0.0615,veine 23.7 M mailles
+AR4_NACA0012,4,soufflerie STL L=16 raff 1 marge 0.4 surface,0.2628,0.0301,intégration sur la surface (pression à 1 maille + Spalding) ; échange 0.3085/0.0617
+AR4_NACA0012,4,soufflerie STL L=16 raff 2 marge 0.4 surface,0.2886,0.0302,échange 0.3141/0.0444
+TR1208,4,soufflerie L=8 raff 2 surface,0.2611,0.0211,intégration sur la surface ; échange 0.3138/0.0407
+TR1208,8,soufflerie L=8 raff 2 surface,0.4892,0.0531,échange 0.5812/0.0527

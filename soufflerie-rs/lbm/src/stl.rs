@@ -118,6 +118,9 @@ pub struct MeshSetup {
     pub margin: f64,
     /// Sol mobile : garde au sol (unités du fichier) ; None : veine libre.
     pub ground: Option<f64>,
+    /// Décalage de la maquette dans la maille (mailles, x y z), ajouté au
+    /// calage par défaut : sert à mesurer la sensibilité au placement.
+    pub offset: [f64; 3],
 }
 
 impl Default for MeshSetup {
@@ -132,6 +135,7 @@ impl Default for MeshSetup {
             ref_area: None,
             margin: 1.0,
             ground: None,
+            offset: [0.0; 3],
         }
     }
 }

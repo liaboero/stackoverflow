@@ -1310,10 +1310,62 @@ pub struct Gpu3D {
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
     /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
     wall_cells: Vec<u32>,
+    /// Part de la pression de référence (ρ₀ c_s²) dans l'effort de chaque
+    /// maille pariétale : Σ −2 w_i c_i sur ses liens. Nulle en somme sur une
+    /// maquette fermée, mais pas maille par maille ; retirée des efforts par
+    /// maille pour n'y garder que la pression relative et le frottement.
+    rest_force: Vec<[f32; 3]>,
+    /// Maillage de la maquette dans les coordonnées de cette grille (efforts
+    /// par intégration sur la surface).
+    surface: Option<std::sync::Arc<crate::stl::MeshBody>>,
 }
 
 /// Efforts par maille pariétale, moyennés par pas, en unités de la veine :
 /// position (mailles de la veine) et force.
+/// Efforts intégrés sur la surface du maillage (unités de la veine) :
+/// pression relevée à une maille de la paroi, frottement de la loi de paroi
+/// (Spalding) sur la vitesse tangentielle au même point.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceForces {
+    pub pressure: [f64; 3],
+    pub friction: [f64; 3],
+    /// Part de la surface où le relevé a échoué (point d'échantillonnage
+    /// entouré de mailles solides).
+    pub missed: f64,
+}
+
+impl SurfaceForces {
+    pub fn total(&self) -> [f64; 3] {
+        [0, 1, 2].map(|a| self.pressure[a] + self.friction[a])
+    }
+}
+
+/// u_τ de la loi de Spalding pour la vitesse tangentielle `ut` à la distance `y`.
+pub fn spalding_utau(ut: f64, y: f64, nu: f64) -> f64 {
+    if !(ut > 1e-12) {
+        return 0.0;
+    }
+    let (k, eb) = (0.41, 0.128_734_90);
+    let rey = y * ut / nu;
+    let mut up = rey.sqrt();
+    if rey >= 30.0 {
+        up = rey.ln() / k;
+    }
+    for _ in 0..50 {
+        let ku = k * up;
+        let e = ku.exp();
+        let yy = up + eb * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+        let dy = 1.0 + eb * k * (e - 1.0 - ku - ku * ku / 2.0);
+        let h = up * yy - rey;
+        let next = up - h / (yy + up * dy);
+        up = if next > 0.0 { next } else { 0.5 * up };
+        if h.abs() < 1e-10 * rey {
+            break;
+        }
+    }
+    ut / up
+}
+
 pub struct WallForces {
     pub pos: Vec<[f64; 3]>,
     pub force: Vec<[f64; 3]>,
@@ -1613,6 +1665,21 @@ impl Gpu3D {
         }
         let wall_count = k as usize;
         // Maille de chaque lien pariétal (numéro → maille), pour les efforts par maille.
+        let rest_force: Vec<[f32; 3]> = qs
+            .chunks_exact(18)
+            .take(wall_count)
+            .map(|row| {
+                let mut r = [0f32; 3];
+                for i in 1..19 {
+                    if row[i - 1] > 0.0 {
+                        for a in 0..3 {
+                            r[a] -= (2.0 * w3(i)) as f32 * C3[i][a] as f32;
+                        }
+                    }
+                }
+                r
+            })
+            .collect();
         let mut wall_cells = vec![0u32; wall_count];
         for (c, &w) in wall.iter().enumerate() {
             if w != 0 && w < SOLID - 1 {
@@ -1952,6 +2019,8 @@ impl Gpu3D {
             ground: body.ground && !nested,
             refine: None,
             wall_cells,
+            rest_force,
+            surface: body.mesh.clone(),
         };
         s.set_viscosity(nu);
         s.reset(0.0);
@@ -2160,6 +2229,103 @@ impl Gpu3D {
         Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.levels.len()))
     }
 
+    /// Efforts sur une maquette maillée par intégration sur ses triangles
+    /// (grille la plus fine, champ du dernier pas) : −p n dA avec p relevée à
+    /// une maille de la paroi le long de la normale, plus τ_p dA, τ_p = ρ u_τ²
+    /// de la loi de Spalding dans la direction de la vitesse tangentielle.
+    /// Plus juste que l'échange de quantité de mouvement avec la loi de paroi :
+    /// la paroi glissante y cède une quantité de mouvement qui n'est pas le
+    /// frottement, et l'escalier des mailles y mêle pression et frottement.
+    /// None sans maillage.
+    pub fn surface_forces(&mut self) -> Option<SurfaceForces> {
+        let s = match &self.refine {
+            Some(r) => (1u64 << r.levels.len()) as f64,
+            None => 1.0,
+        };
+        let g = match self.refine.as_mut() {
+            Some(r) => r.levels.last_mut().unwrap(),
+            None => &mut *self,
+        };
+        let mesh = g.surface.clone()?;
+        let mac = g.macros();
+        let (nx, ny, nz) = (g.nx, g.ny, g.nz);
+        let nu = g.nu;
+        let solid = &g.solid;
+        let normal = |t: &crate::stl::Tri| {
+            let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
+            let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
+            [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+        };
+        // Normales sortantes si le volume signé est positif.
+        let vol: f64 = mesh.tris.iter().map(|t| { let n = normal(t); (0..3).map(|k| t[0][k] * n[k]).sum::<f64>() }).sum();
+        let sgn = if vol >= 0.0 { 1.0 } else { -1.0 };
+        let sample = |p: [f64; 3]| -> Option<[f64; 4]> {
+            let i = p.map(|v| v.floor() as i64);
+            let w = [0, 1, 2].map(|a| p[a] - i[a] as f64);
+            let mut out = [0.0; 4];
+            for c in 0..8 {
+                let o = [c & 1, (c >> 1) & 1, (c >> 2) & 1];
+                let (x, y, z) = (i[0] + o[0] as i64, i[1] + o[1] as i64, i[2] + o[2] as i64);
+                if x < 0 || y < 0 || z < 0 || x >= nx as i64 || y >= ny as i64 || z >= nz as i64 {
+                    return None;
+                }
+                let c = x as usize + nx * (y as usize + ny * z as usize);
+                if solid[c] {
+                    return None;
+                }
+                let ww: f64 = (0..3).map(|a| if o[a] == 1 { w[a] } else { 1.0 - w[a] }).product();
+                for k in 0..4 {
+                    out[k] += ww * mac[c][k] as f64;
+                }
+            }
+            Some(out)
+        };
+        let mut out = SurfaceForces::default();
+        let mut area = 0.0;
+        for t in &mesh.tris {
+            let n0 = normal(t);
+            let a2 = (n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2]).sqrt();
+            if a2 < 1e-12 {
+                continue;
+            }
+            let n = n0.map(|v| sgn * v / a2);
+            let ar = 0.5 * a2;
+            area += ar;
+            let c = [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
+            // Une maille le long de la normale ; plus loin si un nœud voisin est solide.
+            let mut h = 1.0;
+            let mut v = None;
+            while v.is_none() && h <= 3.0 {
+                v = sample([0, 1, 2].map(|k| c[k] + h * n[k]));
+                if v.is_none() {
+                    h += 0.5;
+                }
+            }
+            let Some(v) = v else {
+                out.missed += ar;
+                continue;
+            };
+            let p = (v[3] - 1.0) / 3.0;
+            let un = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+            let ut = [0, 1, 2].map(|k| v[k] - un * n[k]);
+            let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
+            let utau = spalding_utau(utm, h, nu);
+            let tau = v[3] * utau * utau;
+            for k in 0..3 {
+                out.pressure[k] -= p * n[k] * ar;
+                if utm > 0.0 {
+                    out.friction[k] += tau * ut[k] / utm * ar;
+                }
+            }
+        }
+        // Surfaces de la grille fine ramenées aux mailles de la veine.
+        let s2 = s * s;
+        out.pressure = out.pressure.map(|v| v / s2);
+        out.friction = out.friction.map(|v| v / s2);
+        out.missed /= area.max(1e-12);
+        Some(out)
+    }
+
     /// Efforts par maille pariétale depuis le dernier relevé (grille la plus
     /// fine), moyennés par pas et ramenés aux unités de la veine.
     pub fn take_wall_forces(&mut self) -> WallForces {
@@ -2186,7 +2352,8 @@ impl Gpu3D {
             let p = [(cell % nx) as f64, ((cell / nx) % ny) as f64, (cell / (nx * ny)) as f64];
             out.pos.push([0, 1, 2].map(|a| org[a] + p[a] / s));
             let f = s * s * steps;
-            out.force.push([c[0] as f64 / f, c[1] as f64 / f, c[2] as f64 / f]);
+            let r = g.rest_force[k];
+            out.force.push([0, 1, 2].map(|a| (c[a] as f64 - steps * r[a] as f64) / f));
         }
         if self.refine.is_some() {
             self.force_steps = 0;

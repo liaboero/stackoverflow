@@ -989,6 +989,9 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
     let mut perf = (Instant::now(), 0u64, 0.0f64);
     // Après une divergence, le calcul attend « Recommencer ».
     let mut halted = false;
+    // Maquette maillée : efforts intégrés sur la surface, relevés tous les
+    // demi-temps convectifs (lecture du champ entier).
+    let mut next_surf = 0.0f64;
     loop {
         let (st, active) = {
             let s = shared.lock().unwrap();
@@ -1113,8 +1116,24 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
         let t_star = g.time as f64 / spt;
         let diverged = halted || (f.steps > 0 && !g.is_finite(&f));
         halted = diverged;
-        if f.steps > 0 && !diverged {
-            hist.push([t_star, f.fx / q, f.fz / q, f.fy / q]);
+        if t_star + 1.0 < next_surf {
+            next_surf = t_star;
+        }
+        let sample = if b.mesh.is_some() {
+            if f.steps > 0 && t_star >= next_surf {
+                next_surf = t_star + 0.5;
+                g.surface_forces().map(|s| {
+                    let t = s.total();
+                    [t[0] / q, t[2] / q, t[1] / q]
+                })
+            } else {
+                None
+            }
+        } else {
+            (f.steps > 0).then(|| [f.fx / q, f.fz / q, f.fy / q])
+        };
+        if let (Some(c), false) = (sample, diverged) {
+            hist.push([t_star, c[0], c[1], c[2]]);
             if hist.len() > 20000 {
                 hist.drain(..5000);
             }

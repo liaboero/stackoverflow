@@ -59,6 +59,7 @@ fn usage() -> ! {
          \x20         --xtr 0.3 (run3d, loi de paroi : couche limite laminaire jusqu'à 30 % de la corde locale)\n\
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
          \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
+         \x20                 --decalage 0.3 (décale la maquette en x, en mailles : sensibilité au placement)\n\
          \x20         --raff 1|2 (GPU, 2D et 3D : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
@@ -528,6 +529,7 @@ fn cmd_run3d(a: &Args) {
                 ref_area: a.opts.get("sref").map(|_| a.get("sref", 0.0f64)),
                 margin: a.get("marge", 1.0f64),
                 ground: a.opts.get("sol").map(|_| a.get("sol", 0.0f64)),
+                offset: [a.get("decalage", 0.0f64), 0.0, 0.0],
             };
             let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
                 eprintln!("{e}");
@@ -654,6 +656,10 @@ fn cmd_run3d(a: &Args) {
     let (mut ts, mut cx, mut cz, mut cy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let t_run = Instant::now();
     let mut next_print = 5.0;
+    // Maquette maillée : efforts intégrés sur la surface, relevés tous les
+    // demi-temps convectifs pendant la fenêtre de moyenne.
+    let mut surf: Vec<lbm::gpu3d::SurfaceForces> = Vec::new();
+    let mut next_surf = t_end - avg;
     while sim.time < total {
         sim.run(chunk, &ramp);
         let f = sim.take_forces();
@@ -673,6 +679,12 @@ fn cmd_run3d(a: &Args) {
         if t >= next_print {
             eprintln!("  t* = {t:5.1}  Cx = {:8.4}  Cz = {:8.4}  Cy = {:8.4}", f.fx / q, f.fz / q, f.fy / q);
             next_print += 5.0;
+        }
+        if shape == Shape3D::Mesh && t >= next_surf {
+            if let Some(s) = sim.surface_forces() {
+                surf.push(s);
+            }
+            next_surf += 0.5;
         }
     }
     // Répartition de la portance en envergure : efforts par maille pariétale
@@ -732,11 +744,28 @@ fn cmd_run3d(a: &Args) {
     let secs = t_run.elapsed().as_secs_f64();
     let from = ts.iter().position(|&t| t >= t_end - avg).unwrap_or(0);
     let r = analyze(&ts[from..], &cx[from..], &cz[from..], &cy[from..]);
+    // Maquette maillée : coefficients par intégration sur la surface (voir
+    // Gpu3D::surface_forces) ; l'échange de quantité de mouvement en regard.
+    let (rcx, rcz, rcy) = if surf.is_empty() {
+        (r.cx, r.cz, r.cm)
+    } else {
+        let n = surf.len() as f64;
+        let m = |f: &dyn Fn(&lbm::gpu3d::SurfaceForces) -> f64| surf.iter().map(f).sum::<f64>() / n / q;
+        let (px, fx) = (m(&|s| s.pressure[0]), m(&|s| s.friction[0]));
+        let (pz, fz) = (m(&|s| s.pressure[2]), m(&|s| s.friction[2]));
+        let miss = surf.iter().map(|s| s.missed).sum::<f64>() / n;
+        eprintln!(
+            "Intégration sur la surface : Cx pression {px:.4} + frottement {fx:.4} · Cz pression {pz:.4} + frottement {fz:.4}{}",
+            if miss > 0.005 { format!(" · {:.1} % de la surface non relevée", 100.0 * miss) } else { String::new() }
+        );
+        eprintln!("Échange de quantité de mouvement aux parois : Cx = {:.4}  Cz = {:.4}", r.cx, r.cz);
+        (px + fx, pz + fz, m(&|s| s.total()[1]))
+    };
     println!(
         "Cx = {:.4}  Cz = {:.4}  Cy = {:.4}{}{}",
-        r.cx,
-        r.cz,
-        r.cm,
+        rcx,
+        rcz,
+        rcy,
         if r.periodic {
             format!("  St = {:.4}  Cz' = ±{:.4}", r.st, r.cz_amp)
         } else {
@@ -748,9 +777,9 @@ fn cmd_run3d(a: &Args) {
                 let qs = 0.5 * rho * v * v * area;
                 format!(
                     "\nEfforts à {v} m/s : traînée {:.3e} N, portance {:.3e} N, latéral {:.3e} N",
-                    r.cx * qs,
-                    r.cz * qs,
-                    r.cm * qs
+                    rcx * qs,
+                    rcz * qs,
+                    rcy * qs
                 )
             }
             None => String::new(),

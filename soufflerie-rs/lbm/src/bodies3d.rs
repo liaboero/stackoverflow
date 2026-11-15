@@ -128,6 +128,13 @@ fn naca00(t: f64, x: f64) -> f64 {
     5.0 * t * (0.2969 * x.sqrt() - 0.126 * x - 0.3516 * x * x + 0.2843 * x.powi(3) - 0.1036 * x.powi(4))
 }
 
+/// Décalage en x (entre −0,5 et 0,5 maille) qui place le point le plus en
+/// aval `x_te` à 0,7 maille après un nœud.
+pub fn te_snap(x_te: f64) -> f64 {
+    let d = 0.7 - x_te.rem_euclid(1.0);
+    d - d.round()
+}
+
 impl Body3D {
     /// `alpha_deg` : incidence (cube, aile), cabrage bord de fuite vers le bas.
     pub fn new(shape: Shape3D, l: usize, alpha_deg: f64) -> Body3D {
@@ -135,7 +142,11 @@ impl Body3D {
         let at = shape.at();
         let lf = l as f64;
         // Centre décalé d'un quart de maille : évite les symétries d'arrondi exactes.
-        let c = [at[0] * lf + 0.25, at[1] * lf + 0.25, at[2] * lf + 0.25];
+        let mut c = [at[0] * lf + 0.25, at[1] * lf + 0.25, at[2] * lf + 0.25];
+        if shape == Shape3D::Wing {
+            // Bord de fuite calé comme pour les maillages (voir `te_snap`).
+            c[0] += te_snap(c[0] + 0.75 * lf * alpha_deg.to_radians().cos());
+        }
         let alpha = if shape.has_alpha() { alpha_deg.to_radians() } else { 0.0 };
         let r = lf / 2.0;
         let half = 2.0 * lf; // allongement 4
@@ -276,12 +287,19 @@ impl Body3D {
         }
         // Translation : avant de la maquette à 3,5 M, centrée en y et z
         // (décalage d'un quart de maille contre les symétries d'arrondi).
+        // En x, l'arrière de la maquette est calé à 0,7 maille après un nœud :
+        // la portance d'une aile à bord de fuite droit dépend de la place du
+        // bord de fuite dans la maille (marche d'une maille ≈ volet Gurney),
+        // et 0,7 reste loin du cas défavorable (bord de fuite juste avant un
+        // nœud) sur la grille de base comme sur les grilles fines (×2 : 0,4 ;
+        // ×4 : 0,8 ; ×8 : 0,6).
+        let sx = 3.5 * mx - rl[0];
         let shift = [
-            3.5 * mx - rl[0] + 0.25,
-            0.5 * ny as f64 - 0.5 * (rl[1] + rh[1]) + 0.25,
+            sx + te_snap(rh[0] + sx) + setup.offset[0],
+            0.5 * ny as f64 - 0.5 * (rl[1] + rh[1]) + 0.25 + setup.offset[1],
             match clear {
                 Some(c) => c - 0.5 - rl[2] + 0.25,
-                None => 0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25,
+                None => 0.5 * nz as f64 - 0.5 * (rl[2] + rh[2]) + 0.25 + setup.offset[2],
             },
         ];
         for t in &mut placed {

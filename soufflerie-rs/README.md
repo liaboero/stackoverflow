@@ -420,7 +420,8 @@ retirées) reste à comprendre.
 est établie dès t* = 5 et ne bouge plus jusqu'à t* = 40, mais vaut 0,042
 dans une veine serrée et 0,062 dans une veine 2,5 fois plus large : un biais
 de domaine stable, à l'opposé d'un effet de blocage (la veine plus large
-traîne plus), à expliquer avant toute correction de blocage.
+traîne plus). Expliqué depuis : c'est la place du bord de fuite dans la
+maille (voir « Traînée 3D » ci-dessous).
 
 **Sphère à travers la crise de traînée** (D = 16 + ×2) :
 
@@ -453,6 +454,62 @@ foyer).
 
 **Non fait.** Ailes de Sivells : les géométries et mesures sont dans des
 rapports NACA scannés, non extraits.
+
+## Traînée 3D : placement et intégration sur la surface
+
+**Placement dans la maille.** Sur l'aile d'allongement 4 (STL, L = 32 sans
+raffinement, Re = 10⁶, α = 4°), déplacer la maquette d'une fraction de
+maille en x fait varier Cz de 0,21 à 0,44 et Cx de 0,032 à 0,059, avec un
+écoulement établi et stationnaire dans chaque cas. C'est l'erratique
+« biais de domaine » noté plus haut : changer la longueur de la veine
+déplaçait en fait la maquette dans la maille. L'effet est périodique d'une
+maille, existe aussi à Re = 2000, sans loi de paroi, en simple précision,
+sans parois minces et sur l'aile analytique : il vient de la place du bord
+de fuite par rapport aux nœuds. Quand il tombe juste avant un nœud, deux
+rangées de mailles pariétales disparaissent en envergure et la portance
+chute d'un quart : à 32 mailles par corde, une marche d'une maille au
+bord de fuite agit comme un volet Gurney. La portance est stable (plateau)
+quand le bord de fuite est entre 0,4 et 0,8 maille après un nœud, et le
+raffinement ×2 converge vers ce plateau. Le point le plus en aval des
+maquettes (et le bord de fuite de l'aile analytique) est donc calé à
+0,7 maille après un nœud, fraction qui reste dans le plateau sur les grilles
+fines (×2 : 0,4 ; ×4 : 0,8 ; ×8 : 0,6). Même aile, veine allongée de 0,6 à
+2 fois vers l'amont : Cz 0,300 à 0,303 au lieu de 0,21 à 0,44.
+`MeshSetup::offset` (`run3d --decalage dx`) décale la maquette pour
+mesurer cette sensibilité. Une aile en flèche ou effilée, dont le bord de
+fuite coupe les nœuds à toutes les fractions, y est peu sensible.
+
+**Efforts par intégration sur la surface.** L'échange de quantité de
+mouvement aux parois surestime nettement la traînée avec la loi de paroi :
+la paroi glissante y cède une quantité de mouvement qui n'est pas le
+frottement (le « frottement » qu'on en tire est négatif), et l'escalier
+des mailles y mêle pression et frottement. Pour les maquettes STL, les
+efforts sont maintenant intégrés sur les triangles du maillage
+(`Gpu3D::surface_forces`, grille la plus fine) : −p n dA avec p relevée à
+une maille de la paroi le long de la normale, plus τ_p dA avec
+τ_p = ρ u_τ² de la loi de Spalding sur la vitesse tangentielle au même
+point. `run3d` en fait la moyenne sur la fenêtre de moyenne (un relevé par
+demi-temps convectif) et affiche aussi l'échange pour comparaison ;
+l'interface trace ces coefficients pour les maquettes STL. Les formes
+analytiques gardent l'échange.
+
+| Cas | Échange Cz / Cx | Surface Cz / Cx (pression + frottement) | Référence |
+| --- | --- | --- | --- |
+| Aile AR 4, 4°, L = 16 + ×2 | 0,309 / 0,062 | 0,263 / 0,030 (0,023 + 0,007) | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| Aile AR 4, 4°, L = 16 + ×4 | 0,314 / 0,044 | 0,289 / 0,030 (0,023 + 0,008) | id. |
+| TR-1208, 4°, L = 8 + ×4 | 0,314 / 0,041 | 0,261 / 0,021 (0,016 + 0,006) | mesure 0,257 / 0,011 ; VSPAERO 0,266 / 0,015 |
+| TR-1208, 8°, L = 8 + ×4 | 0,581 / 0,053 | 0,489 / 0,053 (0,048 + 0,005) | mesure 0,499 / 0,021 ; VSPAERO 0,531 / 0,026 |
+
+La portance rejoint la mesure et VSPAERO à quelques pour cent près, et la
+traînée est divisée par deux à 4°. Le frottement (0,005 à 0,008) a l'ordre
+de grandeur d'une plaque plane turbulente. Il reste trop de traînée de
+pression aux incidences élevées : relevée à une maille de la paroi, la
+dépression du bord d'attaque est atténuée, si bien que la succion du bord
+d'attaque (qui croît comme CL²) manque. Le moment de tangage et la
+répartition en envergure viennent encore de l'échange aux parois ; les
+efforts par maille en retirent maintenant la part de la pression de
+référence (ρ₀ c_s², nulle en somme mais pas maille par maille), ce qui
+supprime les pics parasites aux saumons.
 
 ## Maquettes STL (3D)
 
