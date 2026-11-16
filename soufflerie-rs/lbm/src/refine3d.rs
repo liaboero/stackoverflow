@@ -582,6 +582,9 @@ pub(crate) struct Refinement {
     pub(crate) fresh: bool,
     /// Nœud 0 de chaque grille fine, en mailles de la veine.
     pub(crate) origin: Vec<[f64; 3]>,
+    /// Grilles qui entourent toute la maquette (les suivantes n'en couvrent
+    /// qu'une partie : bord d'attaque).
+    pub(crate) full: usize,
 }
 
 /// Emprise des grilles fines autour de la maquette, en longueurs de

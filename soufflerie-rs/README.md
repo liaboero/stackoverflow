@@ -684,6 +684,12 @@ d'une maille à ×8 : c'est une limite de résolution, qui décroît en affinant
 (traînée de pression hors traînée induite : 0,028 à ×4, 0,019 à ×8), et non
 plus un défaut de la loi de paroi.
 
+**Correction.** Les portances de ce tableau sont sous-estimées de 5 à 10 % :
+la pression pariétale y était relevée à une ou deux mailles de la paroi,
+trop loin pour la dépression du bord d'attaque. Le bilan de quantité de
+mouvement sur une boîte donne une portance plus forte de 6 à 12 % que les
+références ; voir la section suivante.
+
 La soufflerie 2D (processeur et GPU) garde pour l'instant la loi de paroi
 d'origine, identique à celle de l'application web : le défaut décrit
 ci-dessus y reste au-delà d'environ 64 mailles par corde. Un essai sur le
@@ -692,6 +698,104 @@ NACA 0012 à 10° de CL = 1,29 à 1,12 (128 mailles par corde) et supprime le
 décollement à 256 (CL = 1,13 à 1,17), mais c'est la variante qui entraîne
 le fluide en 3D ; la formulation retenue en 3D (glissement depuis le nœud,
 relaxé, arêtes adhérentes) reste à porter sur les deux moteurs 2D.
+
+## Bord d'attaque, pression pariétale et bilans de quantité de mouvement
+
+Cinq pistes pour la traînée trop forte à 8° (TR-1208), examinées une à une.
+
+**Arêtes vives au bord d'attaque : non.** Une maille du bord d'attaque dont
+les liens touchent des faces à plus de 60° l'une de l'autre perd la loi de
+paroi (arête vive) ; avec un rayon de moins d'une maille, on pouvait le
+craindre. Relevé : 1 maille sur 46 à ×4, aucune sur 57 à ×8 dans les
+premiers 0,5 % de corde. Les mailles d'arête sont au bord de fuite.
+
+**Demi-précision : non.** Le même calcul en simple précision (TR-1208, 8°,
+×4) donne les mêmes Cp à 0,006 près et la même traînée par tranche de corde
+à 0,0001 près.
+
+**Pression pariétale : relevée trop loin.** Le champ contient la dépression
+du bord d'attaque, mais près de la paroi : à 2 % de corde sur l'extrados,
+Cp = −0,66 à un quart de maille et −0,27 à une maille (×4). L'intégration
+sur la surface relevait la pression là où les huit nœuds voisins sont
+fluides, soit à une à trois mailles. Elle extrapole désormais depuis ½ et
+1 maille, interpolée sur les seuls nœuds fluides du côté de la paroi (pas
+ceux de l'autre face d'une paroi mince). Le résultat dépend du choix des
+hauteurs, et c'est la portance qui bouge le plus :
+
+| TR-1208, 8°, Cz / Cx | ×4 | ×8 |
+| --- | --- | --- |
+| relevés à ½ et 1 maille (retenu) | 0,551 / 0,044 | 0,575 / 0,039 |
+| ¾ et 1½ | 0,519 / 0,038 | 0,548 / 0,033 |
+| 1 et 2 | 0,496 / 0,042 | 0,528 / 0,034 |
+| ancien relevé (voisinage entièrement fluide) | 0,493 / 0,044 | 0,526 / 0,036 |
+| bilan sur une boîte (ci-dessous) | 0,545 / 0,049 | 0,554 / — |
+
+Essayée et écartée : la correction de courbure de l'équilibre normal
+(dp/dn = ρ u_t² κ, κ courbure du maillage dans la direction de
+l'écoulement, p_p = p(½) − ρ u_t² ln(1 + κ/2)). Elle ramène la portance à
+0,510 quand le bilan sur une boîte donne 0,545 : le modèle d'écoulement
+concentrique ne vaut pas quand le rayon tient dans une maille.
+
+**Bilan sur une boîte : la portance de référence du calcul.**
+`Gpu3D::box_forces_vol` intègre −∮ (ρ u u·n + p n) dA sur une boîte autour
+de la maquette, dans la grille la plus fine qui l'entoure, indépendamment
+du traitement des parois. La portance ne dépend ni de la taille de la boîte
+(0,5446 à 0,5457 de 0,05 à 0,25 longueur de marge) ni du temps. La traînée
+croît linéairement avec le volume de la boîte (0,058 à 0,064) : la veine a
+un léger gradient de pression longitudinal qui pousse aussi le fluide de la
+boîte. `run3d` affiche ce bilan pour deux boîtes (0,1 et 0,15 longueur) et
+la traînée extrapolée à volume nul (0,048 contre 0,044 sur la surface à
+×4, 8°).
+
+**Raffinement du bord d'attaque (`--ba 1`).** Une grille deux fois plus
+fine encore, limitée aux faces tournées vers l'amont (n_x < −0,5), avec 10 %
+de longueur de référence vers l'aval. Les efforts de la surface viennent,
+triangle par triangle, de la grille la plus fine qui l'entoure ; l'échange
+aux parois combine les deux grilles. Sur TR-1208, 8°, ×4 : la traînée de
+pression passe de 0,0387 à 0,0332, celle du raffinement complet ×8 (0,0335) :
+la baisse de ×4 à ×8 vient du bord d'attaque. La portance (boîte) passe de
+0,545 à 0,549. Une seule boîte alignée sur les axes couvre toutefois le
+bord d'attaque d'une aile en flèche sur presque toute sa corde : 9,4 M
+mailles à ×8 (la grille ×4 en a 2,5 M), 54 M à ×16, au-delà de la mémoire du
+GPU ; `--ba` refuse au-delà de quatre fois la grille parente.
+
+**Traînée en champ lointain (`--sillage 1`).** `Gpu3D::wake_drag` décompose
+la traînée dans un plan transversal (Betz, Maskell) : perte de pression
+totale dans le sillage visqueux (ν̃ > 10 ν), perte hors du sillage
+(dissipation numérique de l'écoulement extérieur), énergie de l'écoulement
+transversal (traînée induite). La pression totale de référence est la
+médiane du même plan hors du sillage : les ondes de pression de la veine,
+uniformes sur la section, s'annulent. Le bilan complet entre deux plans
+n'est pas exploitable : les bandes absorbantes des bords latéraux, qui
+ramènent l'écoulement vers l'amont, exercent leurs propres efforts (la
+portance du plan ne vaut que 0,28 à 0,37 au lieu de 0,55). TR-1208, 8° :
+traînée induite 0,011 à ×4, 0,015 à 0,019 à ×8 (CL²/(πA) = 0,012 pour un
+allongement 8) ; profil (perte dans le sillage) 0,054 à ×4, 0,034 à 0,037 à
+×8 ; hors sillage ±0,005, sans signe constant.
+
+**Ce que disent les bilans.** Avec les trois mesures de la portance qui
+s'accordent (boîte, échange aux parois, surface), le calcul porte 6 à 12 %
+de plus que les références :
+
+| Cas | Surface Cz / Cx | Échange Cz | Boîte Cz / Cx (volume nul) | Référence |
+| --- | --- | --- | --- | --- |
+| Aile AR 4, 4°, L = 16 + ×2 | 0,288 / 0,025 | 0,271 | 0,268 / 0,076 | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| Aile AR 4, 4°, L = 16 + ×4 | 0,274 / 0,033 | 0,276 | 0,272 / 0,044 | id. |
+| Aile AR 4, 8°, L = 16 + ×4 | 0,545 / 0,046 | 0,569 | 0,563 / 0,059 | VSPAERO 0,501 à 0,529 / 0,039 à 0,045 |
+| TR-1208, 4°, L = 8 + ×4 | 0,289 / 0,016 | 0,290 | 0,286 / 0,044 | mesure 0,257 / 0,011 ; VSPAERO 0,266 / 0,015 |
+| TR-1208, 4°, L = 8 + ×8 | 0,299 / 0,018 | 0,291 | — | id. |
+| TR-1208, 8°, L = 8 + ×4 | 0,551 / 0,044 | 0,550 | 0,545 / 0,049 | mesure 0,499 / 0,021 ; VSPAERO 0,531 / 0,026 |
+| TR-1208, 8°, L = 8 + ×8 | 0,574 / 0,039 | 0,560 | 0,554 / — | id. |
+
+(« — » : boîte trop grande pour la grille ×8 dans ces calculs ; `run3d`
+utilise maintenant 0,1 et 0,15 longueur.) La portance dépasse VSPAERO non
+visqueux : le décambrage visqueux de la couche limite (5 à 6 % ici) manque,
+et un peu plus. La traînée reste mal déterminée : la surface et l'échange
+donnent 0,016 à 0,046, la boîte 0,044 à 0,076, au-dessus des références dans
+tous les cas. Hypothèse pour la suite : la loi de paroi, qui fait glisser
+l'écoulement au premier nœud, rend une couche limite trop mince pour
+décambrer le profil ; la résolution du bord d'attaque n'explique qu'une
+partie de la traînée.
 
 ## Maquettes STL (3D)
 

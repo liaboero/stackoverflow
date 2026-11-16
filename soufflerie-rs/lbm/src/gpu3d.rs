@@ -1410,6 +1410,9 @@ pub struct Gpu3D {
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
     /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
     wall_cells: Vec<u32>,
+    /// Plus petit cosinus entre les normales des faces touchées par les liens
+    /// de chaque maille pariétale (arête vive : < 0,5).
+    edge_cos: Vec<f32>,
     /// Part de la pression de référence (ρ₀ c_s²) dans l'effort de chaque
     /// maille pariétale : Σ −2 w_i c_i sur ses liens. Nulle en somme sur une
     /// maquette fermée, mais pas maille par maille ; retirée des efforts par
@@ -1449,6 +1452,25 @@ impl SurfaceForces {
         [0, 1, 2].map(|a| self.pressure_wall[a] + self.friction[a])
     }
 }
+
+/// Traînée en champ lointain (voir `Gpu3D::wake_drag`), unités du réseau.
+#[derive(Clone, Debug, Default)]
+pub struct WakeDrag {
+    /// Perte de pression totale dans le sillage visqueux (traînée de profil).
+    pub loss_wake: f64,
+    /// Perte de pression totale hors du sillage (traînée parasite numérique).
+    pub loss_outside: f64,
+    /// Énergie cinétique transversale (traînée induite).
+    pub induced: f64,
+    /// Débit aval / débit amont.
+    pub mass_ratio: f64,
+    /// Aire du sillage visqueux dans le plan aval (mailles de la veine).
+    pub wake_area: f64,
+}
+
+/// Hauteurs (mailles) des deux relevés de pression extrapolés jusqu'à la paroi.
+const PW_H1: f64 = 0.5;
+const PW_H2: f64 = 1.0;
 
 /// Hauteur de raccord de la loi de paroi, en mailles de la grille.
 pub const WM_H: f64 = 2.0;
@@ -1571,6 +1593,25 @@ impl Gpu3D {
         sa: bool,
         depth: usize,
     ) -> Result<Gpu3D, String> {
+        Self::with_refinement_le(body, nu, u_in, fp16, sa, depth, false)
+    }
+
+    /// Idem ; `le` ajoute une grille deux fois plus fine encore, limitée au
+    /// bord d'attaque d'une maquette maillée (faces tournées vers l'amont,
+    /// n_x < −0,5) : le rayon du bord d'attaque d'une aile (≈ 1 % de la
+    /// corde) tient sinon dans moins d'une maille, et le pic de dépression,
+    /// qui équilibre la traînée de pression de l'arrière de l'extrados, est
+    /// écrêté. Les efforts de la surface viennent, triangle par triangle, de
+    /// la grille la plus fine qui l'entoure.
+    pub fn with_refinement_le(
+        body: &Body3D,
+        nu: f64,
+        u_in: f32,
+        fp16: bool,
+        sa: bool,
+        depth: usize,
+        le: bool,
+    ) -> Result<Gpu3D, String> {
         let (device, queue, name) = Self::open_device()?;
         let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false)?;
         let depth = depth.min(crate::refine3d::EXTENT3.len());
@@ -1620,11 +1661,81 @@ impl Gpu3D {
             porg = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
             origin.push(porg);
         }
+        let full = levels.len();
+        if le {
+            let k = depth + 1;
+            let sp = (1u64 << (k - 1)) as f64;
+            let mesh = parent_body.mesh.clone().ok_or("raffinement du bord d'attaque : maquette maillée seulement")?;
+            let nrm = |t: &crate::stl::Tri| {
+                let e1 = [0, 1, 2].map(|a| t[1][a] - t[0][a]);
+                let e2 = [0, 1, 2].map(|a| t[2][a] - t[0][a]);
+                [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+            };
+            let vol: f64 = mesh.tris.iter().map(|t| { let n = nrm(t); (0..3).map(|a| t[0][a] * n[a]).sum::<f64>() }).sum();
+            let sgn = if vol >= 0.0 { 1.0 } else { -1.0 };
+            let (mut a0, mut a1) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for t in &mesh.tris {
+                let n = nrm(t);
+                let m = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if m < 1e-12 || sgn * n[0] / m > -0.5 {
+                    continue;
+                }
+                for v in t {
+                    for a in 0..3 {
+                        a0[a] = a0[a].min(v[a]);
+                        a1[a] = a1[a].max(v[a]);
+                    }
+                }
+            }
+            if a0[0] > a1[0] {
+                return Err("raffinement du bord d'attaque : aucune face tournée vers l'amont".into());
+            }
+            // Marges (mailles de la grille parente) : de quoi loger le pic de
+            // dépression et le début de la recompression (10 % de la longueur
+            // de référence vers l'aval), plus la zone de recouvrement.
+            let e = (crate::refine3d::MARGIN3 + 4) as f64;
+            let down = e.max(0.1 * parent_body.l as f64);
+            let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
+            let lo = [
+                (a0[0] - e).floor().max(3.0) as usize,
+                (a0[1] - e).floor().max(3.0) as usize,
+                (a0[2] - e).floor().max(3.0) as usize,
+            ];
+            let hi = [
+                ((a1[0] + down).ceil() as usize).min(pnx - 4),
+                ((a1[1] + e).ceil() as usize).min(pny - 4),
+                ((a1[2] + e).ceil() as usize).min(pnz - 4),
+            ];
+            let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
+            // Une seule boîte alignée sur les axes : sur une aile en flèche,
+            // elle couvre presque toute l'aile. Au-delà de quatre fois la
+            // grille parente, elle coûte autant qu'un raffinement complet
+            // (environ cinq fois) et risque d'épuiser la mémoire du GPU.
+            let n_le = dims.iter().product::<usize>();
+            if n_le > 4 * pnx * pny * pnz {
+                return Err(format!(
+                    "raffinement du bord d'attaque : {:.0} M mailles, plus de quatre fois la grille parente (bord d'attaque en flèche ?) : raffiner toute la maquette (--raff) plutôt",
+                    n_le as f64 / 1e6
+                ));
+            }
+            let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
+            let nu_k = nu * (1u64 << k) as f64;
+            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
+            child.les = top.les;
+            {
+                let parent = if k == 1 { &top } else { &levels[k - 2] };
+                links.push(crate::refine3d::Link3::new(parent, &child, lo));
+            }
+            levels.push(child);
+            porg = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
+            origin.push(porg);
+        }
         top.refine = Some(Box::new(crate::refine3d::Refinement {
             levels,
             links,
             fresh: true,
             origin,
+            full,
         }));
         Ok(top)
     }
@@ -2177,6 +2288,7 @@ impl Gpu3D {
             ground: body.ground && !nested,
             refine: None,
             wall_cells,
+            edge_cos,
             rest_force,
             surface: body.mesh.clone(),
         };
@@ -2351,17 +2463,46 @@ impl Gpu3D {
     /// ramenés aux unités de la veine (surfaces 4ᴷ fois plus grandes).
     pub fn take_forces(&mut self) -> Force3 {
         if let Some(mut r) = self.refine.take() {
-            let k = r.levels.len() as i32;
+            // Grille la plus fine qui entoure toute la maquette (celle du
+            // bord d'attaque n'en couvre qu'une partie).
+            let k = r.full as i32;
             let _ = self.take_forces_one();
-            let f = r.levels.last_mut().unwrap().take_forces_one();
+            let s = 4f64.powi(k);
+            if r.levels.len() == r.full {
+                let f = r.levels[r.full - 1].take_forces_one();
+                self.lost |= r.levels.iter().any(|g| g.lost);
+                self.refine = Some(r);
+                return Force3 {
+                    fx: f.fx / s,
+                    fy: f.fy / s,
+                    fz: f.fz / s,
+                    steps: f.steps >> k,
+                };
+            }
+            // Grille du bord d'attaque : ses mailles pariétales hors de sa
+            // bande de bord, et celles de la grille entière ailleurs (sous la
+            // grille fine, la grille entière reçoit l'état recopié).
+            let (fo, fs) = (r.origin[r.full - 1], (1u64 << r.full) as f64);
+            let (lo, ls) = (r.origin[r.full], (1u64 << (r.full + 1)) as f64);
+            let ld = {
+                let g = &r.levels[r.full];
+                [g.nx, g.ny, g.nz]
+            };
+            let m = (2 * crate::refine3d::MARGIN3 + 2) as f64;
+            let inner = |q: [f64; 3]| (0..3).all(|a| q[a] >= m && q[a] <= (ld[a] - 1) as f64 - m);
+            let a = r.levels[r.full - 1].take_forces_masked(|p| !inner([0, 1, 2].map(|i| (fo[i] + p[i] / fs - lo[i]) * ls)));
+            let b = r.levels[r.full].take_forces_masked(|p| inner(p));
+            for g in r.levels[r.full + 1..].iter_mut() {
+                let _ = g.take_forces_one();
+            }
             self.lost |= r.levels.iter().any(|g| g.lost);
             self.refine = Some(r);
-            let s = 4f64.powi(k);
+            let sb = 4.0 * s;
             return Force3 {
-                fx: f.fx / s,
-                fy: f.fy / s,
-                fz: f.fz / s,
-                steps: f.steps >> k,
+                fx: a.fx / s + b.fx / sb,
+                fy: a.fy / s + b.fy / sb,
+                fz: a.fz / s + b.fz / sb,
+                steps: a.steps >> k,
             };
         }
         self.take_forces_one()
@@ -2386,9 +2527,9 @@ impl Gpu3D {
     pub fn finest_macros(&mut self) -> (Vec<[f32; 4]>, [usize; 3], [f64; 3], f64) {
         match self.refine.as_mut() {
             Some(r) => {
-                let k = r.levels.len();
+                let k = r.full;
                 let org = r.origin[k - 1];
-                let g = r.levels.last_mut().unwrap();
+                let g = &mut r.levels[k - 1];
                 let d = [g.nx, g.ny, g.nz];
                 (g.macros(), d, org, (1u64 << k) as f64)
             }
@@ -2399,107 +2540,459 @@ impl Gpu3D {
         }
     }
 
+    /// ν̃ de Spalart–Allmaras par maille (vide sans SA).
+    pub fn nu_tilde(&self) -> Vec<f32> {
+        if !self.sa {
+            return Vec::new();
+        }
+        let size = 4 * self.n as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nut3d_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.read(&self.nut[self.cur], &staging, size)
+    }
+
+    /// Traînée en champ lointain (Betz, Maskell) : bilan de quantité de
+    /// mouvement entre deux plans transversaux x = `x_in` (amont) et
+    /// x = `x_out` (aval), en mailles de la veine, sur toute la section
+    /// (bords latéraux périodiques). Chaque maille de la veine du plan est
+    /// intégrée sur la grille la plus fine qui la couvre (trapèzes).
+    /// Composantes de la traînée (Betz, Maskell ; le bilan complet entre les
+    /// deux plans n'est pas exploitable ici : les bandes absorbantes des bords
+    /// latéraux exercent leurs propres efforts, et les ondes de pression de la
+    /// veine le font osciller) :
+    /// - perte de pression totale ∫ (p₀,∞ − p₀) dS, p₀,∞ pris dans le même
+    ///   plan hors du sillage, séparée entre le
+    ///   sillage visqueux (ν̃ > 10 ν, fluide passé dans la couche limite) et le
+    ///   reste de l'écoulement, qui devrait être sans perte : ce reste est la
+    ///   traînée parasite de la discrétisation (dissipation numérique) ;
+    /// - traînée induite : énergie de l'écoulement transversal ½ ∫ ρ(v² + w²) dS
+    ///   (moins celle du plan amont).
+    /// Unités du réseau de la veine (effort = coefficient × ½ ρ U² S).
+    pub fn wake_drag(&mut self, x_in: usize, x_out: &[usize]) -> Vec<WakeDrag> {
+        struct Lev {
+            mac: Vec<[f32; 4]>,
+            nut: Vec<f32>,
+            d: [usize; 3],
+            org: [f64; 3],
+            s: f64,
+            nu: f64,
+            m: usize,
+        }
+        let mut levs = vec![Lev {
+            mac: self.macros(),
+            nut: self.nu_tilde(),
+            d: [self.nx, self.ny, self.nz],
+            org: [0.0; 3],
+            s: 1.0,
+            nu: self.nu,
+            m: 0,
+        }];
+        if let Some(r) = self.refine.as_mut() {
+            for (k, g) in r.levels.iter_mut().enumerate() {
+                levs.push(Lev {
+                    mac: g.macros(),
+                    nut: g.nu_tilde(),
+                    d: [g.nx, g.ny, g.nz],
+                    org: r.origin[k],
+                    s: (1u64 << (k + 1)) as f64,
+                    nu: g.nu,
+                    // Enveloppe fantôme et zone de recouvrement exclues.
+                    m: 2 * crate::refine3d::MARGIN3 + 2,
+                });
+            }
+        }
+        let (ny, nz) = (self.ny, self.nz);
+        // Intégrales sur un plan : [∫(p + ρu²), ∫p₀, ∫ν̃-sillage p₀, aire sillage,
+        // ∫½ρ(v² + w²), ∫ρu, aire, ∫ρuw, ∫ρuv].
+        let plane = |x: usize| -> ([f64; 9], Vec<f64>) {
+            let mut acc = [0.0f64; 9];
+            let mut free = Vec::new();
+            for z in 0..nz {
+                for y in 0..ny {
+                    // Grille la plus fine qui couvre la maille (y ± ½, z ± ½).
+                    let mut pick = 0;
+                    for (k, l) in levs.iter().enumerate().skip(1) {
+                        let fx = (x as f64 - l.org[0]) * l.s;
+                        let lo = [(y as f64 - 0.5 - l.org[1]) * l.s, (z as f64 - 0.5 - l.org[2]) * l.s];
+                        let hi = [(y as f64 + 0.5 - l.org[1]) * l.s, (z as f64 + 0.5 - l.org[2]) * l.s];
+                        let m = l.m as f64;
+                        let inside = |v: f64, n: usize| v >= m && v <= (n - 1) as f64 - m;
+                        if inside(fx, l.d[0]) && inside(lo[0], l.d[1]) && inside(hi[0], l.d[1]) && inside(lo[1], l.d[2]) && inside(hi[1], l.d[2]) {
+                            pick = k;
+                        }
+                    }
+                    let l = &levs[pick];
+                    let half = (l.s / 2.0).round() as i64;
+                    let (cx, cy, cz) = (
+                        ((x as f64 - l.org[0]) * l.s).round() as i64,
+                        ((y as f64 - l.org[1]) * l.s).round() as i64,
+                        ((z as f64 - l.org[2]) * l.s).round() as i64,
+                    );
+                    let (j0, j1) = if pick == 0 { (0, 0) } else { (-half, half) };
+                    for dj in j0..=j1 {
+                        for dk in j0..=j1 {
+                            let wy = if pick > 0 && dj.abs() == half { 0.5 } else { 1.0 };
+                            let wz = if pick > 0 && dk.abs() == half { 0.5 } else { 1.0 };
+                            let w = wy * wz / (l.s * l.s);
+                            let c = cx as usize + l.d[0] * ((cy + dj) as usize + l.d[1] * (cz + dk) as usize);
+                            let v = l.mac[c];
+                            let (u, vv, ww, rho) = (v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64);
+                            let p = (rho - 1.0) / 3.0;
+                            let p0 = p + 0.5 * rho * (u * u + vv * vv + ww * ww);
+                            acc[0] += w * (p + rho * u * u);
+                            acc[1] += w * p0;
+                            let wake = l.nut.get(c).is_some_and(|&t| t as f64 > 10.0 * l.nu);
+                            if wake {
+                                acc[2] += w * p0;
+                                acc[3] += w;
+                            } else if dj == 0 && dk == 0 {
+                                free.push(p0);
+                            }
+                            acc[4] += w * 0.5 * rho * (vv * vv + ww * ww);
+                            acc[5] += w * rho * u;
+                            acc[6] += w;
+                            acc[7] += w * rho * u * ww;
+                            acc[8] += w * rho * u * vv;
+                        }
+                    }
+                }
+            }
+            (acc, free)
+        };
+        let (a, _) = plane(x_in);
+        x_out
+            .iter()
+            .map(|&x| {
+                let (b, mut free) = plane(x);
+                // Pression totale de l'écoulement non perturbé dans ce plan
+                // (médiane hors du sillage) : les ondes de pression de la
+                // veine, uniformes sur la section, s'y retrouvent et s'annulent.
+                free.sort_by(f64::total_cmp);
+                let p0_ref = free.get(free.len() / 2).copied().unwrap_or(0.0);
+                let loss = p0_ref * b[6] - b[1];
+                let loss_wake = p0_ref * b[3] - b[2];
+                WakeDrag {
+                    loss_wake,
+                    loss_outside: loss - loss_wake,
+                    induced: b[4] - a[4],
+                    mass_ratio: b[5] / a[5],
+                    wake_area: b[3],
+                }
+            })
+            .collect()
+    }
+
+    /// Efforts sur la maquette par bilan de quantité de mouvement sur une
+    /// boîte qui l'entoure à `margin` longueur de référence, intégré sur la
+    /// grille la plus fine qui entoure toute la maquette : −∮ (ρ u u·n + p n) dA.
+    /// Indépendant du traitement des parois ; une onde de pression uniforme
+    /// s'annule entre faces opposées. Unités du réseau de la veine.
+    pub fn box_forces(&mut self, margin: f64) -> Option<[f64; 3]> {
+        self.box_forces_vol(&[margin]).pop().flatten().map(|(f, _)| f)
+    }
+
+    /// Idem pour plusieurs marges sur un même champ : efforts et volume de
+    /// la boîte (mailles de la veine).
+    pub fn box_forces_vol(&mut self, margins: &[f64]) -> Vec<Option<([f64; 3], f64)>> {
+        let (g, org, s) = match self.refine.as_mut() {
+            Some(r) => {
+                let k = r.full;
+                (&mut r.levels[k - 1], r.origin[k - 1], (1u64 << k) as f64)
+            }
+            None => (&mut *self, [0.0; 3], 1.0),
+        };
+        let Some(mesh) = g.surface.clone() else { return vec![None; margins.len()] };
+        let mac = g.macros();
+        let d = [g.nx, g.ny, g.nz];
+        let gl = g.l as f64;
+        let _ = org;
+        margins.iter().map(|&margin| {
+        let mg = margin * gl;
+        let mut lo = [0usize; 3];
+        let mut hi = [0usize; 3];
+        for a in 0..3 {
+            let l = (mesh.lo[a] - mg).floor();
+            let h = (mesh.hi[a] + mg).ceil();
+            if l < 3.0 || h > (d[a] - 4) as f64 {
+                return None;
+            }
+            lo[a] = l as usize;
+            hi[a] = h as usize;
+        }
+        let at = |x: usize, y: usize, z: usize| mac[x + d[0] * (y + d[1] * z)];
+        let mut flux = [0.0f64; 3];
+        for (ax, sgn, pos) in [(0, -1.0, lo[0]), (0, 1.0, hi[0]), (1, -1.0, lo[1]), (1, 1.0, hi[1]), (2, -1.0, lo[2]), (2, 1.0, hi[2])] {
+            let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
+            for i in lo[a1]..=hi[a1] {
+                for j in lo[a2]..=hi[a2] {
+                    // Trapèzes : demi-poids sur les arêtes de la face.
+                    let w = (if i == lo[a1] || i == hi[a1] { 0.5 } else { 1.0 }) * (if j == lo[a2] || j == hi[a2] { 0.5 } else { 1.0 });
+                    let mut p3 = [0usize; 3];
+                    p3[ax] = pos;
+                    p3[a1] = i;
+                    p3[a2] = j;
+                    let c = at(p3[0], p3[1], p3[2]);
+                    let (u, rho) = ([c[0] as f64, c[1] as f64, c[2] as f64], c[3] as f64);
+                    let un = sgn * u[ax];
+                    for k in 0..3 {
+                        flux[k] += w * (rho * u[k] * un + if k == ax { sgn * (rho - 1.0) / 3.0 } else { 0.0 });
+                    }
+                }
+            }
+        }
+        let vol: f64 = (0..3).map(|a| (hi[a] - lo[a]) as f64 / s).product();
+        Some((flux.map(|f| -f / (s * s)), vol))
+        }).collect()
+    }
+
+    /// Mailles pariétales de la grille la plus fine (diagnostic) : position
+    /// (mailles de la veine) et plus petit cosinus entre les faces touchées.
+    pub fn finest_wall_cells(&self) -> Vec<([f64; 3], f32)> {
+        let (g, org, s) = match self.refine.as_ref() {
+            Some(r) => {
+                let k = r.full;
+                (&r.levels[k - 1], r.origin[k - 1], (1u64 << k) as f64)
+            }
+            None => (self, [0.0; 3], 1.0),
+        };
+        g.wall_cells
+            .iter()
+            .zip(&g.edge_cos)
+            .map(|(&c, &e)| {
+                let c = c as usize;
+                let p = [(c % g.nx) as f64, ((c / g.nx) % g.ny) as f64, (c / (g.nx * g.ny)) as f64];
+                ([org[0] + p[0] / s, org[1] + p[1] / s, org[2] + p[2] / s], e)
+            })
+            .collect()
+    }
+
+    /// Grille partielle du bord d'attaque : dimensions, mailles pariétales, facteur.
+    pub fn le_grid(&self) -> Option<([usize; 3], usize, usize)> {
+        let r = self.refine.as_ref()?;
+        let g = r.levels.get(r.full)?;
+        Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << (r.full + 1)))
+    }
+
     pub fn finest(&self) -> Option<([usize; 3], usize, usize)> {
         let r = self.refine.as_ref()?;
-        let g = r.levels.last()?;
-        Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.levels.len()))
+        let g = r.levels.get(r.full.checked_sub(1)?)?;
+        Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.full))
     }
 
     /// Efforts sur une maquette maillée par intégration sur ses triangles
-    /// (grille la plus fine, champ du dernier pas) : −p_p n dA, p_p extrapolée
-    /// linéairement jusqu'à la paroi depuis les relevés à une et deux mailles
-    /// le long de la normale (la dépression du bord d'attaque, très raide, est
-    /// atténuée dès une maille), plus τ_p dA, τ_p = ρ u_τ² de la loi de
-    /// Spalding dans la direction de la vitesse tangentielle à une maille.
-    /// Plus juste que l'échange de quantité de mouvement : sur l'escalier des
-    /// mailles, les liens presque parallèles à la paroi renvoient la pression
-    /// et la quantité de mouvement longitudinale dans leur propre direction,
-    /// d'où une traînée parasite concentrée sur les marches.
+    /// (champ du dernier pas ; chaque triangle sur la grille la plus fine qui
+    /// l'entoure) : −p_p n dA, p_p extrapolée linéairement jusqu'à la paroi
+    /// depuis les relevés à ½ et 1 maille le long de la normale, interpolés
+    /// sur les seuls nœuds fluides de ce côté de la paroi (relevée plus loin,
+    /// là où tout le voisinage est fluide, la dépression du bord d'attaque
+    /// était écrêtée et la portance sous-estimée de 10 % par rapport au bilan
+    /// de quantité de mouvement), plus τ_p dA, τ_p = ρ u_τ² de la loi de
+    /// Spalding dans la direction de la vitesse tangentielle relevée à WM_H.
+    /// Plus juste que l'échange de quantité de mouvement pour la traînée : sur
+    /// l'escalier des mailles, les liens presque parallèles à la paroi
+    /// renvoient la pression et la quantité de mouvement longitudinale dans
+    /// leur propre direction, d'où une traînée parasite sur les marches.
     /// None sans maillage.
     pub fn surface_forces(&mut self) -> Option<SurfaceForces> {
-        let (s, org) = match &self.refine {
-            Some(r) => ((1u64 << r.levels.len()) as f64, r.origin[r.levels.len() - 1]),
-            None => (1.0, [0.0; 3]),
-        };
-        let g = match self.refine.as_mut() {
-            Some(r) => r.levels.last_mut().unwrap(),
-            None => &mut *self,
-        };
-        let mesh = g.surface.clone()?;
-        let mac = g.macros();
-        let (nx, ny, nz) = (g.nx, g.ny, g.nz);
-        let nu = g.nu;
-        let solid = &g.solid;
+        // Grilles utilisées : la plus fine qui entoure toute la maquette, puis
+        // les grilles partielles (bord d'attaque), de la moins à la plus fine.
+        struct Lev {
+            mac: Vec<[f32; 4]>,
+            solid: Vec<bool>,
+            d: [usize; 3],
+            org: [f64; 3],
+            s: f64,
+            nu: f64,
+            mesh: std::sync::Arc<crate::stl::MeshBody>,
+            /// Bande exclue près des bords (fantômes, recouvrement) ; 0 : grille entière.
+            m: f64,
+        }
+        let mut levs: Vec<Lev> = Vec::new();
+        match self.refine.as_mut() {
+            Some(r) => {
+                for k in r.full..=r.levels.len() {
+                    let g = &mut r.levels[k - 1];
+                    let mesh = g.surface.clone()?;
+                    levs.push(Lev {
+                        mac: g.macros(),
+                        solid: g.solid.clone(),
+                        d: [g.nx, g.ny, g.nz],
+                        org: r.origin[k - 1],
+                        s: (1u64 << k) as f64,
+                        nu: g.nu,
+                        mesh,
+                        m: if k == r.full { 0.0 } else { (2 * crate::refine3d::MARGIN3 + 2) as f64 },
+                    });
+                }
+            }
+            None => {
+                let mesh = self.surface.clone()?;
+                levs.push(Lev {
+                    mac: self.macros(),
+                    solid: self.solid.clone(),
+                    d: [self.nx, self.ny, self.nz],
+                    org: [0.0; 3],
+                    s: 1.0,
+                    nu: self.nu,
+                    mesh,
+                    m: 0.0,
+                });
+            }
+        }
         let normal = |t: &crate::stl::Tri| {
             let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
             let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
             [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
         };
         // Normales sortantes si le volume signé est positif.
-        let vol: f64 = mesh.tris.iter().map(|t| { let n = normal(t); (0..3).map(|k| t[0][k] * n[k]).sum::<f64>() }).sum();
+        let vol: f64 = levs[0]
+            .mesh
+            .tris
+            .iter()
+            .map(|t| {
+                let n = normal(t);
+                (0..3).map(|k| t[0][k] * n[k]).sum::<f64>()
+            })
+            .sum();
         let sgn = if vol >= 0.0 { 1.0 } else { -1.0 };
-        let sample = |p: [f64; 3]| -> Option<[f64; 4]> {
+        let outside = |l: &Lev, q: [i64; 3]| (0..3).any(|a| (q[a] as f64) < l.m || q[a] as f64 > (l.d[a] - 1) as f64 - l.m);
+        let sample = |l: &Lev, p: [f64; 3]| -> Option<[f64; 4]> {
             let i = p.map(|v| v.floor() as i64);
             let w = [0, 1, 2].map(|a| p[a] - i[a] as f64);
             let mut out = [0.0; 4];
             for c in 0..8 {
                 let o = [c & 1, (c >> 1) & 1, (c >> 2) & 1];
-                let (x, y, z) = (i[0] + o[0] as i64, i[1] + o[1] as i64, i[2] + o[2] as i64);
-                if x < 0 || y < 0 || z < 0 || x >= nx as i64 || y >= ny as i64 || z >= nz as i64 {
+                let q = [i[0] + o[0] as i64, i[1] + o[1] as i64, i[2] + o[2] as i64];
+                if outside(l, q) {
                     return None;
                 }
-                let c = x as usize + nx * (y as usize + ny * z as usize);
-                if solid[c] {
+                let c = q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize);
+                if l.solid[c] {
                     return None;
                 }
                 let ww: f64 = (0..3).map(|a| if o[a] == 1 { w[a] } else { 1.0 - w[a] }).product();
                 for k in 0..4 {
-                    out[k] += ww * mac[c][k] as f64;
+                    out[k] += ww * l.mac[c][k] as f64;
                 }
             }
             Some(out)
         };
-        let mut out = SurfaceForces::default();
-        let mut area = 0.0;
-        for t in &mesh.tris {
-            let n0 = normal(t);
-            let a2 = (n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2]).sqrt();
-            if a2 < 1e-12 {
-                continue;
+        // Pression au plus près de la paroi : interpolation trilinéaire sur
+        // les seuls nœuds fluides du côté de la normale (pas ceux de l'autre
+        // face d'une paroi mince), poids renormalisés.
+        let (h1, h2) = std::env::var("SOUFFLERIE_PWH")
+            .ok()
+            .and_then(|v| {
+                let mut it = v.split(',').map(|x| x.parse::<f64>().ok());
+                Some((it.next()??, it.next()??))
+            })
+            .unwrap_or((PW_H1, PW_H2));
+        let near = |l: &Lev, c: [f64; 3], n: [f64; 3], h: f64| -> Option<[f64; 4]> {
+            let p = [0, 1, 2].map(|k| c[k] + h * n[k]);
+            let i = p.map(|v| v.floor() as i64);
+            let w = [0, 1, 2].map(|a| p[a] - i[a] as f64);
+            let (mut acc, mut ws) = ([0.0f64; 4], 0.0);
+            for k in 0..8 {
+                let o = [k & 1, (k >> 1) & 1, (k >> 2) & 1];
+                let q = [i[0] + o[0] as i64, i[1] + o[1] as i64, i[2] + o[2] as i64];
+                if outside(l, q) {
+                    return None;
+                }
+                let cell = q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize);
+                let side: f64 = (0..3).map(|a| (q[a] as f64 - c[a]) * n[a]).sum();
+                if l.solid[cell] || side <= 0.0 {
+                    continue;
+                }
+                let ww: f64 = (0..3).map(|a| if o[a] == 1 { w[a] } else { 1.0 - w[a] }).product();
+                let m = l.mac[cell];
+                for a in 0..3 {
+                    acc[a] += ww * m[a] as f64;
+                }
+                acc[3] += ww * (m[3] as f64 - 1.0) / 3.0;
+                ws += ww;
             }
-            let n = n0.map(|v| sgn * v / a2);
-            let ar = 0.5 * a2;
-            area += ar;
-            let c = [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
+            (ws >= 0.25).then(|| acc.map(|v| v / ws))
+        };
+        // Relevés d'un triangle sur une grille : p à h, p à la paroi, vitesse
+        // et hauteur du frottement, relevé à h ; None si la grille ne
+        // l'entoure pas.
+        let probe = |l: &Lev, c: [f64; 3], n: [f64; 3]| -> Option<(f64, f64, [f64; 4], f64, [f64; 4])> {
             // Une maille le long de la normale ; plus loin si un nœud voisin est solide.
             let mut h = 1.0;
             let mut v = None;
             while v.is_none() && h <= 3.0 {
-                v = sample([0, 1, 2].map(|k| c[k] + h * n[k]));
+                v = sample(l, [0, 1, 2].map(|k| c[k] + h * n[k]));
                 if v.is_none() {
                     h += 0.5;
                 }
             }
-            let Some(v) = v else {
-                out.missed += ar;
-                continue;
-            };
+            let v = v?;
             let p = (v[3] - 1.0) / 3.0;
-            // Pression extrapolée linéairement jusqu'à la paroi.
-            let pw = match sample([0, 1, 2].map(|k| c[k] + (h + 1.0) * n[k])) {
+            // Pression extrapolée linéairement jusqu'à la paroi depuis les
+            // relevés à ½ et 1 maille (nœuds fluides de ce côté seulement) ;
+            // à défaut, depuis h et h + 1.
+            let mut pw = match sample(l, [0, 1, 2].map(|k| c[k] + (h + 1.0) * n[k])) {
                 Some(v2) => p + h * (p - (v2[3] - 1.0) / 3.0),
                 None => p,
             };
+            if let (true, Some(v1), Some(v2)) = (h2 > h1, near(l, c, n, h1), near(l, c, n, h2)) {
+                pw = v1[3] + h1 * (v1[3] - v2[3]) / (h2 - h1);
+            }
             // Frottement : loi de paroi alimentée à la hauteur de raccord du
             // calcul (WM_H mailles), comme le glissement.
-            let (vf, hf) = match sample([0, 1, 2].map(|k| c[k] + WM_H.max(h) * n[k])) {
+            let (vf, hf) = match sample(l, [0, 1, 2].map(|k| c[k] + WM_H.max(h) * n[k])) {
                 Some(vf) => (vf, WM_H.max(h)),
                 None => (v, h),
+            };
+            Some((p, pw, vf, hf, v))
+        };
+        let mut out = SurfaceForces::default();
+        let mut area = 0.0;
+        let nl = levs.len();
+        for ti in 0..levs[0].mesh.tris.len() {
+            // Grille la plus fine qui entoure le triangle.
+            let mut got = None;
+            for li in (0..nl).rev() {
+                let l = &levs[li];
+                let t = &l.mesh.tris[ti];
+                let n0 = normal(t);
+                let a2 = (n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2]).sqrt();
+                if a2 < 1e-12 {
+                    break;
+                }
+                let n = n0.map(|v| sgn * v / a2);
+                let c = [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
+                // Grille partielle : triangle entier loin de ses bords.
+                if l.m > 0.0 && t.iter().any(|v| (0..3).any(|a| v[a] < l.m + 3.0 || v[a] > (l.d[a] - 1) as f64 - l.m - 3.0)) {
+                    continue;
+                }
+                let ar = 0.5 * a2;
+                match probe(l, c, n) {
+                    Some(r) => {
+                        got = Some((li, n, c, ar, Some(r)));
+                        break;
+                    }
+                    None if li == 0 => got = Some((li, n, c, ar, None)),
+                    None => {}
+                }
+            }
+            let Some((li, n, c, ar, r)) = got else { continue };
+            let l = &levs[li];
+            // Surfaces ramenées aux mailles de la veine.
+            let ar = ar / (l.s * l.s);
+            area += ar;
+            let Some((p, pw, vf, hf, v)) = r else {
+                out.missed += ar;
+                continue;
             };
             let un = vf[0] * n[0] + vf[1] * n[1] + vf[2] * n[2];
             let ut = [0, 1, 2].map(|k| vf[k] - un * n[k]);
             let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
-            let utau = spalding_utau(utm, hf, nu);
+            let utau = spalding_utau(utm, hf, l.nu);
             let tau = v[3] * utau * utau;
             let mut fl = [0.0; 3];
             for k in 0..3 {
@@ -2511,14 +3004,9 @@ impl Gpu3D {
                     fl[k] += tau * ut[k] / utm * ar;
                 }
             }
-            out.loads.push(([0, 1, 2].map(|k| org[k] + c[k] / s), fl.map(|v| v / (s * s))));
+            out.loads.push(([0, 1, 2].map(|k| l.org[k] + c[k] / l.s), fl));
             out.walls.push((n, pw));
         }
-        // Surfaces de la grille fine ramenées aux mailles de la veine.
-        let s2 = s * s;
-        out.pressure = out.pressure.map(|v| v / s2);
-        out.pressure_wall = out.pressure_wall.map(|v| v / s2);
-        out.friction = out.friction.map(|v| v / s2);
         out.missed /= area.max(1e-12);
         Some(out)
     }
@@ -2528,9 +3016,9 @@ impl Gpu3D {
     pub fn take_wall_forces(&mut self) -> WallForces {
         let (g, org, s) = match self.refine.as_mut() {
             Some(r) => {
-                let k = r.levels.len();
+                let k = r.full;
                 let org = r.origin[k - 1];
-                (r.levels.last_mut().unwrap(), org, (1u64 << k) as f64)
+                (&mut r.levels[k - 1], org, (1u64 << k) as f64)
             }
             None => (&mut *self, [0.0; 3], 1.0),
         };
@@ -2556,6 +3044,35 @@ impl Gpu3D {
             self.force_steps = 0;
         }
         out
+    }
+
+    /// Force moyenne par pas des seules mailles pariétales dont la position
+    /// (mailles de cette grille) satisfait `keep`, puis remise à zéro.
+    fn take_forces_masked(&mut self, keep: impl Fn([f64; 3]) -> bool) -> Force3 {
+        let steps = std::mem::take(&mut self.force_steps);
+        if steps == 0 || self.wall_count == 0 {
+            return Force3 { steps, ..Default::default() };
+        }
+        let v = self.read(&self.force, &self.force_read, 16 * self.wall_count as u64);
+        if v.is_empty() {
+            self.lost = true;
+            return Force3 { fx: f64::NAN, fy: f64::NAN, fz: f64::NAN, steps };
+        }
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.clear_buffer(&self.force, 0, None);
+        self.queue.submit([enc.finish()]);
+        let (nx, ny) = (self.nx, self.ny);
+        let mut f = [0.0f64; 3];
+        for (k, c) in v.chunks_exact(4).enumerate() {
+            let cell = self.wall_cells[k] as usize;
+            if keep([(cell % nx) as f64, ((cell / nx) % ny) as f64, (cell / (nx * ny)) as f64]) {
+                for a in 0..3 {
+                    f[a] += c[a] as f64;
+                }
+            }
+        }
+        let s = steps as f64;
+        Force3 { fx: f[0] / s, fy: f[1] / s, fz: f[2] / s, steps }
     }
 
     fn take_forces_one(&mut self) -> Force3 {

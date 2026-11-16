@@ -49,6 +49,7 @@ fn usage() -> ! {
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
          soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
+         \x20         [--raff 0..3] [--ba 1 : grille ×2 de plus au bord d'attaque] [--sillage 1 : traînée en champ lointain]\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
@@ -588,7 +589,8 @@ fn cmd_run3d(a: &Args) {
         _ => re >= lbm::tunnel::RE_SA_AUTO,
     };
     let depth = a.get("raff", 0usize).min(3);
-    let mut sim = match Gpu3D::with_refinement(&body, nu, U, fp16, sa, depth) {
+    let le = a.get("ba", 0usize) > 0;
+    let mut sim = match Gpu3D::with_refinement_le(&body, nu, U, fp16, sa, depth, le) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");
@@ -623,6 +625,15 @@ fn cmd_run3d(a: &Args) {
             d[2],
             (d[0] * d[1] * d[2]) as f64 / 1e6,
             l * s
+        );
+    }
+    if let Some((d, w, s)) = sim.le_grid() {
+        eprintln!(
+            "Grille du bord d'attaque ×{s} : {}×{}×{} = {:.2} M mailles, {w} mailles pariétales",
+            d[0],
+            d[1],
+            d[2],
+            (d[0] * d[1] * d[2]) as f64 / 1e6
         );
     }
     if sa {
@@ -660,6 +671,17 @@ fn cmd_run3d(a: &Args) {
     // demi-temps convectifs pendant la fenêtre de moyenne.
     let mut surf: Vec<lbm::gpu3d::SurfaceForces> = Vec::new();
     let mut next_surf = t_end - avg;
+    // Traînée en champ lointain : plan amont à 1,5 longueur de référence de
+    // la maquette, plans aval à 0,25 et 1 longueur du bord de fuite.
+    let wake = a.get("sillage", 0usize) > 0;
+    let lf = l as f64;
+    let bb = body.bounds;
+    let x_in = (bb.x0 - 1.5 * lf).round().max(2.0) as usize;
+    let x_out: Vec<usize> = [0.25, 1.0].iter().map(|f| ((bb.x1 + f * lf).round() as usize).min(sim.nx - 3)).collect();
+    let mut wakes: Vec<Vec<lbm::gpu3d::WakeDrag>> = Vec::new();
+    // Bilan de quantité de mouvement sur deux boîtes (0,1 et 0,15 longueur
+    // autour de la maquette) : efforts et volumes.
+    let mut boxes: Vec<[f64; 6]> = Vec::new();
     while sim.time < total {
         sim.run(chunk, &ramp);
         let f = sim.take_forces();
@@ -683,6 +705,12 @@ fn cmd_run3d(a: &Args) {
         if shape == Shape3D::Mesh && t >= next_surf {
             if let Some(s) = sim.surface_forces() {
                 surf.push(s);
+            }
+            if wake {
+                wakes.push(sim.wake_drag(x_in, &x_out));
+            }
+            if let [Some((f1, v1)), Some((f2, v2))] = sim.box_forces_vol(&[0.1, 0.15])[..] {
+                boxes.push([f1[0], f1[2], v1, f2[0], f2[2], v2]);
             }
             next_surf += 0.5;
         }
@@ -772,6 +800,37 @@ fn cmd_run3d(a: &Args) {
         );
         eprintln!("Pression relevée à une maille, sans extrapolation : Cx pression {p1x:.4} · Cz pression {p1z:.4}");
         eprintln!("Échange de quantité de mouvement aux parois : Cx = {:.4}  Cz = {:.4}", r.cx, r.cz);
+        if !boxes.is_empty() {
+            let nb = boxes.len() as f64;
+            let b = |a: usize| boxes.iter().map(|f| f[a]).sum::<f64>() / nb;
+            // La veine a un léger gradient de pression longitudinal, qui pousse
+            // aussi le fluide contenu dans la boîte (∝ volume) : traînée
+            // extrapolée linéairement à volume nul.
+            let (cx1, cx2, v1, v2) = (b(0) / q, b(3) / q, b(2), b(5));
+            let cx0 = cx1 - v1 * (cx2 - cx1) / (v2 - v1);
+            eprintln!(
+                "Bilan de quantité de mouvement sur des boîtes autour de la maquette : Cx = {:.4} (extrapolé à volume nul ; {:.4} et {:.4} à 0,1 et 0,15 longueur)  Cz = {:.4}",
+                cx0,
+                cx1,
+                cx2,
+                0.5 * (b(1) + b(4)) / q
+            );
+        }
+        for (k, xo) in x_out.iter().enumerate() {
+            if wakes.is_empty() {
+                break;
+            }
+            let nw = wakes.len() as f64;
+            let w = |f: &dyn Fn(&lbm::gpu3d::WakeDrag) -> f64| wakes.iter().map(|v| f(&v[k])).sum::<f64>() / nw / q;
+            eprintln!(
+                "Sillage à {:.2} longueur du bord de fuite : Cx = profil {:.4} + hors sillage (numérique) {:+.4} + induite {:.4} = {:.4}",
+                (*xo as f64 - bb.x1) / lf,
+                w(&|v| v.loss_wake),
+                w(&|v| v.loss_outside),
+                w(&|v| v.induced),
+                w(&|v| v.loss_wake + v.loss_outside + v.induced)
+            );
+        }
         (px + fx, pz + fz, m(&|s| s.total()[1]))
     };
     println!(
