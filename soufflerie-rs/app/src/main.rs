@@ -7,6 +7,7 @@
 //!   soufflerie bench  [--l 32]           vitesse des moteurs (millions de mailles par seconde)
 //!   soufflerie wing   --alpha a:b:pas    aile finie : surface portante + polaires 2D, CSV
 //!   soufflerie run3d  [options]          soufflerie 3D D3Q19 sur GPU : efforts moyens
+//!   soufflerie geom   --stl f.stl        contrôle géométrique d'une maquette maillée, export .sgeo
 //!
 //! Options : --shape cylinder|square|ellipse|plate|naca|triangle  --naca 2412
 //!           --alpha 4  --re 1000  --l 32  --t 40  --avg 15  --engine cpu|gpu
@@ -50,6 +51,8 @@ fn usage() -> ! {
          soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
          \x20         [--raff 0..3] [--ba 1 : grille ×2 de plus au bord d'attaque] [--sillage 1 : traînée en champ lointain]\n\
+         soufflerie geom  --stl fichier.stl|fichier.sgeo [mise en place] [--l 16 --raff 2] [--exporter f.sgeo|f.stl]\n\
+         \x20                                  contrôle géométrique (résolution par tranche, arêtes vives), export\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
          Options : --shape naca --naca 2412 --alpha 4 --re 1000 --l 32 --t 40 --avg 15\n\
          \x20         --engine cpu|gpu --threads 0 --spin 0 --thickness 0.4\n\
@@ -61,6 +64,9 @@ fn usage() -> ! {
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
          \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
          \x20                 --decalage 0.3 (décale la maquette en x, en mailles : sensibilité au placement)\n\
+         \x20                 --lisser 1 (facettes raffinées sur une surface lisse, arêtes vives gardées)\n\
+         \x20                 --aretes maillage|mailles (arêtes vives où la loi de paroi est coupée : du maillage, ou critère par maille)\n\
+         \x20                 fichier .sgeo : mise en place et arêtes vives lues dans le fichier\n\
          \x20         --raff 1|2 (GPU, 2D et 3D : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
          \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
@@ -479,6 +485,189 @@ pub fn sphere_cd(re: f64) -> f64 {
 }
 
 #[cfg(feature = "gpu")]
+/// Maquette maillée de la ligne de commande : STL, ou `.sgeo` dont la mise
+/// en place sert de défaut aux options (`--unite`, `--lref`…), et options
+/// de prétraitement (`--lisser 1`, `--aretes maillage|mailles`).
+#[cfg(feature = "gpu")]
+fn mesh_input(a: &Args, path: &str) -> (Vec<lbm::stl::Tri>, lbm::stl::MeshSetup) {
+    use lbm::stl::{Axis, MeshSetup, Unit};
+    let p = std::path::Path::new(path);
+    let geo = lbm::sgeo::is_sgeo(p).then(|| {
+        lbm::sgeo::GeoFile::read(p).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        })
+    });
+    let g = geo.clone().unwrap_or_default();
+    let axis = |k: &str, d: Axis| {
+        a.opts.get(k).map_or(d, |v| {
+            Axis::parse(v).unwrap_or_else(|| {
+                eprintln!("--{k} : +x, -x, +y, -y, +z ou -z");
+                std::process::exit(2)
+            })
+        })
+    };
+    let num = |k: &str, d: Option<f64>| a.opts.get(k).map(|_| a.get(k, 0.0f64)).or(d);
+    let setup = MeshSetup {
+        flow: axis("ecoulement", g.flow.unwrap_or(Axis::Xp)),
+        up: axis("haut", g.up.unwrap_or(Axis::Zp)),
+        unit: match a.opts.get("unite") {
+            Some(u) => Unit::parse(u).unwrap_or_else(|| {
+                eprintln!("--unite mm|cm|m|in");
+                std::process::exit(2)
+            }),
+            None => g.unit.unwrap_or(Unit::Mm),
+        },
+        alpha_deg: num("alpha", g.alpha_deg).unwrap_or(0.0),
+        beta_deg: num("beta", g.beta_deg).unwrap_or(0.0),
+        ref_length: num("lref", g.ref_length),
+        ref_area: num("sref", g.ref_area),
+        margin: a.get("marge", 1.0f64),
+        ground: num("sol", g.ground),
+        offset: [a.get("decalage", 0.0f64), 0.0, 0.0],
+        smooth: a.get("lisser", 0u8) > 0,
+        mesh_edges: match a.get("aretes", "mailles".to_string()).as_str() {
+            "maillage" => true,
+            "mailles" => false,
+            _ => {
+                eprintln!("--aretes maillage|mailles");
+                std::process::exit(2)
+            }
+        },
+        edges: geo.as_ref().map(|g| std::sync::Arc::new(g.feature_segments().iter().map(|e| [e.a, e.b]).collect())),
+    };
+    let tris = match &geo {
+        Some(g) => g.tris(),
+        None => lbm::stl::read_stl(p).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }),
+    };
+    (tris, setup)
+}
+
+/// Contrôle géométrique d'une maquette maillée (résolution par tranche
+/// d'envergure dans la grille la plus fine, arêtes vives, coût du raffinement
+/// du bord d'attaque), et export en `.sgeo` ou en STL.
+#[cfg(feature = "gpu")]
+fn cmd_geom(a: &Args) {
+    use lbm::bodies3d::Body3D;
+    use lbm::geom3d::{crease_set, feature_edges, le_cover, max_smooth_angle, sections, smooth_steps, Indexed, FEATURE_DEG};
+    let Some(path) = a.opts.get("stl").cloned() else {
+        eprintln!("soufflerie geom --stl fichier.stl|fichier.sgeo [mise en place] [--l 16 --raff 2] [--exporter f.sgeo|f.stl]");
+        std::process::exit(2)
+    };
+    let (tris, setup) = mesh_input(a, &path);
+    let l = a.get("l", 16usize);
+    let raff = a.get("raff", 0usize).min(3);
+    let (cleaned, diag) = lbm::stl::clean(tris.clone());
+    let ix = Indexed::from_tris(&cleaned);
+    let fe = feature_edges(&ix, FEATURE_DEG);
+    let cv = fe.iter().filter(|e| e.convex).count();
+    let open = fe.iter().filter(|e| e.angle_deg >= 180.0).count();
+    println!(
+        "{path} : {} triangles, {} sommets{}",
+        tris.len(),
+        ix.verts.len(),
+        if diag.summary().is_empty() { String::new() } else { format!(" · {}", diag.summary()) }
+    );
+    println!(
+        "Arêtes vives (> {FEATURE_DEG:.0}° entre faces) : {} ({cv} saillantes, {} rentrantes, {open} bords ouverts)",
+        fe.len(),
+        fe.len() - cv - open
+    );
+    let cr = crease_set(&ix, FEATURE_DEG);
+    println!(
+        "Plus grand angle entre faces voisines hors arêtes vives : {:.0}° ; raffinement lisse (--lisser 1) : {} découpes par arête",
+        max_smooth_angle(&ix, &cr),
+        smooth_steps(&ix, &cr)
+    );
+    let (body, _) = Body3D::from_mesh(&tris, l, &setup).unwrap_or_else(|e| {
+        eprintln!("{path} : {e}");
+        std::process::exit(1)
+    });
+    let mesh = body.mesh.as_ref().unwrap();
+    let f = (1u64 << raff) as f64;
+    let fine: Vec<_> = mesh.tris.iter().map(|t| t.map(|p| p.map(|c| c * f))).collect();
+    println!(
+        "Tranches d'envergure (selon y), grille la plus fine (L = {l}, ×{f} : {} mailles par longueur de référence), longueurs en mailles :",
+        l as f64 * f
+    );
+    println!("  y/b    corde  e/c    R_ba  facette  coin   culot  e<1   e<2");
+    let secs = sections(&fine, 10);
+    let (y0, y1) = (body.bounds.y0 * f, body.bounds.y1 * f);
+    for c in &secs {
+        println!(
+            "  {:.2}  {:6.1}  {:.3}  {:5.2}  {:5.2}  {:4.0}°  {:5.2}  {:4.1}  {:4.1}",
+            (c.y - y0) / (y1 - y0),
+            c.chord,
+            c.thickness,
+            c.le_radius,
+            c.le_facet,
+            c.le_corner_deg,
+            c.te_thickness,
+            c.thin1,
+            c.thin2
+        );
+    }
+    println!("  R_ba : rayon du bord d'attaque ; facette, coin : longueur moyenne et plus grand angle des facettes à moins");
+    println!("  de 2 % de corde du bord d'attaque ; culot : épaisseur du bord de fuite ; e<1, e<2 : longueur, depuis le");
+    println!("  bord de fuite, où l'épaisseur est sous 1 et 2 mailles (paroi mince).");
+    if let Some(c) = secs.iter().filter(|c| c.le_radius > 0.0).min_by(|a, b| a.le_radius.total_cmp(&b.le_radius)) {
+        if c.le_radius < 1.0 {
+            println!(
+                "Attention : rayon du bord d'attaque de {:.2} maille seulement : le pic de dépression est écrêté (raffiner : --raff, --ba).",
+                c.le_radius
+            );
+        }
+    }
+    let e = 6.0f64;
+    let down = e.max(0.1 * l as f64 * f);
+    println!(
+        "Grille du bord d'attaque (--ba 1, ×{}) : {:.1} M mailles en une boîte (solveur), {:.1} M en huit boîtes suivant le bord d'attaque",
+        2.0 * f,
+        8.0 * le_cover(&fine, 1, e, down) / 1e6,
+        8.0 * le_cover(&fine, 8, e, down) / 1e6
+    );
+    if let Some(out) = a.opts.get("exporter") {
+        let op = std::path::Path::new(out);
+        let tris_out = if setup.smooth { lbm::geom3d::smooth_tris(&cleaned).0 } else { cleaned.clone() };
+        let res = if lbm::sgeo::is_sgeo(op) {
+            let mut g = lbm::sgeo::GeoFile::from_tris(&tris_out);
+            g.name = op.file_stem().map(|s| s.to_string_lossy().into());
+            g.unit = Some(setup.unit);
+            g.flow = Some(setup.flow);
+            g.up = Some(setup.up);
+            g.ref_length = setup.ref_length;
+            g.ref_area = setup.ref_area;
+            g.alpha_deg = Some(setup.alpha_deg);
+            g.beta_deg = (setup.beta_deg != 0.0).then_some(setup.beta_deg);
+            g.ground = setup.ground;
+            if let (Some(es), false) = (&setup.edges, setup.smooth) {
+                // Arêtes imposées par le fichier lu : gardées telles quelles.
+                let at: HashMap<[u64; 3], u32> =
+                    g.mesh.verts.iter().enumerate().map(|(k, p)| (p.map(f64::to_bits), k as u32)).collect();
+                g.edges = es
+                    .iter()
+                    .filter_map(|[p, q]| Some([*at.get(&p.map(f64::to_bits))?, *at.get(&q.map(f64::to_bits))?]))
+                    .collect();
+            }
+            g.write(op)
+                .map(|_| format!("{} sommets, {} faces, {} arêtes vives", g.mesh.verts.len(), g.mesh.faces.len(), g.edges.len()))
+        } else {
+            lbm::stl::write_stl(op, &tris_out).map(|_| format!("{} triangles", tris_out.len()))
+        };
+        match res {
+            Ok(m) => println!("Écrit : {out} ({m})"),
+            Err(e) => {
+                eprintln!("écriture de {out} impossible : {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
 fn cmd_run3d(a: &Args) {
     use lbm::bodies3d::{Body3D, Shape3D};
     use lbm::cpu::Ramp;
@@ -508,34 +697,7 @@ fn cmd_run3d(a: &Args) {
     let mut mesh_info: Option<lbm::stl::MeshInfo> = None;
     let body = match &stl {
         Some(path) => {
-            use lbm::stl::{Axis, MeshSetup, Unit};
-            let axis = |k: &str, d: Axis| {
-                a.opts.get(k).map_or(d, |v| {
-                    Axis::parse(v).unwrap_or_else(|| {
-                        eprintln!("--{k} : +x, -x, +y, -y, +z ou -z");
-                        std::process::exit(2)
-                    })
-                })
-            };
-            let setup = MeshSetup {
-                flow: axis("ecoulement", Axis::Xp),
-                up: axis("haut", Axis::Zp),
-                unit: Unit::parse(&a.get("unite", "mm".to_string())).unwrap_or_else(|| {
-                    eprintln!("--unite mm|cm|m|in");
-                    std::process::exit(2)
-                }),
-                alpha_deg: a.get("alpha", 0.0f64),
-                beta_deg: a.get("beta", 0.0f64),
-                ref_length: a.opts.get("lref").map(|_| a.get("lref", 0.0f64)),
-                ref_area: a.opts.get("sref").map(|_| a.get("sref", 0.0f64)),
-                margin: a.get("marge", 1.0f64),
-                ground: a.opts.get("sol").map(|_| a.get("sol", 0.0f64)),
-                offset: [a.get("decalage", 0.0f64), 0.0, 0.0],
-            };
-            let tris = lbm::stl::read_stl(std::path::Path::new(path)).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1)
-            });
+            let (tris, setup) = mesh_input(a, path);
             let (b, info) = Body3D::from_mesh(&tris, l, &setup).unwrap_or_else(|e| {
                 eprintln!("{path} : {e}");
                 std::process::exit(1)
@@ -1063,6 +1225,8 @@ fn main() {
         "wing" => cmd_wing(&a),
         #[cfg(feature = "gpu")]
         "run3d" => cmd_run3d(&a),
+        #[cfg(feature = "gpu")]
+        "geom" => cmd_geom(&a),
         "" => {
             #[cfg(feature = "gui")]
             launch::gui(&a);

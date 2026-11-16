@@ -112,6 +112,9 @@ pub struct Body3D {
     pub mesh_volume: f64,
     /// Sol mobile sous la maquette (plancher de la veine en z = −½).
     pub ground: bool,
+    /// Arêtes vives du maillage (coordonnées réseau), si la mise en place les
+    /// demande (`MeshSetup::mesh_edges`).
+    pub features: Option<Arc<crate::geom3d::FeatureSet>>,
 }
 
 use std::sync::Arc;
@@ -217,6 +220,7 @@ impl Body3D {
             mesh: None,
             mesh_volume: 0.0,
             ground: false,
+            features: None,
         }
     }
 
@@ -231,6 +235,18 @@ impl Body3D {
         if tris.is_empty() {
             return Err("aucun triangle valable dans le maillage".into());
         }
+        // Arêtes vives (coordonnées du fichier), avant le raffinement lisse
+        // qui les garde droites.
+        let edges: Option<Vec<[[f64; 3]; 2]>> = setup.mesh_edges.then(|| match &setup.edges {
+            Some(e) => e.as_ref().clone(),
+            None => crate::geom3d::feature_edges(&crate::geom3d::Indexed::from_tris(&tris), crate::geom3d::FEATURE_DEG)
+                .iter()
+                .map(|e| [e.a, e.b])
+                .collect(),
+        });
+        let tris = if setup.smooth { crate::geom3d::smooth_tris(&tris).0 } else { tris };
+        // Volume enclos, après le raffinement lisse s'il y a lieu.
+        let volume = if setup.smooth { crate::geom3d::Indexed::from_tris(&tris).signed_volume().abs() } else { diag.volume };
         let ef = setup.flow.vec();
         let ez = setup.up.vec();
         if dot3(ef, ez) != 0.0 {
@@ -309,6 +325,17 @@ impl Body3D {
                 }
             }
         }
+        let features = edges.map(|es| {
+            let to = |p: [f64; 3]| {
+                let q = place([dot3(p, ef), dot3(p, ey), dot3(p, ez)]);
+                [q[0] + shift[0], q[1] + shift[1], q[2] + shift[2]]
+            };
+            let fe = es
+                .iter()
+                .map(|[a, b]| crate::geom3d::FeatureEdge { a: to(*a), b: to(*b), angle_deg: 180.0, convex: true })
+                .collect();
+            Arc::new(crate::geom3d::FeatureSet::new(fe))
+        });
         let mesh = MeshBody::new(placed, !diag.watertight());
         let bounds = Bounds {
             x0: mesh.lo[0],
@@ -333,7 +360,7 @@ impl Body3D {
             ref_area_m2: area * h * h,
             frontal_m2: frontal * h * h,
             blockage: frontal / (ny as f64 * nz as f64),
-            volume_m3: diag.volume * setup.unit.meters().powi(3),
+            volume_m3: volume * setup.unit.meters().powi(3),
             diag: diag.clone(),
         };
         let b = Body3D {
@@ -348,8 +375,9 @@ impl Body3D {
             alpha,
             half: 0.0,
             mesh: Some(Arc::new(mesh)),
-            mesh_volume: diag.volume * s * s * s,
+            mesh_volume: volume * s * s * s,
             ground: setup.ground.is_some(),
+            features,
         };
         Ok((b, info))
     }
@@ -433,6 +461,7 @@ impl Body3D {
             mesh: self.mesh.as_ref().map(|m| Arc::new(m.transformed(|p| t(p)))),
             mesh_volume: 8.0 * self.mesh_volume,
             ground: false,
+            features: self.features.as_ref().map(|f| Arc::new(f.transformed(|p| t(p)))),
         }
     }
 
@@ -755,5 +784,51 @@ mod tests {
             ..base
         };
         assert!(Body3D::from_mesh(&fuseau(), l, &bad).is_err());
+    }
+
+    /// Aile NACA 0012 grossière (corde 100 mm, envergure 200 mm), arêtes vives
+    /// du maillage, raffinement lisse et lecture `.sgeo`.
+    #[test]
+    fn pretraitement_stl() {
+        let tris = crate::geom3d::tests::naca_wing(0.12, 100.0, 200.0, 16);
+        let l = 32;
+        let base = MeshSetup {
+            alpha_deg: 4.0,
+            margin: 0.4,
+            ..Default::default()
+        };
+        let (a, _) = Body3D::from_mesh(&tris, l, &base).unwrap();
+        assert!(a.features.is_none());
+        // Arêtes vives : bord de fuite et saumons, placés avec la maquette.
+        let (b, _) = Body3D::from_mesh(&tris, l, &MeshSetup { mesh_edges: true, ..base.clone() }).unwrap();
+        let f = b.features.clone().unwrap();
+        let te = [b.bounds.x1, 0.5 * (b.bounds.y0 + b.bounds.y1), 0.0];
+        // Point le plus en aval (bord de fuite, sous l'incidence) : sur une arête vive.
+        let mesh = b.mesh.as_ref().unwrap();
+        let p = mesh.tris.iter().flatten().copied().filter(|p| (p[1] - te[1]).abs() < 4.0).max_by(|u, v| u[0].total_cmp(&v[0])).unwrap();
+        assert!(f.distance(p, 2.0) < 1e-6, "bord de fuite {}", f.distance(p, 2.0));
+        // Bord d'attaque : loin de toute arête vive.
+        let q = mesh.tris.iter().flatten().copied().filter(|p| (p[1] - te[1]).abs() < 4.0).min_by(|u, v| u[0].total_cmp(&v[0])).unwrap();
+        assert!(f.distance(q, 5.0) >= 5.0);
+        // Grille fine : arêtes transformées avec la maquette.
+        let r = b.refined([10.0, 10.0, 10.0], [b.nx, b.ny, b.nz]);
+        let p2 = [0, 1, 2].map(|k| 2.0 * (p[k] - 10.0));
+        assert!(r.features.as_ref().unwrap().distance(p2, 2.0) < 1e-6);
+        // Raffinement lisse : volume plus proche du profil exact (le polygone
+        // facetté est inscrit dans le profil), même mise en place.
+        let (c, _) = Body3D::from_mesh(&tris, l, &MeshSetup { smooth: true, ..base.clone() }).unwrap();
+        let exact = crate::geom3d::Indexed::from_tris(&crate::geom3d::tests::naca_wing(0.12, 100.0, 200.0, 400)).signed_volume();
+        let s3 = (l as f64 / 100.0).powi(3);
+        assert!(a.mesh_volume < c.mesh_volume, "{} {}", a.mesh_volume, c.mesh_volume);
+        assert!((c.mesh_volume - exact * s3).abs() < 0.5 * (a.mesh_volume - exact * s3).abs());
+        assert_eq!([a.nx, a.ny, a.nz], [c.nx, c.ny, c.nz]);
+        // Fichier .sgeo : mêmes triangles et même voxelisation que le STL.
+        let g = crate::sgeo::GeoFile::from_tris(&tris);
+        let h = crate::sgeo::GeoFile::parse(&g.to_text()).unwrap();
+        let (d, _) = Body3D::from_mesh(&h.tris(), l, &base).unwrap();
+        assert_eq!(voxels(&a), voxels(&d));
+        let segs = std::sync::Arc::new(h.feature_segments().iter().map(|e| [e.a, e.b]).collect());
+        let (e, _) = Body3D::from_mesh(&h.tris(), l, &MeshSetup { mesh_edges: true, edges: Some(segs), ..base }).unwrap();
+        assert!(e.features.unwrap().distance(p, 2.0) < 1e-6);
     }
 }

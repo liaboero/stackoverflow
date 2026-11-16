@@ -2029,7 +2029,12 @@ impl Gpu3D {
                     let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
                     let (nrm, d) = body.wall_normal(p);
                     let d = (d as f32).max(0.1);
-                    let d = if edge_cos[w] < 0.5 { -d } else { d };
+                    // Avec les arêtes vives du maillage : seulement à portée
+                    // de lien (√2) de l'une d'elles (pas autour d'un bord
+                    // d'attaque arrondi plus fin qu'une maille).
+                    let sharp = edge_cos[w] < 0.5
+                        && body.features.as_ref().is_none_or(|f| f.distance(p, 2.0) <= std::f64::consts::SQRT_2);
+                    let d = if sharp { -d } else { d };
                     [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d]
                 })
                 .collect();

@@ -870,6 +870,7 @@ arguments en tête de chaque fichier) :
 | `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
 | `freestream3d` | vitesse et masse volumique réellement vues par la maquette, le long de la veine et par section |
 | `decamber2d` | décambrage visqueux de la méthode des panneaux + couche limite selon les itérations du couplage |
+| `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
 une option de maquette retirée depuis ; son programme n'est pas conservé.
@@ -885,7 +886,9 @@ en newtons.
 
 En ligne de commande :
 `soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette
-maillée (STL binaire ou ASCII, volume fermé). Mise en place :
+maillée (STL binaire ou ASCII, volume fermé, ou fichier `.sgeo` qui porte
+aussi sa mise en place). `soufflerie geom --stl fichier.stl` en fait le
+contrôle géométrique. Mise en place :
 
 | Option | Rôle | Défaut |
 | --- | --- | --- |
@@ -898,6 +901,8 @@ maillée (STL binaire ou ASCII, volume fermé). Mise en place :
 | `--sref 4.2e4` | surface de référence (unités du fichier²) | maître-couple calculé |
 | `--vitesse 30` | vitesse (m/s) : fixe Re sur la longueur de référence, efforts en newtons | — |
 | `--fluide air\|eau` | fluide de l'échelle physique | air |
+| `--lisser 1` | facettes raffinées sur une surface lisse, arêtes vives gardées (voir « Prétraitement géométrique ») | 0 |
+| `--aretes maillage\|mailles` | loi de paroi coupée aux arêtes vives du maillage, ou par le critère par maille | mailles |
 
 La veine s'ajuste à la maquette : 3,5 M en amont, 7,5 M en aval et 2,5 M de
 part et d'autre (M : la plus grande de L et des dimensions de la maquette),
@@ -939,6 +944,155 @@ voxelisation (parties plus fines qu'une maille), un avertissement invite à
 augmenter la résolution. Une sphère de 327 680 triangles se prépare en 4 s
 (D = 16 mailles) ; dans l'interface, l'aperçu de mise en place d'un gros
 maillage attend que le réglage soit stable.
+
+## Prétraitement géométrique des maquettes STL
+
+Examen des défauts géométriques de la soufflerie 3D (escalier, place du bord
+de fuite, parois minces, rayon du bord d'attaque sous la maille, facettes
+grossières, arêtes vives détectées maille par maille, boîte du bord
+d'attaque alignée sur les axes) : ce que l'on mesure, ce qu'un prétraitement
+y change. Module `lbm/src/geom3d.rs`, commande `soufflerie geom`.
+
+**Contrôle de résolution (`soufflerie geom`).** Pour une aile (envergure
+selon y), coupe en tranches d'envergure dans la grille la plus fine : corde,
+épaisseur, rayon du bord d'attaque (ajusté sur y² = 2Rs + c s^1,5 entre 0,2
+et 2 % de corde, sur le polygone des facettes, c'est-à-dire ce que voit le
+solveur ; NACA 0012 finement facetté : 1,588 pour 1,587), longueur et plus
+grand angle des facettes du bord d'attaque, épaisseur du culot, longueur où
+l'épaisseur passe sous 1 et 2 mailles ; arêtes vives du maillage ; coût du
+raffinement du bord d'attaque. Sur les deux maquettes de validation, grille
+×4 :
+
+| | Aile AR 4 (L = 16, ×4) | TR-1208 (L = 8, ×4) |
+| --- | --- | --- |
+| Triangles | 3 984 | 2 984 |
+| Corde (mailles) | 64 | 22 à 40 |
+| Rayon du bord d'attaque exact | 1,02 maille | ≈ 0,2 à 0,4 |
+| Rayon du polygone des facettes | 0,69 | 0,03 à 0,05 |
+| Facettes du bord d'attaque | 0,4 à 0,5 maille, 48° entre elles | 0,2 à 0,3 maille, 59° (78° en coupe selon l'écoulement) |
+| Épaisseur < 1 maille / < 2 mailles | 3,5 / 7,5 dernières mailles | 4 / 8 dernières mailles |
+| Culot du bord de fuite | fermé | 0,01 à 0,02 maille |
+| Arêtes vives (> 60°) | bord de fuite (165°), saumons (90°) | culot du bord de fuite (81°), saumons (67° à 95°) |
+
+Les maillages exportés d'OpenVSP décrivent le bord d'attaque par des
+facettes de la taille de son rayon : le polygone inscrit tronque le rayon de
+32 % sur l'aile AR 4 et en fait presque un coin sur TR-1208. La paroi mince
+du bord de fuite occupe toujours 3,5 à 4 mailles (angle du dièdre de fuite),
+une part de corde qui diminue de moitié à chaque raffinement : rien à
+prétraiter. Le culot de TR-1208 (0,02 maille) et la place du bord de fuite
+(déjà calée par `te_snap`, et sans objet pour un bord de fuite en flèche)
+non plus.
+
+**Raffinement lisse des facettes (`--lisser 1`).** Chaque face est découpée
+en n² sous-faces placées sur la surface de Phong qui passe par les sommets du
+fichier et leurs normales (moyennes des faces voisines, pondérées par
+l'angle, sans traverser d'arête vive) ; facteur ½, qui rend un arc de cercle
+entre deux sommets à normales radiales (le ¾ de Boubekeur et Alexa,
+choisi pour l'aspect, gonfle les arêtes de 50 %). Les arêtes vives restent
+droites, le maillage reste fermé (points d'arête partagés), n est choisi
+pour que les sous-facettes fassent moins de 10° entre elles (5 sur l'aile
+AR 4, 6 sur TR-1208, 100 000 triangles). Icosaèdre subdivisé (80 faces) :
+volume à −2,4 % de la sphère au lieu de −12,7 %. Rayon du bord d'attaque vu
+par le solveur : 0,97 maille au lieu de 0,69 sur l'aile AR 4 (exact 1,02),
+0,16 à 0,25 au lieu de 0,04 sur TR-1208 ; angle entre facettes 19° et 36°.
+Effet sur les efforts (grille ×4) :
+
+| Cas | Boîte Cz : brut / lissé | Surface Cz / Cx : brut | lissé | Référence |
+| --- | --- | --- | --- | --- |
+| Aile AR 4, 4° | 0,2720 / 0,2853 | 0,2735 / 0,0330 | 0,3012 / 0,0218 | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| Aile AR 4, 8° | 0,5630 / 0,5619 | 0,5452 / 0,0455 | 0,5658 / 0,0517 | VSPAERO 0,501 à 0,529 / 0,039 à 0,045 |
+| TR-1208, 4° | 0,2862 / 0,2889 | 0,2888 / 0,0155 | 0,2877 / 0,0149 | mesure 0,257 / 0,011 |
+| TR-1208, 8° | 0,5444 / 0,5551 | 0,5509 / 0,0441 | 0,5551 / 0,0438 | mesure 0,499 / 0,021 |
+
+Décaler la maquette d'un quart de maille change la portance de la boîte de
+0,2 % (aile AR 4, 4° : 0,2715 contre 0,2720 ; lissée, 0,2849 contre 0,2853) : l'effet du lissage
+n'est pas un effet de placement. La géométrie lissée est plus juste, mais
+elle ne rapproche pas des références : la portance monte de 0 à 5 % (la
+dépression du bord d'attaque arrondi est mieux rendue), la traînée de
+surface baisse fortement à 4° sur l'aile AR 4 (succion du bord d'attaque
+retrouvée, au niveau de VSPAERO) mais monte à 8°, et bouge de 1 à 3 % sur
+TR-1208. Les facettes grossières ne sont donc pas la cause de l'excès de
+portance ; elles en masquaient plutôt une petite part. Le lissage reste une
+option (`--lisser 1`, case « Lisser les facettes » de l'interface), à
+réserver aux fichiers dont `soufflerie geom` montre un bord d'attaque
+nettement plus anguleux que le profil, et à réévaluer une fois le
+décambrage visqueux rendu.
+
+**Arêtes vives tirées du maillage (`--aretes maillage`).** Le solveur coupe
+la loi de paroi aux mailles dont les liens touchent des faces à plus de 60°
+l'une de l'autre. Comparé aux arêtes vives du maillage (angle dièdre > 60°,
+bords ouverts), ce critère par maille est juste sur l'aile AR 4 : les 97
+mailles d'arête de la grille ×4 sont toutes à moins de 1,5 maille d'une
+arête du maillage. Sur TR-1208, 14 des 30 sont à plus de 4 mailles de toute
+arête : ce sont des mailles du bord d'attaque, plus fin qu'une maille, dont
+les liens touchent les deux faces ; avec le lissage, 36 sur 65. L'option ne
+coupe la loi de paroi qu'à portée de lien (√2 maille) d'une arête du
+maillage. Effet : nul (TR-1208, boîte Cz 0,2864 contre 0,2862 à 4°, 0,5458
+contre 0,5444 à 8°, traînée inchangée ; lissage et arêtes ensemble :
+0,2888 et 0,5574, comme le lissage seul). Pas de divergence non plus au bord
+d'attaque. Gardée en option ; le critère par maille reste le défaut.
+
+**Raffinement du bord d'attaque suivant la flèche : non fait, chiffré.**
+Une boîte unique alignée sur les axes couvre presque toute une aile en
+flèche. Découpée en tronçons d'envergure qui suivent le bord d'attaque, la
+grille fine coûterait sur TR-1208 :
+
+| Grille du bord d'attaque | Une boîte | 4 tronçons | 8 tronçons | 16 tronçons |
+| --- | --- | --- | --- | --- |
+| ×8 (sur ×4) | 6,2 M mailles | 2,5 M | 1,2 M | 0,6 M |
+| ×16 (sur ×8) | 33,9 M | 11,9 M | 4,7 M | 2,0 M |
+
+Huit tronçons rendraient `--raff 3 --ba 1` possible sur TR-1208 (4,7 M
+mailles au lieu de 34 M, au-delà de la mémoire du GPU). Mais les grilles
+fines forment une chaîne (chaque grille n'a qu'une grille fille) : des
+grilles sœurs demandent de reprendre le couplage (`refine3d.rs`) et la
+répartition des efforts entre grilles (`gpu3d.rs`). À faire séparément ;
+c'est la seule piste géométrique qui attaque la résolution du bord
+d'attaque, première cause de la traînée de pression excessive à 8°.
+
+**Écartés sans calcul.** Champs de distance signée et de normales
+précalculés : la distance exacte aux triangles (rangés par cases) sert déjà
+à la voxelisation, aux fractions de Bouzidi et aux normales, et rien ne
+s'en trouverait plus juste. Courbure par triangle pour corriger la pression
+pariétale : essayée plus haut (équilibre normal), elle ne vaut pas quand le
+rayon tient dans une maille. Remaillage à l'échelle de la grille (facettes
+d'une maille) : sans objet, les fractions de Bouzidi sont exactes quelle
+que soit la taille des triangles ; seule compte la forme, d'où le lissage.
+
+**Format `.sgeo`.** Un STL ne porte ni unité, ni axes, ni références, ni
+incidence : chaque calcul les redemande (`--unite in --lref 16.672 --sref
+2024.35`), et une erreur d'unité ou de surface passe inaperçue. Il n'a pas
+non plus de connectivité (sommets répétés en simple précision) ni de moyen
+de dire quelles arêtes sont vives. Le format `.sgeo` (`lbm/src/sgeo.rs`) est
+un fichier texte : en-tête `soufflerie-geometrie 1`, puis `nom`, `unite`,
+`ecoulement`, `haut`, `lref`, `sref`, `alpha`, `beta`, `sol` (tous
+facultatifs), les sommets en double précision, les faces (orientées vers
+l'extérieur) et les arêtes vives (paires de sommets, calculées à l'export
+d'après l'angle dièdre et modifiables à la main). La ligne de commande et
+l'interface le lisent comme un STL (`--stl fichier.sgeo`, « Charger un
+STL… », glisser-déposer) ; ses valeurs servent de défaut, les options les
+remplacent ; avec `--aretes maillage`, ses arêtes vives remplacent celles de
+l'angle dièdre. Export :
+
+```
+soufflerie geom --stl TR1208.stl --unite in --lref 16.672 --sref 2024.35 --alpha 4 --exporter TR1208.sgeo
+soufflerie run3d --stl TR1208.sgeo --l 8 --raff 2 --re 4e6 --marge 0.4
+```
+
+`--exporter fichier.stl` écrit les triangles nettoyés (lissés avec
+`--lisser 1`). Tests : aller-retour au bit près, défauts signalés avec leur
+ligne (`sgeo::tests`), même voxelisation qu'avec le STL et arêtes placées
+avec la maquette, y compris dans les grilles fines (`bodies3d::tests::
+pretraitement_stl`), raffinement lisse fermé et arêtes vives conservées
+(`geom3d::tests`).
+
+**Bilan.** Ce qui aide : le contrôle de résolution, qui chiffre ce que voit
+le solveur (rayon du bord d'attaque en mailles, facettes, parois minces) et
+annonce un bord d'attaque sous la maille, et le format `.sgeo`, qui fixe la
+mise en place. Ce qui rend la géométrie plus juste sans rapprocher des
+références : le lissage des facettes. Ce qui ne change rien de mesurable :
+les arêtes vives tirées du maillage. Ce qui aiderait le plus, et reste à
+faire : un raffinement du bord d'attaque en tronçons qui suivent la flèche.
 
 ## Validation 3D
 
@@ -1078,6 +1232,9 @@ soufflerie-rs/
 │   ├── src/wing.rs     aile finie : surface portante non linéaire, Trefftz, polaires de section
 │   ├── src/gpu3d.rs    soufflerie 3D : D3Q19 sur GPU (WGSL engendré), voxelisation, coupes, rendu 3D
 │   ├── src/bodies3d.rs maquettes 3D (sphère, cube, cylindre, aile)
+│   ├── src/stl.rs      lecture STL, nettoyage, appartenance, distance à la surface
+│   ├── src/geom3d.rs   prétraitement géométrique : arêtes vives, raffinement lisse, contrôle par tranche
+│   ├── src/sgeo.rs     format de géométrie .sgeo (maillage indexé, mise en place, arêtes vives)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
@@ -1087,7 +1244,7 @@ soufflerie-rs/
 ├── validation/         résultats de validation 3D (CSV)
 ├── tools/validation3d.sh  calculs de validation 3D
 └── app/                application : interface (egui) et commandes
-    ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, bench)
+    ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, geom, bench)
     ├── src/gui.rs      interface graphique, onglets
     ├── src/wing_tab.rs onglet aile finie (vue 3D, envergure, polaire)
     ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, vue 3D, coupe, efforts)

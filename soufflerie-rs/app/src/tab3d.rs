@@ -232,9 +232,30 @@ impl Tab3D {
         self.shared.lock().unwrap().settings = self.settings.clone();
     }
 
-    /// Lit un fichier STL et en fait la maquette courante.
+    /// Lit un fichier STL, ou de géométrie (`.sgeo` : mise en place et
+    /// arêtes vives comprises), et en fait la maquette courante.
     pub fn load_stl(&mut self, path: &std::path::Path) {
-        match lbm::stl::read_stl(path) {
+        let read = if lbm::sgeo::is_sgeo(path) {
+            lbm::sgeo::GeoFile::read(path).map(|g| {
+                let st = &mut self.settings.setup;
+                st.unit = g.unit.unwrap_or(st.unit);
+                st.flow = g.flow.unwrap_or(st.flow);
+                st.up = g.up.unwrap_or(st.up);
+                st.ref_length = g.ref_length;
+                st.ref_area = g.ref_area;
+                st.beta_deg = g.beta_deg.unwrap_or(0.0);
+                st.ground = g.ground;
+                st.edges = Some(Arc::new(g.feature_segments().iter().map(|e| [e.a, e.b]).collect()));
+                if let Some(a) = g.alpha_deg {
+                    self.settings.alpha = a;
+                }
+                g.tris()
+            })
+        } else {
+            self.settings.setup.edges = None;
+            lbm::stl::read_stl(path)
+        };
+        match read {
             Ok(tris) => {
                 self.stl_count += 1;
                 self.settings.stl = Some(StlFile {
@@ -290,7 +311,7 @@ impl Tab3D {
             ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if let Some(p) = dropped
             .iter()
-            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl")))
+            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("stl") || e.eq_ignore_ascii_case("sgeo")))
         {
             self.load_stl(p);
         }
@@ -337,7 +358,7 @@ impl Tab3D {
         }
         if pick {
             if let Some(p) = rfd::FileDialog::new()
-                .add_filter("Maillage STL", &["stl", "STL"])
+                .add_filter("Maillage STL ou géométrie", &["stl", "STL", "sgeo"])
                 .pick_file()
             {
                 self.load_stl(&p);
@@ -870,6 +891,10 @@ fn mesh_controls(ui: &mut egui::Ui, s: &mut Settings, preview: Option<&Preview>)
             ui.selectable_value(&mut st.unit, u, u.label());
         }
     });
+    ui.checkbox(&mut st.smooth, "Lisser les facettes")
+        .on_hover_text("Facettes raffinées sur la surface lisse qui passe par les sommets du fichier (arêtes vives gardées) : un bord d'attaque décrit par quelques facettes retrouve son rayon");
+    ui.checkbox(&mut st.mesh_edges, "Arêtes vives du maillage")
+        .on_hover_text("La loi de paroi n'est coupée qu'aux arêtes vives du maillage (bord de fuite, saumon plat), et non autour d'un bord d'attaque plus fin qu'une maille");
     let u = st.unit.label();
     let m = st.unit.meters();
     ui.horizontal(|ui| {
