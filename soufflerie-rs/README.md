@@ -830,7 +830,10 @@ Trois pistes écartées, une confirmée.
   qui grandit vers le bord de fuite de l'extrados, n'existe pas dans le
   calcul. La loi de paroi locale ne peut pas la rendre : à hauteur fixe,
   son défaut de débit (∝ u_τ h) diminue vers le bord de fuite au lieu de
-  croître.
+  croître. *Correction :* les profils de vitesse relevés depuis montrent
+  une couche déficitaire résolue au-dessus de WM_H, de déplacement plus
+  fort que celui d'une couche limite réelle (section suivante) ; cette
+  explication ne tient pas.
 
 Il faudrait un couplage visqueux–non visqueux : épaisseur de déplacement
 tirée d'une couche limite intégrale le long de la surface, imposée par
@@ -848,6 +851,116 @@ ne retire alors que 1,2 % (4°) et 1,7 % (10°) : la croissance de δ* sur les
 derniers pour cent de l'extrados, qui fait l'essentiel du décambrage, est
 perdue. Un couplage simultané (Newton, comme XFOIL) serait nécessaire ;
 non conservé.
+
+### Décambrage par transpiration : essayé, et ce qu'il révèle
+
+Essai du couplage proposé ci-dessus (`--transpiration 1`, `lbm/src/ibl3d.rs`,
+`Gpu3D::enable_transpiration` et `couple_transpiration`). Résultat : il ne
+corrige pas l'excès de portance, et la mesure faite en chemin contredit
+l'hypothèse du « déplacement manquant ».
+
+**Méthode.** Tous les demi-temps convectifs, à partir de t* = 6 :
+- vitesse extérieure u_e de chaque triangle du maillage, relevée sur la
+  grille entière la plus fine à la hauteur de raccord WM_H le long de la
+  normale (plus loin si un nœud voisin est solide), projetée dans le plan ;
+- couche limite intégrale marchée sur le graphe des triangles voisins, en
+  volumes finis décentrés amont sur les équations en lignes de courant sans
+  écoulement transversal (∇·(u_e² θ ê) + δ* u_e ê·∇u_e = τ_p/ρ, et
+  ∇·(u_e θ H₁ ê) = u_e C_E), ce qui compte la divergence des lignes de
+  courant ; Thwaites en laminaire, Head et Ludwieg–Tillmann en turbulent
+  (fermetures copiées de `panel.rs`) ; turbulente dès le triangle qui suit
+  la source, sauf `--xtr` ; ordre topologique (un triangle après tous ses
+  amonts, boucles de flux rompues au plus tôt atteint) ; sans amont, la même
+  équation avec Thwaites donne Hiemenz au point d'arrêt (θ² ≈ 0,09 ν/a) et
+  Blasius au bord d'une plaque ; H plafonné à 2,4 (décollement signalé) ;
+- v_n = ∇·(u_e δ* ê) par les mêmes flux (Lighthill 1958), le déplacement
+  quittant la surface par les arêtes vives convergentes (bord de fuite),
+  moyenné par l'aire sur chaque triangle et ses voisins (même débit, sans
+  valeur démesurée sur un triangle effilé) ;
+- à chaque maille pariétale, v_n du triangle le plus proche dont la face
+  la regarde, sous-relaxée (ω = 0,5), ajoutée selon la normale de la face
+  à la vitesse de la paroi mobile de Bouzidi (débit injecté, efforts
+  d'échange cohérents). Grille entière la plus fine et grilles du bord
+  d'attaque.
+
+Tests unitaires de la couche limite (`ibl3d`) : plaque laminaire contre
+Blasius (θ à 4 %), plaque turbulente contre la loi en puissance 1/7 (à
+15 %), point d'arrêt contre Hiemenz, débit injecté égal au débit qui quitte
+la surface.
+
+**Résultats** (bilan sur une boîte pour Cz, ligne `Cx =` de `run3d` pour Cx ;
+sans transpiration : section précédente) :
+
+| Cas | Sans | Avec transpiration | Référence |
+| --- | --- | --- | --- |
+| AR 4, 4°, L = 16 + ×2 | 0,268 | 0,235 / 0,024, stable | VSPAERO 0,251 à 0,265 ; ligne portante 0,251 |
+| AR 4, 4°, L = 16 + ×4 | 0,272 | divergence à t* = 9,8 | id. |
+| AR 4, 8°, L = 16 + ×4 | 0,563 | divergence à t* = 7,3 | VSPAERO 0,501 à 0,529 ; ligne portante 0,498 |
+| TR-1208, 4°, L = 8 + ×4 | 0,286 | divergence à t* = 6,3 ; avec la moyenne par voisinage : 0,321 / 0,017 | mesure 0,257 / 0,011 |
+| TR-1208, 8°, L = 8 + ×4 | 0,545 | divergence à t* = 6,3 (avant la moyenne par voisinage) | mesure 0,499 / 0,021 |
+
+À ×2, l'aile AR 4 perd 12 %, un peu sous les références ; à ×4, le calcul
+diverge ; sur TR-1208, la portance monte au lieu de baisser, avec des v_n
+locales absurdes (jusqu'à 450 u∞ avant la moyenne d'un triangle à l'autre,
+δ* de l'intrados au bord de fuite à 5 % de la corde). Les ×8 n'ont pas été
+lancés.
+
+**Pourquoi : le champ contient déjà une couche déficitaire épaisse.**
+Profils de vitesse tangentielle le long de la normale (aile AR 4, 4°,
+mi-envergure, exemple `ibl3d`) :
+
+| Extrados, u_t/u∞ à h mailles | h = 1 | 2 | 3 | 4 | 6 | 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ×2, x/c = 0,90 | 0,76 | 0,87 | 0,97 | 1,01 | 1,01 | 1,02 |
+| ×2, x/c = 0,95 | 0,73 | 0,81 | 0,93 | 1,00 | 1,00 | 1,01 |
+| ×4, x/c = 0,90 | 0,68 | 0,76 | 0,87 | 0,95 | 1,02 | 1,02 |
+| ×4, x/c = 0,96 | 0,59 | 0,69 | 0,81 | 0,90 | 0,99 | 1,00 |
+
+Au bord de fuite, la vitesse n'atteint l'extérieur qu'à 4 mailles (×2) ou
+6 (×4) de la paroi, soit 9 à 12 % de la corde, quand la couche limite réelle
+en fait 3 à 4 %. Hors de la couche [0, WM_H] de la loi de paroi, le calcul
+résout donc lui-même une couche déficitaire (Spalart–Allmaras sur ces
+grilles, mailles d'arête adhérentes au bord de fuite). Son épaisseur de
+déplacement ∫(1 − u_t/u_e) dh, jusqu'au premier maximum de u_t au-dessus de
+WM_H (vitesse à la paroi extrapolée linéairement depuis 1 et 2 mailles),
+comparée à celle de la couche limite intégrale marchée avec u_e pris à ce
+maximum (aile AR 4, 4°, ×2, mi-envergure, derniers 5 % de corde) :
+
+| δ*/c au bord de fuite | extrados | intrados | différence |
+| --- | --- | --- | --- |
+| couche limite intégrale (u_e au bord de la couche résolue) | 0,005 | 0,0035 | 0,0015 |
+| déjà dans le champ du calcul | 0,022 à 0,026 | 0,012 à 0,014 | 0,010 |
+
+Le calcul décambre donc déjà, par le déplacement, plus qu'une couche limite
+réelle (quatre fois l'épaisseur sur l'extrados, six fois la dissymétrie).
+L'hypothèse de la section précédente (couche limite sous la hauteur de
+raccord, donc sans déplacement) ne tient pas au bord de fuite. Deux
+conséquences :
+- Le couplage essayé (u_e à WM_H, δ* entier) relève u_e au fond de cette
+  couche : 0,80 u∞ au bord de fuite de l'extrados à ×2 au lieu d'environ
+  1,0 au-dessus, 0,69 à ×4. Le gradient adverse, trop fort, épaissit la
+  couche limite intégrale (δ*/c = 0,013 au lieu de 0,005), d'autant plus
+  que la grille est fine (décollement sur 4 % de la surface à ×4, 11 % à 8°)
+  ; le déplacement s'ajoute en outre à celui du champ. La baisse de 12 % à
+  ×2 vient de ce double compte, pas d'un décambrage physique.
+- Le couplage cohérent (vitesse extérieure équivalente : u_e au bord de la
+  couche résolue, et seul le déplacement qui manque au champ,
+  δ*_intégrale − δ*_calcul) donne une transpiration surtout négative
+  (aspiration), qui augmenterait la portance. Essayé dans l'exemple `ibl3d`
+  (mode 2) : le bord de la couche résolue, premier maximum du profil, saute
+  d'un triangle à l'autre, et sa dérivée donne |v_n| jusqu'à 3 u∞ ; la
+  portance oscille entre 0,19 et 0,24. Non retenu dans `run3d`.
+
+**Ce qui reste.** L'excès de portance de 6 à 12 % ne vient pas d'un
+déplacement manquant : le champ en a déjà trop. Pistes : ce qui fixe la
+circulation au bord de fuite (mailles d'arête adhérentes, glissement de la
+loi de paroi juste en amont, épaisseur du bord de fuite voxelisé), et
+pourquoi une couche déficitaire aussi épaisse décambre si peu (en
+glissement libre, la portance est la même : vérifier si la couche existe
+aussi sans loi de paroi, auquel cas elle est numérique). La couche limite
+intégrale et sa mesure restent utiles pour ces diagnostics.
+`--transpiration 1` reste disponible pour reproduire l'essai, mais ne doit
+pas servir aux calculs.
 
 ### Programmes de diagnostic
 
@@ -869,6 +982,7 @@ arguments en tête de chaque fichier) :
 | `refine3d_check`, `sa3d_check`, `transition3d`, `noise3d`, `time_mesh` | raffinement contre grille uniforme, Spalart–Allmaras 3D, transition imposée, bruit, coût de mise en place |
 | `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
 | `freestream3d` | vitesse et masse volumique réellement vues par la maquette, le long de la veine et par section |
+| `ibl3d` | couche limite intégrale sur le maillage (θ, H, δ*, v_n par triangle, CSV), profils de vitesse le long de la normale, couplages de transpiration (mode 1 : u_e à WM_H ; mode 2 : déplacement manquant au champ) |
 | `decamber2d` | décambrage visqueux de la méthode des panneaux + couche limite selon les itérations du couplage |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
@@ -1077,6 +1191,7 @@ soufflerie-rs/
 │   ├── src/wall.rs     distributions pariétales Cp, Cf
 │   ├── src/wing.rs     aile finie : surface portante non linéaire, Trefftz, polaires de section
 │   ├── src/gpu3d.rs    soufflerie 3D : D3Q19 sur GPU (WGSL engendré), voxelisation, coupes, rendu 3D
+│   ├── src/ibl3d.rs    couche limite intégrale sur un maillage triangulé, vitesse de transpiration
 │   ├── src/bodies3d.rs maquettes 3D (sphère, cube, cylindre, aile)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes

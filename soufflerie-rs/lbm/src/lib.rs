@@ -22,6 +22,7 @@ pub mod cpu;
 pub mod d2q9;
 pub mod fluid;
 pub mod geometry;
+pub mod ibl3d;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 #[cfg(feature = "gpu")]

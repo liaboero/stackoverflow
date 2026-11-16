@@ -602,6 +602,25 @@ fn cmd_run3d(a: &Args) {
         sim.set_transition(xtr);
         eprintln!("Couche limite laminaire (Blasius) jusqu'à {:.0} % de la corde locale", 100.0 * xtr);
     }
+    // Décambrage visqueux : couche limite intégrale sur le maillage, imposée
+    // aux parois par transpiration (v_n = d(u_e δ*)/ds) tous les demi-temps
+    // convectifs, deux temps convectifs après la mise en vitesse (le
+    // tourbillon de démarrage est passé), sous-relaxée (--relax, 0,5).
+    let transp = a.get("transpiration", 0usize) > 0;
+    let relax = a.get("relax", 0.5f64);
+    if transp {
+        match sim.enable_transpiration(xtr, false) {
+            Ok(nt) => eprintln!(
+                "Transpiration (décambrage visqueux) : couche limite intégrale sur {nt} triangles, {}, u_e relevée à la hauteur de raccord, couplage tous les 0,5 temps convectif dès t* = {}, relaxation {relax}",
+                if xtr > 0.0 { format!("transition à {:.0} % de corde", 100.0 * xtr) } else { "turbulente dès le point d'arrêt".to_string() },
+                RAMP_T + 2.0
+            ),
+            Err(e) => {
+                eprintln!("Transpiration impossible : {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     eprintln!(
         "{} · Re = {} · L = {l} mailles ({}) · grille {}×{}×{} = {:.2} M mailles · {} mailles pariétales · τ = {:.4} · sous-maille {} · {} · {}",
         shape.label(),
@@ -682,6 +701,8 @@ fn cmd_run3d(a: &Args) {
     // Bilan de quantité de mouvement sur deux boîtes (0,1 et 0,15 longueur
     // autour de la maquette) : efforts et volumes.
     let mut boxes: Vec<[f64; 6]> = Vec::new();
+    let mut next_couple = RAMP_T + 2.0;
+    let mut last_tr: Option<lbm::gpu3d::TranspirationReport> = None;
     while sim.time < total {
         sim.run(chunk, &ramp);
         let f = sim.take_forces();
@@ -694,6 +715,22 @@ fn cmd_run3d(a: &Args) {
             std::process::exit(1);
         }
         let t = sim.time as f64 / spt;
+        if transp && t >= next_couple {
+            if let Some(r) = sim.couple_transpiration(relax) {
+                if t + 0.25 >= next_print || last_tr.is_none() {
+                    eprintln!(
+                        "  transpiration t* = {t:5.1} : v_n/u∞ moyenne {:.5}, max {:.4} · débit vers le sillage {:.5} L² u∞ · décollé {:.1} % · non relevé {:.1} %",
+                        r.vn_mean,
+                        r.vn_max,
+                        r.outflow,
+                        100.0 * r.separated,
+                        100.0 * r.missed
+                    );
+                }
+                last_tr = Some(r);
+            }
+            next_couple += 0.5;
+        }
         ts.push(t);
         cx.push(f.fx / q);
         cz.push(f.fz / q);
@@ -779,6 +816,50 @@ fn cmd_run3d(a: &Args) {
             Ok(()) => eprintln!("Répartition en envergure écrite dans {path}"),
             Err(e) => eprintln!("Écriture de {path} impossible : {e}"),
         }
+    }
+    if let Some(r) = &last_tr {
+        // δ*/L au bord de fuite, sur l'extrados et l'intrados : moyenne des
+        // triangles des derniers 5 % de corde de chaque tranche (face selon
+        // le signe de la normale selon z).
+        let ly = &r.layer;
+        let (lo, hi) = r.centers.iter().fold(([f64::MAX; 3], [f64::MIN; 3]), |(l, h), c| {
+            ([0, 1, 2].map(|k| l[k].min(c[k])), [0, 1, 2].map(|k| h[k].max(c[k])))
+        });
+        let nb = ((hi[1] - lo[1]).ceil() as usize).max(1) + 1;
+        let mut span = vec![(f64::MAX, f64::MIN); nb];
+        let bin = |y: f64| (((y - lo[1]).floor().max(0.0)) as usize).min(nb - 1);
+        for c in &r.centers {
+            let s = &mut span[bin(c[1])];
+            *s = (s.0.min(c[0]), s.1.max(c[0]));
+        }
+        let (mut up, mut dn) = ((0.0, 0.0), (0.0, 0.0));
+        let (mut rup, mut rdn) = (0.0, 0.0);
+        let mut sep = 0.0;
+        for (k, c) in r.centers.iter().enumerate() {
+            let s = span[bin(c[1])];
+            if s.1 <= s.0 || (c[0] - s.0) / (s.1 - s.0) < 0.95 {
+                continue;
+            }
+            let a = r.area[k];
+            if r.normals[k][2] >= 0.0 {
+                up = (up.0 + a * ly.dstar[k], up.1 + a);
+                rup += a * r.dstar_res[k];
+            } else {
+                dn = (dn.0 + a * ly.dstar[k], dn.1 + a);
+                rdn += a * r.dstar_res[k];
+            }
+            if ly.separated[k] {
+                sep += a;
+            }
+        }
+        eprintln!(
+            "Couche limite au bord de fuite (5 derniers % de corde) : δ*/L extrados {:.5}, intrados {:.5} · déjà contenue dans le champ du calcul {:.5}, {:.5} · décollée sur {:.1} % de cette bande",
+            up.0 / up.1.max(1e-12) / r.l,
+            dn.0 / dn.1.max(1e-12) / r.l,
+            rup / up.1.max(1e-12) / r.l,
+            rdn / dn.1.max(1e-12) / r.l,
+            100.0 * sep / (up.1 + dn.1).max(1e-12)
+        );
     }
     let secs = t_run.elapsed().as_secs_f64();
     let from = ts.iter().position(|&t| t >= t_end - avg).unwrap_or(0);
