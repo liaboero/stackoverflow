@@ -687,13 +687,24 @@ fn cmd_run3d(a: &Args) {
             next_surf += 0.5;
         }
     }
-    // Répartition de la portance en envergure : efforts par maille pariétale
-    // moyennés sur deux temps convectifs de plus, regroupés par demi-maille en y.
-    // Moment de tangage (efforts par maille pariétale sur deux temps convectifs
-    // de plus), autour du point situé à xref longueur de référence de l'avant
+    // Répartition de la portance en envergure : efforts par triangle (maquette
+    // maillée) ou par maille pariétale moyennés sur deux temps convectifs de
+    // plus, regroupés par demi-maille en y. Moment de tangage autour du point situé à xref longueur de référence de l'avant
     // de la maquette (quart de corde par défaut), au centre en y et z ;
     // positif à cabrer.
-    let wf = if a.opts.contains_key("envergure") || a.opts.contains_key("xref") || shape == Shape3D::Mesh {
+    // Maquette maillée : efforts par triangle de l'intégration sur la surface,
+    // mis bout à bout sur les relevés (chaque relevé pèse 1/n).
+    let wf = if !surf.is_empty() {
+        let n = surf.len() as f64;
+        let mut w = lbm::gpu3d::WallForces { pos: Vec::new(), force: Vec::new() };
+        for s in &surf {
+            for (p, f) in &s.loads {
+                w.pos.push(*p);
+                w.force.push(f.map(|v| v / n));
+            }
+        }
+        Some(w)
+    } else if a.opts.contains_key("envergure") || a.opts.contains_key("xref") {
         sim.run((2.0 * spt) as usize, &ramp);
         Some(sim.take_wall_forces())
     } else {
@@ -751,13 +762,15 @@ fn cmd_run3d(a: &Args) {
     } else {
         let n = surf.len() as f64;
         let m = |f: &dyn Fn(&lbm::gpu3d::SurfaceForces) -> f64| surf.iter().map(f).sum::<f64>() / n / q;
-        let (px, fx) = (m(&|s| s.pressure[0]), m(&|s| s.friction[0]));
-        let (pz, fz) = (m(&|s| s.pressure[2]), m(&|s| s.friction[2]));
+        let (px, fx) = (m(&|s| s.pressure_wall[0]), m(&|s| s.friction[0]));
+        let (pz, fz) = (m(&|s| s.pressure_wall[2]), m(&|s| s.friction[2]));
+        let (p1x, p1z) = (m(&|s| s.pressure[0]), m(&|s| s.pressure[2]));
         let miss = surf.iter().map(|s| s.missed).sum::<f64>() / n;
         eprintln!(
             "Intégration sur la surface : Cx pression {px:.4} + frottement {fx:.4} · Cz pression {pz:.4} + frottement {fz:.4}{}",
             if miss > 0.005 { format!(" · {:.1} % de la surface non relevée", 100.0 * miss) } else { String::new() }
         );
+        eprintln!("Pression relevée à une maille, sans extrapolation : Cx pression {p1x:.4} · Cz pression {p1z:.4}");
         eprintln!("Échange de quantité de mouvement aux parois : Cx = {:.4}  Cz = {:.4}", r.cx, r.cz);
         (px + fx, pz + fz, m(&|s| s.total()[1]))
     };

@@ -525,6 +525,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let ut = length(tv);
     let yw = max(0.1, gw.w);
     var ut2 = spalding_utau(ut, yw);
+    {{
+      // Entrée de la loi de paroi relevée une maille plus loin le long de la
+      // normale (Kawai et Larsson 2012) : au premier nœud, l'erreur numérique
+      // et de sous-maille décale le profil logarithmique (log-layer mismatch).
+      // Repli sur le nœud lui-même si un voisin est solide.
+      let ps = vec3<f32>(f32(x), f32(y), f32(z)) + gw.xyz;
+      let i0 = vec3<i32>(floor(ps));
+      let fr = ps - vec3<f32>(i0);
+      var us3 = vec3<f32>(0.0);
+      var ok = true;
+      for (var c = 0u; c < 8u; c++) {{
+        let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
+        let q3 = i0 + o;
+        if (q3.x < 0 || q3.x >= i32(P.nx) || q3.z < 0 || q3.z >= i32(P.nz)) {{ ok = false; break; }}
+        let ci = cell(q3.x, q3.y, q3.z);
+        if (wall[ci] >= 0xfffffffeu) {{ ok = false; break; }}
+        let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
+        us3 += wv.x * wv.y * wv.z * macroBuf[ci].xyz;
+      }}
+      if (ok) {{
+        let ts = us3 - dot(us3, gw.xyz) * gw.xyz;
+        ut2 = spalding_utau(length(ts), yw + 1.0);
+      }}
+    }}
     if (P.xtr > 0.0) {{
       // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
       let xl = lam_xl(x, y);
@@ -1323,20 +1347,27 @@ pub struct Gpu3D {
 /// Efforts par maille pariétale, moyennés par pas, en unités de la veine :
 /// position (mailles de la veine) et force.
 /// Efforts intégrés sur la surface du maillage (unités de la veine) :
-/// pression relevée à une maille de la paroi, frottement de la loi de paroi
-/// (Spalding) sur la vitesse tangentielle au même point.
-#[derive(Clone, Copy, Debug, Default)]
+/// pression à la paroi, frottement de la loi de paroi (Spalding) sur la
+/// vitesse tangentielle relevée à une maille de la paroi.
+#[derive(Clone, Debug, Default)]
 pub struct SurfaceForces {
+    /// Pression relevée à une maille de la paroi (sans extrapolation).
     pub pressure: [f64; 3],
+    /// Pression extrapolée linéairement jusqu'à la paroi (relevés à h et h + 1).
+    pub pressure_wall: [f64; 3],
     pub friction: [f64; 3],
     /// Part de la surface où le relevé a échoué (point d'échantillonnage
     /// entouré de mailles solides).
     pub missed: f64,
+    /// Par triangle : centre (mailles de la veine) et effort (pression à la
+    /// paroi et frottement), pour le moment de tangage et la répartition en
+    /// envergure.
+    pub loads: Vec<([f64; 3], [f64; 3])>,
 }
 
 impl SurfaceForces {
     pub fn total(&self) -> [f64; 3] {
-        [0, 1, 2].map(|a| self.pressure[a] + self.friction[a])
+        [0, 1, 2].map(|a| self.pressure_wall[a] + self.friction[a])
     }
 }
 
@@ -2230,17 +2261,20 @@ impl Gpu3D {
     }
 
     /// Efforts sur une maquette maillée par intégration sur ses triangles
-    /// (grille la plus fine, champ du dernier pas) : −p n dA avec p relevée à
-    /// une maille de la paroi le long de la normale, plus τ_p dA, τ_p = ρ u_τ²
-    /// de la loi de Spalding dans la direction de la vitesse tangentielle.
-    /// Plus juste que l'échange de quantité de mouvement avec la loi de paroi :
-    /// la paroi glissante y cède une quantité de mouvement qui n'est pas le
-    /// frottement, et l'escalier des mailles y mêle pression et frottement.
+    /// (grille la plus fine, champ du dernier pas) : −p_p n dA, p_p extrapolée
+    /// linéairement jusqu'à la paroi depuis les relevés à une et deux mailles
+    /// le long de la normale (la dépression du bord d'attaque, très raide, est
+    /// atténuée dès une maille), plus τ_p dA, τ_p = ρ u_τ² de la loi de
+    /// Spalding dans la direction de la vitesse tangentielle à une maille.
+    /// Plus juste que l'échange de quantité de mouvement : sur l'escalier des
+    /// mailles, les liens presque parallèles à la paroi renvoient la pression
+    /// et la quantité de mouvement longitudinale dans leur propre direction,
+    /// d'où une traînée parasite concentrée sur les marches.
     /// None sans maillage.
     pub fn surface_forces(&mut self) -> Option<SurfaceForces> {
-        let s = match &self.refine {
-            Some(r) => (1u64 << r.levels.len()) as f64,
-            None => 1.0,
+        let (s, org) = match &self.refine {
+            Some(r) => ((1u64 << r.levels.len()) as f64, r.origin[r.levels.len() - 1]),
+            None => (1.0, [0.0; 3]),
         };
         let g = match self.refine.as_mut() {
             Some(r) => r.levels.last_mut().unwrap(),
@@ -2306,21 +2340,32 @@ impl Gpu3D {
                 continue;
             };
             let p = (v[3] - 1.0) / 3.0;
+            // Pression extrapolée linéairement jusqu'à la paroi.
+            let pw = match sample([0, 1, 2].map(|k| c[k] + (h + 1.0) * n[k])) {
+                Some(v2) => p + h * (p - (v2[3] - 1.0) / 3.0),
+                None => p,
+            };
             let un = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
             let ut = [0, 1, 2].map(|k| v[k] - un * n[k]);
             let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
             let utau = spalding_utau(utm, h, nu);
             let tau = v[3] * utau * utau;
+            let mut fl = [0.0; 3];
             for k in 0..3 {
                 out.pressure[k] -= p * n[k] * ar;
+                out.pressure_wall[k] -= pw * n[k] * ar;
+                fl[k] = -pw * n[k] * ar;
                 if utm > 0.0 {
                     out.friction[k] += tau * ut[k] / utm * ar;
+                    fl[k] += tau * ut[k] / utm * ar;
                 }
             }
+            out.loads.push(([0, 1, 2].map(|k| org[k] + c[k] / s), fl.map(|v| v / (s * s))));
         }
         // Surfaces de la grille fine ramenées aux mailles de la veine.
         let s2 = s * s;
         out.pressure = out.pressure.map(|v| v / s2);
+        out.pressure_wall = out.pressure_wall.map(|v| v / s2);
         out.friction = out.friction.map(|v| v / s2);
         out.missed /= area.max(1e-12);
         Some(out)

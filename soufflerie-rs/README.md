@@ -480,18 +480,56 @@ mesurer cette sensibilité. Une aile en flèche ou effilée, dont le bord de
 fuite coupe les nœuds à toutes les fractions, y est peu sensible.
 
 **Efforts par intégration sur la surface.** L'échange de quantité de
-mouvement aux parois surestime nettement la traînée avec la loi de paroi :
-la paroi glissante y cède une quantité de mouvement qui n'est pas le
-frottement (le « frottement » qu'on en tire est négatif), et l'escalier
-des mailles y mêle pression et frottement. Pour les maquettes STL, les
-efforts sont maintenant intégrés sur les triangles du maillage
-(`Gpu3D::surface_forces`, grille la plus fine) : −p n dA avec p relevée à
-une maille de la paroi le long de la normale, plus τ_p dA avec
-τ_p = ρ u_τ² de la loi de Spalding sur la vitesse tangentielle au même
-point. `run3d` en fait la moyenne sur la fenêtre de moyenne (un relevé par
-demi-temps convectif) et affiche aussi l'échange pour comparaison ;
-l'interface trace ces coefficients pour les maquettes STL. Les formes
-analytiques gardent l'échange.
+mouvement aux parois surestime nettement la traînée avec la loi de paroi.
+Sur l'aile AR 4 à 0° (L = 16 + ×2), il donne Cx = 0,064 alors que la
+surface donne 0,018 ; relevé maille par maille, l'excès n'est pas réparti
+le long de la corde mais concentré sur trois rangées en envergure, aux
+marches de l'escalier, là où la surface coupe un plan de la grille sous un
+angle rasant. Les liens presque parallèles à la paroi y renvoient la
+pression et la quantité de mouvement longitudinale dans leur propre
+direction : une marche d'une maille agit comme une petite rugosité, que
+l'écoulement ressent réellement (le bilan de quantité de mouvement sur une
+boîte donne la même traînée). L'excès décroît avec le raffinement (0,064,
+0,041, 0,034 à ×2, ×4, ×8) sans disparaître. Pour les maquettes STL, les
+efforts sont donc intégrés sur les triangles du maillage
+(`Gpu3D::surface_forces`, grille la plus fine) : −p_p n dA, plus τ_p dA avec
+τ_p = ρ u_τ² de la loi de Spalding sur la vitesse tangentielle relevée à
+une maille le long de la normale. `run3d` en fait la moyenne sur la fenêtre
+de moyenne (un relevé par demi-temps convectif), en tire aussi Cm et la
+répartition en envergure (`--envergure`), et affiche l'échange pour
+comparaison ; l'interface trace ces coefficients pour les maquettes STL.
+Les formes analytiques gardent l'échange.
+
+**Problèmes connus de la méthode et remèdes retenus.** La littérature sur
+les lois de paroi en LBM sur grille cartésienne signale :
+- *Le décalage de la zone logarithmique* (Kawai et Larsson, *Phys. Fluids*
+  24, 2012) : au premier nœud, l'erreur numérique et de sous-maille fausse
+  la vitesse qui alimente la loi de paroi. Remède retenu : la loi de paroi
+  lit la vitesse une maille plus loin le long de la normale (interpolation
+  trilinéaire, repli sur le nœud si un voisin est solide), comme le variant
+  « ESG » d'Asmuth et al. (*Phys. Fluids* 33, 2021). Cz baisse de 4 à 5 %,
+  vers la mesure.
+- *La pression lue hors de la paroi* : relevée à une maille, la forte
+  dépression du bord d'attaque est atténuée et sa succion manque. Remède
+  retenu : p_p extrapolée linéairement depuis les relevés à une et deux
+  mailles. La traînée baisse de 10 à 20 %.
+- *L'incohérence entre la vitesse de glissement et la viscosité au premier
+  nœud* : la vitesse de glissement suppose ν + κ u_τ y, alors que la maille
+  y ajoute Spalart–Allmaras et Smagorinsky. Calculer le glissement avec la
+  viscosité effective du nœud diverge (rétroaction entre glissement,
+  cisaillement et sous-maille).
+- *L'échange de quantité de mouvement inverse* (Asmuth et al. 2021), qui
+  choisit la vitesse de paroi pour que l'effort tangentiel cédé par la
+  maille vaille τ_p A (A = 6 Σ w_i |c_i·n|, aire exacte en moyenne pour un
+  plan quelconque) : essayé, il ne réduit pas l'excès des marches, qui
+  vient de la pression statique renvoyée par les liens rasants, et le
+  compenser aussi exige des vitesses de paroi instables.
+- *La reconstruction du premier nœud* (Malaspinas et Sagaut, *J. Comput.
+  Phys.* 275, 2014 ; Degrigny et al., *Comput. Fluids* 227, 2021), qui
+  impose vitesse et contrainte du modèle au nœud : essayée avec le rebond
+  de Bouzidi gardé pour les liens, elle n'est pas conservative ici (le
+  rebond retire à chaque pas la quantité de mouvement que le nœud remet) et
+  fausse le champ de pression (Cx de pression négatif).
 
 | Cas | Échange Cz / Cx | Surface Cz / Cx (pression + frottement) | Référence |
 | --- | --- | --- | --- |
@@ -500,16 +538,37 @@ analytiques gardent l'échange.
 | TR-1208, 4°, L = 8 + ×4 | 0,314 / 0,041 | 0,261 / 0,021 (0,016 + 0,006) | mesure 0,257 / 0,011 ; VSPAERO 0,266 / 0,015 |
 | TR-1208, 8°, L = 8 + ×4 | 0,581 / 0,053 | 0,489 / 0,053 (0,048 + 0,005) | mesure 0,499 / 0,021 ; VSPAERO 0,531 / 0,026 |
 
-La portance rejoint la mesure et VSPAERO à quelques pour cent près, et la
-traînée est divisée par deux à 4°. Le frottement (0,005 à 0,008) a l'ordre
-de grandeur d'une plaque plane turbulente. Il reste trop de traînée de
-pression aux incidences élevées : relevée à une maille de la paroi, la
-dépression du bord d'attaque est atténuée, si bien que la succion du bord
-d'attaque (qui croît comme CL²) manque. Le moment de tangage et la
-répartition en envergure viennent encore de l'échange aux parois ; les
-efforts par maille en retirent maintenant la part de la pression de
-référence (ρ₀ c_s², nulle en somme mais pas maille par maille), ce qui
-supprime les pics parasites aux saumons.
+Ces valeurs (pression relevée à une maille, loi de paroi alimentée au
+premier nœud) sont celles de la première version. Avec la loi de paroi
+alimentée une maille plus loin et la pression extrapolée à la paroi :
+
+| Cas | Échange Cz / Cx | Surface Cz / Cx (pression + frottement) | Référence |
+| --- | --- | --- | --- |
+| Aile AR 4, 4°, L = 16 + ×4 | 0,308 / 0,048 | 0,288 / 0,024 (0,017 + 0,007) | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| TR-1208, 4°, L = 8 + ×4 | 0,304 / 0,045 | 0,275 / 0,018 (0,013 + 0,005) | mesure 0,257 / 0,011 ; VSPAERO 0,266 / 0,015 |
+| TR-1208, 8°, L = 8 + ×4 | 0,551 / 0,056 | 0,506 / 0,047 (0,042 + 0,005) | mesure 0,499 / 0,021 ; VSPAERO 0,531 / 0,026 |
+| TR-1208, 8°, L = 8 + ×8 | 0,593 / 0,043 | 0,570 / 0,041 (0,035 + 0,006) | id. |
+
+La traînée baisse de 10 à 20 % et rejoint VSPAERO à 4° sur l'aile AR 4 ; la
+portance reste à quelques pour cent de VSPAERO à ×4. Le frottement (0,005
+à 0,008) a l'ordre de grandeur d'une plaque plane turbulente. Restent deux
+écarts, qui sont dans l'écoulement calculé et non dans la mesure des
+efforts (l'échange les porte aussi) :
+- *Traînée de pression à 8°*, encore double de la mesure. Elle décroît
+  avec le raffinement (0,042 à ×4, 0,035 à ×8) : le rayon du bord
+  d'attaque ne couvre qu'une à deux mailles, et la succion qu'il porte
+  (∝ CL²) n'est pas résolue.
+- *Portance à 8° et ×8*, 14 % au-dessus de la mesure et au-dessus de
+  VSPAERO non visqueux, et qui croît avec le raffinement : la couche limite
+  modélisée de l'extrados reste sans doute trop mince pour décambrer le
+  profil au bord de fuite. Non résolu.
+
+Le moment de tangage et la répartition en envergure des maquettes STL
+viennent aussi de l'intégration sur la surface (effort de chaque triangle).
+Pour les formes analytiques, ils viennent de l'échange aux parois, dont les
+efforts par maille retirent la part de la pression de référence (ρ₀ c_s²,
+nulle en somme mais pas maille par maille), ce qui supprime les pics
+parasites aux saumons.
 
 ## Maquettes STL (3D)
 

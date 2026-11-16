@@ -206,7 +206,8 @@ fn transition_3d() {
     // laminaire sur toute la corde retire environ l'écart de frottement
     // Blasius / turbulent (≈ 0,006). Sur une grille plus grossière, le
     // glissement laminaire change aussi la traînée de pression (≈ 0,013 avec
-    // le bord de fuite calé à 0,7 maille après un nœud).
+    // le bord de fuite calé à 0,7 maille après un nœud, ≈ 0,017 avec la loi de
+    // paroi alimentée une maille plus loin).
     use lbm::bodies3d::{Body3D, Shape3D};
     use lbm::gpu3d::Gpu3D;
     let l = 16;
@@ -229,5 +230,5 @@ fn transition_3d() {
         println!("xtr {xtr} : Cx = {:.4}", cx.last().unwrap());
     }
     let d = cx[0] - cx[1];
-    assert!((0.002..0.015).contains(&d), "baisse de traînée {d}");
+    assert!((0.002..0.02).contains(&d), "baisse de traînée {d}");
 }
