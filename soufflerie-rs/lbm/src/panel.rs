@@ -423,7 +423,7 @@ fn surface_bl(flow: &Flow, re: f64, o: &PanelOptions) -> Surface {
     }
 }
 
-fn leading_panel(xc: &[f64]) -> usize {
+pub(crate) fn leading_panel(xc: &[f64]) -> usize {
     let mut k = 0;
     for i in 1..xc.len() {
         if xc[i] < xc[k] {
@@ -431,6 +431,17 @@ fn leading_panel(xc: &[f64]) -> usize {
         }
     }
     k
+}
+
+/// Couplage visqueux–non visqueux.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Coupling {
+    /// Profil épaissi de δ*, itéré (valeurs de l'application web).
+    #[default]
+    Weak,
+    /// Sources de transpiration sur le profil et le sillage, couche limite et
+    /// écoulement potentiel résolus ensemble par Newton (XFOIL), voir [`crate::vii`].
+    Newton,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,6 +454,7 @@ pub struct PanelOptions {
     pub iterations: usize,
     pub relax: f64,
     pub squire_x: f64,
+    pub coupling: Coupling,
 }
 
 impl PanelOptions {
@@ -456,6 +468,7 @@ impl PanelOptions {
             iterations: 1,
             relax: 0.5,
             squire_x: 0.98,
+            coupling: Coupling::Weak,
         }
     }
 
@@ -501,6 +514,9 @@ pub struct PanelResult {
 
 /// Point de polaire : potentiel + couche limite + couplage faible.
 pub fn panel_solve(shape: &PanelShape, alpha_deg: f64, o: &PanelOptions) -> PanelResult {
+    if o.coupling == Coupling::Newton {
+        return PanelResult::from_coupled(alpha_deg, crate::vii::solve_coupled(shape, alpha_deg, o));
+    }
     let base = airfoil_points(shape, 80);
     let alpha = alpha_deg.to_radians();
     let inviscid = potential_flow(&base, alpha);

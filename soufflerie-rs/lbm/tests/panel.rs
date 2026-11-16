@@ -1,5 +1,5 @@
 //! Méthode des panneaux : mêmes cas et mêmes valeurs que l'application web.
-use lbm::panel::{airfoil_points, panel_solve, potential_flow, section_coefficients, PanelOptions, PanelShape};
+use lbm::panel::{airfoil_points, panel_solve, potential_flow, section_coefficients, Coupling, PanelOptions, PanelShape};
 use lbm::Naca;
 
 fn naca(code: &str) -> PanelShape {
@@ -49,4 +49,35 @@ fn kirchhoff() {
     let b = section_coefficients(&panel_solve(&naca("0012"), 20.0, &o));
     println!("Kirchhoff : Cz(16°) = {:.3}, Cz(20°) = {:.3}", a.cl, b.cl);
     assert!(a.kirchhoff && (a.cl - 1.40).abs() < 0.02 && (b.cl - 1.13).abs() < 0.02);
+}
+
+#[test]
+fn couplage_newton_6e6() {
+    // NACA 0012, Re = 6·10⁶, transition au bord d'attaque. Références : NASA TMR
+    // (Spalart–Allmaras) Cz(10°) = 1,0909, Cx(10°) = 0,01231, Cx(0°) = 0,00809 ;
+    // Ladson (TM 4074) Cz(10°) ≈ 1,08.
+    let o = PanelOptions { coupling: Coupling::Newton, ..PanelOptions::tripped(6e6, 0.0) };
+    let a = panel_solve(&naca("0012"), 0.0, &o);
+    let b = panel_solve(&naca("0012"), 10.0, &o);
+    println!(
+        "Newton, Re = 6·10⁶ : Cx(0°) = {:.5} ; Cz, Cx(10°) = {:.4}, {:.5} (non visqueux {:.4}, rapport {:.3})",
+        a.cd,
+        b.cl,
+        b.cd,
+        b.cl_inviscid,
+        b.cl / b.cl_inviscid
+    );
+    assert!((a.cd - 0.00826).abs() < 2e-4);
+    assert!((b.cl - 1.0924).abs() < 5e-3 && (b.cd - 0.01222).abs() < 3e-4);
+    // À 2 % de la référence (TMR).
+    assert!((b.cl / 1.0909 - 1.0).abs() < 0.02 && (b.cd / 0.01231 - 1.0).abs() < 0.05);
+}
+
+#[test]
+fn couplage_newton_libre() {
+    // NACA 0012, Re = 10⁶, transition libre : transition à 70 % de corde à 0°.
+    let o = PanelOptions { coupling: Coupling::Newton, ..PanelOptions::free(1e6) };
+    let r = panel_solve(&naca("0012"), 0.0, &o);
+    println!("Newton, Re = 10⁶ libre : x_tr = {:.3}, Cx = {:.5}", r.transition_upper, r.cd);
+    assert!((r.transition_upper - 0.70).abs() < 0.01 && (r.cd - 0.00523).abs() < 2e-4);
 }

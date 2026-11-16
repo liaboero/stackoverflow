@@ -36,6 +36,7 @@ pub mod shapes;
 pub mod stats;
 pub mod stl;
 pub mod tunnel;
+pub mod vii;
 pub mod wall;
 pub mod wing;
 
