@@ -2884,6 +2884,8 @@ impl Gpu3D {
         // Pression au plus près de la paroi : interpolation trilinéaire sur
         // les seuls nœuds fluides du côté de la normale (pas ceux de l'autre
         // face d'une paroi mince), poids renormalisés.
+        // Hauteurs des deux relevés ; SOUFFLERIE_PWH="h1,h2" les change
+        // (diagnostic, exemple pwh3d ; h2 ≤ h1 : ancien relevé seul).
         let (h1, h2) = std::env::var("SOUFFLERIE_PWH")
             .ok()
             .and_then(|v| {

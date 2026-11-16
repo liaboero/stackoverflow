@@ -771,7 +771,13 @@ ramènent l'écoulement vers l'amont, exercent leurs propres efforts (la
 portance du plan ne vaut que 0,28 à 0,37 au lieu de 0,55). TR-1208, 8° :
 traînée induite 0,011 à ×4, 0,015 à 0,019 à ×8 (CL²/(πA) = 0,012 pour un
 allongement 8) ; profil (perte dans le sillage) 0,054 à ×4, 0,034 à 0,037 à
-×8 ; hors sillage ±0,005, sans signe constant.
+×8 ; hors sillage ±0,005, sans signe constant. Deux vérifications : la
+même intégration sur la seule grille de la veine donne les mêmes
+composantes à 0,005 près (le résultat ne vient pas du raccord des grilles) ;
+avec la pression totale de référence prise dans le plan amont, la perte
+« hors sillage » allait de 0 à +0,028 selon le plan et le calcul, et le
+bilan complet de 0,03 à 0,14 d'un relevé à l'autre (ondes de pression de la
+veine), d'où la référence prise dans le plan lui-même.
 
 **Ce que disent les bilans.** Avec les trois mesures de la portance qui
 s'accordent (boîte, échange aux parois, surface), le calcul porte 6 à 12 %
@@ -796,6 +802,29 @@ tous les cas. Hypothèse pour la suite : la loi de paroi, qui fait glisser
 l'écoulement au premier nœud, rend une couche limite trop mince pour
 décambrer le profil ; la résolution du bord d'attaque n'explique qu'une
 partie de la traînée.
+
+### Programmes de diagnostic
+
+Les essais décrits dans ce document se refont avec les programmes de
+`lbm/examples` (`cargo run --release -p lbm --example <nom> -- <arguments>`,
+arguments en tête de chaque fichier) :
+
+| Programme | Ce qu'il mesure |
+| --- | --- |
+| `cp3d` | Cp pariétal d'une tranche d'envergure, traînée par tranche de corde, profils de pression le long de la normale ; dernier argument 0 : simple précision |
+| `edge3d` | mailles d'arête vive (loi de paroi coupée) par tranche de corde |
+| `pwh3d` | portance et traînée de surface selon les hauteurs de relevé de la pression, contre le bilan sur une boîte |
+| `box3d` | bilan sur des boîtes de tailles croissantes, traînée extrapolée à volume nul |
+| `wake3d` | traînée en champ lointain dans cinq plans aval, relevé par relevé |
+| `bilan3d` | bilan sur une boîte dans le champ de la veine (aile analytique) |
+| `surface3d`, `trainee3d` | efforts intégrés sur la surface ; gradient de pression le long de la veine |
+| `blow`, `probe` | où et quand un calcul 3D (STL) ou raffiné diverge |
+| `te_map`, `voxel_check`, `wing_vox`, `wing_offset`, `link_sum` | voxelisation : bord de fuite, volume conservé, décalage d'une demi-maille, poussée de la pression de référence |
+| `refine3d_check`, `sa3d_check`, `transition3d`, `noise3d`, `time_mesh` | raffinement contre grille uniforme, Spalart–Allmaras 3D, transition imposée, bruit, coût de mise en place |
+| `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
+
+L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
+une option de maquette retirée depuis ; son programme n'est pas conservé.
 
 ## Maquettes STL (3D)
 
@@ -1005,6 +1034,7 @@ soufflerie-rs/
 │   ├── src/shapes.rs   maquettes
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
+│   ├── examples/       programmes de diagnostic (voir « Programmes de diagnostic »)
 │   └── tests/          validation, panneaux, aile finie, 3D, comparaison GPU/CPU
 ├── validation/         résultats de validation 3D (CSV)
 ├── tools/validation3d.sh  calculs de validation 3D
