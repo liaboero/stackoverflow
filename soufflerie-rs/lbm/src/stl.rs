@@ -558,6 +558,11 @@ impl MeshBody {
     /// Première traversée de la surface par le segment p → p + d : fraction
     /// t ∈ ]0, 1] (Möller et Trumbore), ou None.
     pub fn segment_hit(&self, p: [f64; 3], d: [f64; 3]) -> Option<f64> {
+        self.segment_hit_normal(p, d).map(|h| h.0)
+    }
+
+    /// Idem, avec la normale unitaire du triangle touché, orientée vers p.
+    pub fn segment_hit_normal(&self, p: [f64; 3], d: [f64; 3]) -> Option<(f64, [f64; 3])> {
         let q = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
         let lo = [0, 1, 2].map(|a| p[a].min(q[a]));
         let hi = [0, 1, 2].map(|a| p[a].max(q[a]));
@@ -565,7 +570,7 @@ impl MeshBody {
             return None;
         }
         let r = |a: usize, v: f64| (((v - self.lo[a]) / self.cell).floor().max(0.0) as usize).min(self.gdim[a] - 1);
-        let mut best: Option<f64> = None;
+        let mut best: Option<(f64, [f64; 3])> = None;
         for gz in r(2, lo[2])..=r(2, hi[2]) {
             for gy in r(1, lo[1])..=r(1, hi[1]) {
                 for gx in r(0, lo[0])..=r(0, hi[0]) {
@@ -590,8 +595,11 @@ impl MeshBody {
                             continue;
                         }
                         let t = inv * dot(e2, qv);
-                        if t > 1e-9 && t <= 1.0 && best.is_none_or(|b| t < b) {
-                            best = Some(t);
+                        if t > 1e-9 && t <= 1.0 && best.is_none_or(|b| t < b.0) {
+                            let nv = cr_of(e1, e2);
+                            let ln = dot(nv, nv).sqrt().max(1e-300);
+                            let sg = if dot(nv, d) > 0.0 { -1.0 } else { 1.0 };
+                            best = Some((t, nv.map(|v| sg * v / ln)));
                         }
                     }
                 }

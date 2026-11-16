@@ -559,9 +559,8 @@ efforts (l'échange les porte aussi) :
   d'attaque ne couvre qu'une à deux mailles, et la succion qu'il porte
   (∝ CL²) n'est pas résolue.
 - *Portance à 8° et ×8*, 14 % au-dessus de la mesure et au-dessus de
-  VSPAERO non visqueux, et qui croît avec le raffinement : la couche limite
-  modélisée de l'extrados reste sans doute trop mince pour décambrer le
-  profil au bord de fuite. Non résolu.
+  VSPAERO non visqueux, et qui croît avec le raffinement. Cause trouvée et
+  corrigée depuis : voir « Loi de paroi 3D : couche pariétale cohérente ».
 
 Le moment de tangage et la répartition en envergure des maquettes STL
 viennent aussi de l'intégration sur la surface (effort de chaque triangle).
@@ -569,6 +568,130 @@ Pour les formes analytiques, ils viennent de l'échange aux parois, dont les
 efforts par maille retirent la part de la pression de référence (ρ₀ c_s²,
 nulle en somme mais pas maille par maille), ce qui supprime les pics
 parasites aux saumons.
+
+## Loi de paroi 3D : couche pariétale cohérente
+
+**Le défaut, vu en 2D.** NACA 0012, Re = 6·10⁶, α = 10°, couche limite
+turbulente (référence NASA TMR : mesure de Ladson CL ≈ 1,08, Spalart–Allmaras
+sur grille fine CL = 1,09, CD = 0,0123). Avec la loi de paroi d'origine, la
+soufflerie 2D donne CL = 1,12 à 64 mailles par corde, 1,29 à 128 (au-dessus
+de la solution non visqueuse, 1,19), puis un écoulement décollé et
+instationnaire à 256 (CL ≈ 0,95, CD = 0,045) : la solution s'éloigne de la
+référence quand la grille s'affine. Le Cp pariétal montre pourquoi : un pic
+de pression suivi d'une dépression, à intervalles réguliers, là où la paroi
+traverse une rangée de nœuds sous un angle rasant. Ce sont les marches de
+l'échange de quantité de mouvement relevées plus haut en 3D ; sur
+l'intrados, elles agissent comme de petits volets Gurney. Elles
+disparaissent en laminaire (paroi adhérente) : elles viennent de la loi de
+paroi.
+
+**La cause.** Le glissement u_s = u_n − u_τ² y_n / (ν + κ u_τ y_n) vaut
+u_n − u_τ/κ à peu près quelle que soit la distance y_n du nœud à la paroi :
+deux nœuds pariétaux voisins, l'un à 0,05 maille et l'autre à 1 maille de
+la paroi, en déduisent des vitesses de paroi qui diffèrent de tout l'écart
+de vitesse résolu entre ces deux hauteurs (≈ u_τ ln(20)/κ). La vitesse
+extrapolée à la paroi saute donc à chaque traversée d'une rangée de nœuds.
+
+**Le remède retenu** (`gpu3d.rs`, shader de propagation) :
+- la loi de paroi est alimentée par la vitesse relevée à une hauteur fixe
+  h = 2 mailles au-dessus du pied de la normale (Kawai et Larsson 2012),
+  avec repli sur le nœud si le relevé touche une maille solide ou ne tombe
+  pas à la hauteur h de la paroi la plus proche (bords minces, coins) ;
+- la couche [0, h] a la viscosité turbulente uniforme κ u_τ h : profil
+  linéaire de pente τ_p / (ν + κ u_τ h), et chaque nœud glisse à
+  u_n − pente · y_n. La vitesse extrapolée à la paroi ne dépend plus de la
+  place du nœud dans la maille, et la contrainte transmise est τ_p partout ;
+  le premier nœud reçoit la même viscosité (collision) et ν̃ = κ u_τ h
+  (Spalart–Allmaras) ;
+- le frottement intégré sur la surface est relevé à la même hauteur h.
+
+**Stabilité.** Près de la paroi, ce glissement devient presque libre, et
+une paroi qui suit la vitesse de son propre nœud n'a pas de rappel : le
+calcul diverge à 64 mailles par corde. Trois mesures, sans effet sur les
+efforts en régime établi :
+- La vitesse de glissement est relaxée sur une dizaine de pas
+  (u_w ← u_w + 0,1 (u_s − u_w)). En régime établi, sans effet : 0,1 ou
+  0,02 donnent les mêmes efforts à 0,3 % près.
+- Le glissement est borné par celui que donne aussi la vitesse relevée à h
+  (u_s ≤ u_h − pente · h : profil monotone dans la couche pariétale). Les
+  deux estimations coïncident quand le profil est établi ; sans la borne,
+  un nœud du bord d'attaque de TR-1208 à 8° s'emballait lentement (vitesse
+  maximale stable à 1,37 U jusqu'à t* = 6,5, puis multipliée par trois en
+  3 t*).
+- Aux arêtes (saumon plat, bord de fuite mince), la normale d'une maille
+  n'est celle d'aucune des faces que touchent ses liens, et sa vitesse
+  « tangentielle » traverse ces faces : la paroi soufflait. Chaque lien
+  garde désormais la normale de la face qu'il touche (triangle du maillage,
+  ou gradient de la distance juste devant la paroi pour les formes
+  analytiques), et la vitesse de paroi est projetée dans le plan de cette
+  face.
+
+- Aux arêtes vives (faces touchées par les liens d'une maille à plus de
+  60° l'une de l'autre : saumon plat, bord de fuite), l'écoulement décolle et
+  la loi de paroi, faite pour une couche limite attachée le long d'une face,
+  ne s'applique pas : la paroi y reste adhérente, avec la viscosité de
+  Spalart–Allmaras et de la sous-maille. Sans cela, la vitesse de
+  contournement de l'arête (singulière en non visqueux) croissait jusqu'à
+  la divergence (aile AR 4 à 8°, coin bord d'attaque / saumon). Les facettes
+  d'une surface lisse font quelques degrés entre elles, une arête vive 90° à
+  165° : tout seuil entre 30° et 80° classe les mêmes mailles.
+
+**Essayés et écartés.**
+- Faire glisser la paroi à la vitesse relevée à h (u_h − u_τ/κ) : stable,
+  mais la paroi entraîne alors le fluide plus vite que le nœud ne va
+  (Cz 0,35 à 0,37 contre 0,30 en glissement libre sur l'aile AR 4).
+- ν̃ du premier nœud non imposé (Spalart–Allmaras seul) : la turbulence ne
+  s'établit pas sur ces grilles, la couche limite décolle. Plafonné par la
+  valeur de Clauser 0,0168 U_e δ* : sans effet sur la portance.
+
+**Contrôle non visqueux.** Paroi en glissement libre (vitesse du nœud), aile
+analytique AR 4 à 4°, L = 16 + ×2, échange aux parois : Cz = 0,299 ; la
+nouvelle loi de paroi donne 0,301 (+ ×2) et 0,310 (+ ×4) : elle n'ajoute
+plus de portance au glissement libre (l'ancienne en ajoutait à mesure que la
+grille s'affinait).
+
+**Résultats** (efforts intégrés sur la surface ; « avant » : loi de paroi
+de la section précédente) :
+
+| Cas | Avant Cz / Cx | Couche pariétale cohérente Cz / Cx | Référence |
+| --- | --- | --- | --- |
+| Aile AR 4, 4°, L = 16 + ×2 | 0,263 / 0,030 | 0,235 / 0,023 | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| Aile AR 4, 4°, L = 16 + ×4 | 0,288 / 0,024 | 0,262 / 0,022 | id. |
+| Aile AR 4, 8°, L = 16 + ×4 | 0,600 / 0,056 (aile analytique, échange) | 0,528 / 0,040 | VSPAERO 0,501 à 0,529 / 0,039 à 0,045 |
+| TR-1208, 4°, L = 8 + ×4 | 0,275 / 0,018 | 0,258 / 0,015 | mesure 0,257 / 0,011 ; VSPAERO 0,266 / 0,015 |
+| TR-1208, 4°, L = 8 + ×8 | — | 0,268 / 0,015 | id. |
+| TR-1208, 8°, L = 8 + ×4 | 0,506 / 0,047 | 0,493 / 0,044 | mesure 0,499 / 0,021 ; VSPAERO 0,531 / 0,026 |
+| TR-1208, 8°, L = 8 + ×8 | 0,570 / 0,041 | 0,526 / 0,036 | id. |
+
+La portance de TR-1208 est à 1 % de la mesure à ×4 et à 4 à 5 % à ×8, au
+niveau de VSPAERO non visqueux ; celle de l'aile AR 4 tombe dans la
+fourchette VSPAERO (tourbillons / panneaux). Elle croît encore un peu avec
+le raffinement (+4 à 7 % de ×4 à ×8, contre +13 % avant) : à 64 mailles par
+corde, la couche limite du bord de fuite ne couvre qu'une à deux mailles, et
+son décambrage visqueux (5 à 6 % ici : mesure contre VSPAERO) n'est pas
+encore rendu. À ×2 (32 mailles par corde), le bord de fuite mince, couvert
+de mailles d'arête adhérentes, décambre au contraire un peu trop (0,235).
+
+La traînée est juste à 4° (0,015 : VSPAERO, et la mesure à 0,004 près, la
+couche limite étant supposée turbulente dès le bord d'attaque) mais reste
+trop forte à 8° (0,036 à ×8 contre 0,021 à 0,026). Le relevé de Cx par
+tranche de corde (TR-1208, 8°, ×4) la situe : sur les 20 premiers pour cent,
+la succion de l'extrados ne donne qu'une poussée de −0,015 (Cp ≈ −0,3 juste
+derrière le bord d'attaque à mi-envergure, au lieu d'un pic de −2 à −3),
+et l'arrière de l'extrados, qu'elle devrait compenser, ajoute +0,026. Le
+rayon du bord d'attaque du NACA 63A012 (≈ 1 % de la corde) tient dans moins
+d'une maille à ×8 : c'est une limite de résolution, qui décroît en affinant
+(traînée de pression hors traînée induite : 0,028 à ×4, 0,019 à ×8), et non
+plus un défaut de la loi de paroi.
+
+La soufflerie 2D (processeur et GPU) garde pour l'instant la loi de paroi
+d'origine, identique à celle de l'application web : le défaut décrit
+ci-dessus y reste au-delà d'environ 64 mailles par corde. Un essai sur le
+GPU 2D (u_τ et glissement tirés de la vitesse relevée à h) ramène le
+NACA 0012 à 10° de CL = 1,29 à 1,12 (128 mailles par corde) et supprime le
+décollement à 256 (CL = 1,13 à 1,17), mais c'est la variante qui entraîne
+le fluide en 3D ; la formulation retenue en 3D (glissement depuis le nœud,
+relaxé, arêtes adhérentes) reste à porter sur les deux moteurs 2D.
 
 ## Maquettes STL (3D)
 

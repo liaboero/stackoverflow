@@ -107,6 +107,9 @@ fn lam_xl(x: i32, y: i32) -> vec2<f32> {
 /// Spalart–Allmaras : viscosité turbulente et loi de Spalding (comme en 2D).
 const SA_FNS: &str = "
 const KAPPA = 0.41;
+// Hauteur de raccord de la loi de paroi (mailles) : au-delà de la première
+// couche de nœuds pariétaux pour l'interpolation trilinéaire.
+const WM_H = 2.0;
 const CV1_3 = 357.911;
 fn nu_turb(v: f32) -> f32 {
   if (v <= 0.0) { return 0.0; }
@@ -156,6 +159,9 @@ const CB1 = 0.1355;
 const CB2 = 0.622;
 const SIGMA = 0.6666667;
 const KAPPA = 0.41;
+// Hauteur de raccord de la loi de paroi (mailles) : au-delà de la première
+// couche de nœuds pariétaux pour l'interpolation trilinéaire.
+const WM_H = 2.0;
 const CW2 = 0.3;
 const CW3_6 = 64.0;
 const CV1_3 = 357.911;
@@ -191,9 +197,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   } else if (x == i32(P.nx) - 1) {
     out = nutIn[idx - 1u];
   } else if (wk0 != 0u) {
-    // Premier nœud : ν̃ ≈ ν_t = κ u_τ y (zone logarithmique).
+    // Premier nœud : ν̃ = κ u_τ h, viscosité turbulente de la couche
+    // pariétale [0, h] de la loi de paroi (hauteur de raccord fixe : la
+    // valeur ne saute pas quand la paroi traverse une rangée de nœuds).
     let k = wk0 - 1u;
-    out = min(NU_TILDE_MAX, KAPPA * utau[k] * max(0.1, wallGeo[k].w));
+    out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
   } else {
     let ixm = cell(x - 1, y, z);
     let ixp = cell(x + 1, y, z);
@@ -328,8 +336,16 @@ fn wgsl_step(fp16: bool) -> String {
     if (q > 0.0) {{
       let fj = pop({j}u, idx);
       let qo = qbuf[wk * 18u + {jm1}u];
-      // Paroi mobile (glissement de la loi de paroi) : 6 w_i ρ (c_i · u_w).
-      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uw);
+      // Paroi mobile (glissement de la loi de paroi) : 6 w_i ρ (c_i · u_w),
+      // u_w ramenée dans le plan de la face que touche le lien (aux arêtes,
+      // la normale de la maille n'est celle d'aucune face : sa composante
+      // normale ferait souffler la paroi).
+      var uwl = uw;
+      if (P.sa == 1u) {{
+        let nf = oct_decode(qbuf[arrayLength(&qbuf) / 2u + wk * 18u + {im1}u]);
+        uwl = uw - dot(uw, nf) * nf;
+      }}
+      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
       if (q < 0.5 && qo == 0.0) {{
         let nb = cell(x + {cx}, y + {cy}, z + {cz});
         v = 2.0 * q * fj + (1.0 - 2.0 * q) * pop({j}u, nb) + corr;
@@ -339,7 +355,7 @@ fn wgsl_step(fp16: bool) -> String {
         v = (fj + (2.0 * q - 1.0) * pop({i}u, idx) + corr) / (2.0 * q);
       }}
       let mom = fj + v + {w2};
-      fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uw * (fj - v);
+      fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uwl * (fj - v);
     }}{ground} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
@@ -475,6 +491,20 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {{
   return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
 }}
 
+fn oct_decode(k: f32) -> vec3<f32> {{
+  let iu = floor(k / 2048.0);
+  let iv = k - iu * 2048.0;
+  var u = iu / 2047.0 * 2.0 - 1.0;
+  var v = iv / 2047.0 * 2.0 - 1.0;
+  let z = 1.0 - abs(u) - abs(v);
+  if (z < 0.0) {{
+    let a = u;
+    u = (1.0 - abs(v)) * sign(a);
+    v = (1.0 - abs(a)) * sign(v);
+  }}
+  return normalize(vec3<f32>(u, v, z));
+}}
+
 fn absorb(x: i32, y: i32, z: i32) -> f32 {{
   // Aux Reynolds de maille modérés, la viscosité suffit à amortir les ondes ;
   // les bandes y ajouteraient un confinement (traînée de la sphère +1 % à Re = 20).
@@ -518,22 +548,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var fsum = vec3<f32>(0.0);
   // Loi de paroi : glissement tangentiel tiré de la vitesse du pas précédent.
   var uw = vec3<f32>(0.0);
+  // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
+  var nuw = -1.0;
   if (P.sa == 1u && hasWall) {{
-    let gw = wallGeo[wk];
+    let gw0 = wallGeo[wk];
+    // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
+    let edge = gw0.w < 0.0;
+    let gw = vec4<f32>(gw0.xyz, abs(gw0.w));
     let u0 = macroBuf[idx].xyz;
-    let tv = u0 - dot(u0, gw.xyz) * gw.xyz;
-    let ut = length(tv);
-    let yw = max(0.1, gw.w);
-    var ut2 = spalding_utau(ut, yw);
+    // Vitesse tangentielle du nœud et sa distance à la paroi.
+    let tv0 = u0 - dot(u0, gw.xyz) * gw.xyz;
+    let ut0 = length(tv0);
+    let y0 = max(0.1, gw.w);
+    var ut = ut0;
+    var yw = y0;
     {{
-      // Entrée de la loi de paroi relevée une maille plus loin le long de la
-      // normale (Kawai et Larsson 2012) : au premier nœud, l'erreur numérique
-      // et de sous-maille décale le profil logarithmique (log-layer mismatch).
-      // Repli sur le nœud lui-même si un voisin est solide.
-      let ps = vec3<f32>(f32(x), f32(y), f32(z)) + gw.xyz;
+      // Loi de paroi alimentée à une hauteur fixe h = WM_H au-dessus du pied
+      // de la normale (Kawai et Larsson 2012) : au premier nœud, l'erreur
+      // numérique et de sous-maille décale le profil logarithmique, et la
+      // distance du nœud à la paroi saute d'une maille quand la paroi
+      // traverse une rangée de nœuds. Repli sur le nœud si un voisin de
+      // l'interpolation est solide, ou si le point relevé n'est pas à la
+      // hauteur h de la paroi la plus proche (bord mince, coin : le relevé
+      // tomberait près d'une autre paroi).
+      let ps = vec3<f32>(f32(x), f32(y), f32(z)) + (WM_H - gw.w) * gw.xyz;
       let i0 = vec3<i32>(floor(ps));
       let fr = ps - vec3<f32>(i0);
       var us3 = vec3<f32>(0.0);
+      var ds = 0.0;
       var ok = true;
       for (var c = 0u; c < 8u; c++) {{
         let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
@@ -543,12 +585,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         if (wall[ci] >= 0xfffffffeu) {{ ok = false; break; }}
         let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
         us3 += wv.x * wv.y * wv.z * macroBuf[ci].xyz;
+        ds += wv.x * wv.y * wv.z * wdist[ci];
       }}
-      if (ok) {{
-        let ts = us3 - dot(us3, gw.xyz) * gw.xyz;
-        ut2 = spalding_utau(length(ts), yw + 1.0);
+      if (ok && abs(ds - WM_H) < 0.5) {{
+        ut = length(us3 - dot(us3, gw.xyz) * gw.xyz);
+        yw = WM_H;
       }}
     }}
+    var ut2 = spalding_utau(ut, yw);
     if (P.xtr > 0.0) {{
       // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
       let xl = lam_xl(x, y);
@@ -558,11 +602,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         ut2 = ut * sqrt(0.5 * cf);
       }}
     }}
-    utau[wk] = ut2;
-    if (ut >= 1e-12) {{
-      let us = max(0.0, ut - ut2 * ut2 * yw / (P.nu + KAPPA * ut2 * yw));
-      uw = tv * (us / ut);
+    utau[4u * wk] = ut2;
+    // Couche pariétale [0, h] de viscosité uniforme ν_t = κ u_τ h (celle de
+    // la loi de paroi à la hauteur de raccord) : profil linéaire de pente
+    // τ_p / (ν + ν_t), et la paroi glisse à la vitesse que ce profil donne en
+    // y = 0 depuis le nœud, u_n − pente · y_n. La vitesse extrapolée à la
+    // paroi ne dépend plus de la place du nœud dans la maille (avec
+    // u_n − u_τ²y_n/(ν + κu_τy_n), elle sautait d'environ u_τ ln(y)/κ d'un
+    // nœud à l'autre quand la paroi traverse une rangée : marches de
+    // pression, volets Gurney parasites, portance qui croît en affinant).
+    nuw = KAPPA * ut2 * yw;
+    var usv = vec3<f32>(0.0);
+    if (edge) {{
+      // Arête vive : l'écoulement y décolle et la loi de paroi (couche
+      // limite attachée le long d'une face) ne s'applique pas ; sans elle,
+      // la paroi presque glissante laisse croître la vitesse de contournement
+      // de l'arête (singulière en non visqueux) jusqu'à la divergence.
+      nuw = -1.0;
+    }} else if (ut0 >= 1e-12) {{
+      // Profil monotone : la paroi ne glisse pas plus vite que ne le permet
+      // aussi la vitesse relevée à h (u_h − pente · h). Les deux estimations
+      // coïncident en régime établi ; la borne arrête un nœud qui
+      // s'emballerait (un nœud presque à la paroi glisse presque librement
+      // et rien d'autre ne le retient).
+      let us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw)));
+      usv = tv0 * (us / ut0);
     }}
+    // Relaxation sur une dizaine de pas : une paroi qui suit à chaque pas la
+    // vitesse de son propre nœud (glissement presque libre près de la paroi)
+    // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
+    // 0,02 : mêmes efforts à 0,3 % près).
+    let prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+    uw = prev + 0.1 * (usv - prev);
+    utau[4u * wk + 1u] = uw.x;
+    utau[4u * wk + 2u] = uw.y;
+    utau[4u * wk + 3u] = uw.z;
   }}
   g[0] = pop(0u, idx);
 {pull}
@@ -580,7 +654,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let pyz = {pyz} - rho * u.y * u.z;
   var tau = P.tau0;
   if (P.sa == 1u) {{
-    tau += 3.0 * nu_turb(nut[idx]);
+    // Nœud pariétal : la viscosité de la couche [0, h] supposée par le
+    // glissement, pour que la contrainte transmise soit τ_p.
+    tau += 3.0 * select(nu_turb(nut[idx]), nuw, nuw >= 0.0);
   }}
   if (u32(x) > P.spongeStart) {{
     let s = f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart));
@@ -1363,6 +1439,9 @@ pub struct SurfaceForces {
     /// paroi et frottement), pour le moment de tangage et la répartition en
     /// envergure.
     pub loads: Vec<([f64; 3], [f64; 3])>,
+    /// Par triangle (même ordre que `loads`) : normale sortante et pression
+    /// à la paroi (unités du réseau, p = (ρ − 1)/3).
+    pub walls: Vec<([f64; 3], f64)>,
 }
 
 impl SurfaceForces {
@@ -1371,7 +1450,11 @@ impl SurfaceForces {
     }
 }
 
+/// Hauteur de raccord de la loi de paroi, en mailles de la grille.
+pub const WM_H: f64 = 2.0;
+
 /// u_τ de la loi de Spalding pour la vitesse tangentielle `ut` à la distance `y`.
+
 pub fn spalding_utau(ut: f64, y: f64, nu: f64) -> f64 {
     if !(ut > 1e-12) {
         return 0.0;
@@ -1437,6 +1520,20 @@ fn buf_entry(binding: u32, buffer: &wgpu::Buffer, size: Option<u64>) -> wgpu::Bi
             size: size.and_then(wgpu::BufferSize::new),
         }),
     }
+}
+
+/// Normale unitaire codée en un flottant (projection octaédrique, 2 × 11 bits
+/// en un entier exact) ; `oct_decode` dans les shaders.
+fn oct_encode(n: [f64; 3]) -> f32 {
+    let s = n[0].abs() + n[1].abs() + n[2].abs();
+    let (mut u, mut v) = if s > 0.0 { (n[0] / s, n[1] / s) } else { (0.0, 0.0) };
+    if n[2] < 0.0 {
+        let (a, b) = (u, v);
+        u = (1.0 - b.abs()) * a.signum();
+        v = (1.0 - a.abs()) * b.signum();
+    }
+    let q = |x: f64| ((x * 0.5 + 0.5) * 2047.0).round().clamp(0.0, 2047.0);
+    (q(u) * 2048.0 + q(v)) as f32
 }
 
 /// Fraction q ∈ ]0, 1] du lien p → p + d côté fluide (dichotomie).
@@ -1647,6 +1744,11 @@ impl Gpu3D {
             }
         }
         let mut qs: Vec<f32> = Vec::new();
+        // Normale de la face touchée par chaque lien (codage octaédrique).
+        let mut qn: Vec<f32> = Vec::new();
+        // Plus petit cosinus entre les normales des faces que touchent les
+        // liens de chaque maille pariétale (arêtes vives : < 0,5).
+        let mut edge_cos: Vec<f32> = Vec::new();
         let mut k = 0u32;
         // Mailles fluides qui ne portent que des liens de paroi mince (affichage).
         let mut thin: Vec<usize> = Vec::new();
@@ -1658,6 +1760,8 @@ impl Gpu3D {
                         continue;
                     }
                     let mut row = [0f32; 18];
+                    let mut nrow = [0f32; 18];
+                    let mut nraw: Vec<[f64; 3]> = Vec::new();
                     let mut any = false;
                     let mut beside_solid = false;
                     for i in 1..19 {
@@ -1670,16 +1774,23 @@ impl Gpu3D {
                         // Maillage : intersection exacte du lien avec les
                         // triangles, y compris entre deux mailles fluides
                         // (paroi plus mince qu'une maille : aile, dérive…).
-                        let hit = body.mesh.as_ref().and_then(|m| m.segment_hit(p, d));
+                        let hit = body.mesh.as_ref().and_then(|m| m.segment_hit_normal(p, d));
                         let solid = wall[idx(sx, sy, sz)] == SOLID;
                         beside_solid |= solid;
                         let q = match (hit, solid) {
-                            (Some(t), _) => Some((t as f32).clamp(0.02, 1.0)),
-                            (None, true) => Some(link_q(body, p, d)),
+                            (Some((t, n)), _) => Some(((t as f32).clamp(0.02, 1.0), Some(n))),
+                            (None, true) => Some((link_q(body, p, d), None)),
                             (None, false) => None,
                         };
-                        if let Some(q) = q {
+                        if let Some((q, n)) = q {
                             row[i - 1] = q;
+                            // Sans triangle : gradient de la distance juste devant la paroi.
+                            let n = n.unwrap_or_else(|| {
+                                let t = (q as f64 - 0.25).max(0.0);
+                                body.wall_normal([p[0] + t * d[0], p[1] + t * d[1], p[2] + t * d[2]]).0
+                            });
+                            nrow[i - 1] = oct_encode(n);
+                            nraw.push(n);
                             any = true;
                         }
                     }
@@ -1687,6 +1798,14 @@ impl Gpu3D {
                         k += 1;
                         wall[c] = k;
                         qs.extend_from_slice(&row);
+                        qn.extend_from_slice(&nrow);
+                        let mut cmin = 1.0f64;
+                        for a in 0..nraw.len() {
+                            for b in a + 1..nraw.len() {
+                                cmin = cmin.min((0..3).map(|t| nraw[a][t] * nraw[b][t]).sum::<f64>());
+                            }
+                        }
+                        edge_cos.push(cmin as f32);
                         if !beside_solid {
                             thin.push(c);
                         }
@@ -1695,6 +1814,8 @@ impl Gpu3D {
             }
         }
         let wall_count = k as usize;
+        // Normales des liens rangées après les fractions q (même tampon).
+        qs.extend_from_slice(&qn);
         // Maille de chaque lien pariétal (numéro → maille), pour les efforts par maille.
         let rest_force: Vec<[f32; 3]> = qs
             .chunks_exact(18)
@@ -1788,12 +1909,17 @@ impl Gpu3D {
                     cells[w as usize - 1] = c;
                 }
             }
+            // Distance négative : maille d'arête vive (faces touchées à plus
+            // de 60° l'une de l'autre).
             let geo: Vec<[f32; 4]> = cells
                 .par_iter()
-                .map(|&c| {
+                .enumerate()
+                .map(|(w, &c)| {
                     let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
                     let (nrm, d) = body.wall_normal(p);
-                    [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d as f32]
+                    let d = (d as f32).max(0.1);
+                    let d = if edge_cos[w] < 0.5 { -d } else { d };
+                    [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d]
                 })
                 .collect();
             (geo,)
@@ -1832,7 +1958,8 @@ impl Gpu3D {
         };
         let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
         let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist));
-        let utau_buf = mk("utau3d", (4 * wall_count) as u64, st);
+        // Par maille pariétale : u_τ et vitesse de glissement relaxée.
+        let utau_buf = mk("utau3d", (16 * wall_count) as u64, st);
         let nsa = if sa { 4 * n as u64 } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if sa {
@@ -2254,6 +2381,24 @@ impl Gpu3D {
     }
 
     /// Grilles fines : (dimensions, mailles pariétales) de la plus fine, et facteur.
+    /// Champs (u, ρ) de la grille la plus fine, dimensions, origine (mailles
+    /// de la veine) et rapport de raffinement (diagnostic).
+    pub fn finest_macros(&mut self) -> (Vec<[f32; 4]>, [usize; 3], [f64; 3], f64) {
+        match self.refine.as_mut() {
+            Some(r) => {
+                let k = r.levels.len();
+                let org = r.origin[k - 1];
+                let g = r.levels.last_mut().unwrap();
+                let d = [g.nx, g.ny, g.nz];
+                (g.macros(), d, org, (1u64 << k) as f64)
+            }
+            None => {
+                let d = [self.nx, self.ny, self.nz];
+                (self.macros(), d, [0.0; 3], 1.0)
+            }
+        }
+    }
+
     pub fn finest(&self) -> Option<([usize; 3], usize, usize)> {
         let r = self.refine.as_ref()?;
         let g = r.levels.last()?;
@@ -2345,10 +2490,16 @@ impl Gpu3D {
                 Some(v2) => p + h * (p - (v2[3] - 1.0) / 3.0),
                 None => p,
             };
-            let un = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
-            let ut = [0, 1, 2].map(|k| v[k] - un * n[k]);
+            // Frottement : loi de paroi alimentée à la hauteur de raccord du
+            // calcul (WM_H mailles), comme le glissement.
+            let (vf, hf) = match sample([0, 1, 2].map(|k| c[k] + WM_H.max(h) * n[k])) {
+                Some(vf) => (vf, WM_H.max(h)),
+                None => (v, h),
+            };
+            let un = vf[0] * n[0] + vf[1] * n[1] + vf[2] * n[2];
+            let ut = [0, 1, 2].map(|k| vf[k] - un * n[k]);
             let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
-            let utau = spalding_utau(utm, h, nu);
+            let utau = spalding_utau(utm, hf, nu);
             let tau = v[3] * utau * utau;
             let mut fl = [0.0; 3];
             for k in 0..3 {
@@ -2361,6 +2512,7 @@ impl Gpu3D {
                 }
             }
             out.loads.push(([0, 1, 2].map(|k| org[k] + c[k] / s), fl.map(|v| v / (s * s))));
+            out.walls.push((n, pw));
         }
         // Surfaces de la grille fine ramenées aux mailles de la veine.
         let s2 = s * s;
@@ -2636,5 +2788,44 @@ impl Gpu3D {
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
         wgsl_step(fp16)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::oct_encode;
+
+    /// Décodage identique à `oct_decode` (WGSL).
+    fn oct_decode(k: f32) -> [f64; 3] {
+        let k = k as f64;
+        let iu = (k / 2048.0).floor();
+        let iv = k - iu * 2048.0;
+        let (mut u, mut v) = (iu / 2047.0 * 2.0 - 1.0, iv / 2047.0 * 2.0 - 1.0);
+        let z = 1.0 - u.abs() - v.abs();
+        if z < 0.0 {
+            let a = u;
+            u = (1.0 - v.abs()) * a.signum();
+            v = (1.0 - a.abs()) * v.signum();
+        }
+        let l = (u * u + v * v + z * z).sqrt();
+        [u / l, v / l, z / l]
+    }
+
+    #[test]
+    fn normale_octaedrique() {
+        // Normales réparties sur la sphère : erreur angulaire < 0,2°.
+        let mut worst: f64 = 1.0;
+        for i in 0..400 {
+            let t = (i as f64 + 0.5) / 400.0;
+            let z = 1.0 - 2.0 * t;
+            let r = (1.0 - z * z).sqrt();
+            let ph = i as f64 * 2.399_963;
+            let n = [r * ph.cos(), r * ph.sin(), z];
+            let k = oct_encode(n);
+            assert_eq!(k, k.round(), "entier exact en f32");
+            let m = oct_decode(k);
+            worst = worst.min(n[0] * m[0] + n[1] * m[1] + n[2] * m[2]);
+        }
+        assert!(worst > (0.2f64).to_radians().cos(), "cos = {worst}");
     }
 }
