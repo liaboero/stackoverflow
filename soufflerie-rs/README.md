@@ -803,6 +803,52 @@ l'écoulement au premier nœud, rend une couche limite trop mince pour
 décambrer le profil ; la résolution du bord d'attaque n'explique qu'une
 partie de la traînée.
 
+### D'où vient l'excès de portance
+
+Trois pistes écartées, une confirmée.
+
+- *Interférence de la veine : non.* Bords latéraux périodiques : la veine
+  simule une rangée d'ailes, voisines à 2 envergures environ avec
+  `--marge 0.4`. Une somme sur le réseau des tourbillons en fer à cheval
+  images prévoit +4 % de portance sur l'aile AR 4 si rien ne les amortit.
+  Calculée (AR 4, 4°, ×2) avec `--marge` 0,4, 0,8 et 1,2 (2, 13 et 39 M
+  mailles), la portance du bilan vaut 0,2682, 0,2683 et 0,2693 : les bandes
+  absorbantes effacent les images.
+- *Écoulement amont : non.* Vitesse et masse volumique moyennes sur les
+  sections de la veine à 0,2 % de l'entrée près (`freestream3d`). Le
+  nombre de Mach du réseau (u = 0,1, Ma = 0,17) ajoute environ 1 % à la
+  portance d'une aile d'allongement 4 (Prandtl–Glauert).
+- *Résolution : non.* La portance croît encore de ×2 à ×4 (0,268, 0,272)
+  et de ×4 à ×8 (TR-1208 8° : 0,545, 0,554).
+- *Décambrage visqueux absent : oui.* En glissement libre, l'aile AR 4
+  porte autant qu'avec la loi de paroi (0,299 et 0,301, échange, ×2) :
+  la couche limite du calcul ne retire rien à la portance. Dans
+  l'écoulement réel, elle lui retire 6 à 10 % (NACA 0012, Re = 6·10⁶,
+  10° : Ladson 1,08 contre 1,19 non visqueux). À ces résolutions, la couche
+  limite tient presque entière sous la hauteur de raccord de la loi de
+  paroi (2 mailles, 3 % de la corde à ×8) : son épaisseur de déplacement,
+  qui grandit vers le bord de fuite de l'extrados, n'existe pas dans le
+  calcul. La loi de paroi locale ne peut pas la rendre : à hauteur fixe,
+  son défaut de débit (∝ u_τ h) diminue vers le bord de fuite au lieu de
+  croître.
+
+Il faudrait un couplage visqueux–non visqueux : épaisseur de déplacement
+tirée d'une couche limite intégrale le long de la surface, imposée par
+transpiration (vitesse normale d(u_e δ*)/ds aux parois). La référence 2D
+elle-même ne le fait pas assez : la méthode des panneaux + couche limite
+(couplage par profil épaissi, refermé sur la position moyenne des deux
+faces au bord de fuite) ne retire que 1 % de portance (`decamber2d` :
+1,182 contre 1,193 à Re = 6·10⁶, 10°, 20 itérations ; le test garde
+1,168 à une itération, valeur de l'application web). Essayé : couplage par
+sources équivalentes sur le profil et le sillage (Lighthill, Lock), condition
+de Kutta par égalité des vitesses au bord de fuite. Stable seulement avec la
+vitesse de la couche limite figée au-delà de 95 % de corde (sinon la
+décélération vers le bord de fuite fermé du contour fait diverger δ*), il
+ne retire alors que 1,2 % (4°) et 1,7 % (10°) : la croissance de δ* sur les
+derniers pour cent de l'extrados, qui fait l'essentiel du décambrage, est
+perdue. Un couplage simultané (Newton, comme XFOIL) serait nécessaire ;
+non conservé.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -822,6 +868,8 @@ arguments en tête de chaque fichier) :
 | `te_map`, `voxel_check`, `wing_vox`, `wing_offset`, `link_sum` | voxelisation : bord de fuite, volume conservé, décalage d'une demi-maille, poussée de la pression de référence |
 | `refine3d_check`, `sa3d_check`, `transition3d`, `noise3d`, `time_mesh` | raffinement contre grille uniforme, Spalart–Allmaras 3D, transition imposée, bruit, coût de mise en place |
 | `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
+| `freestream3d` | vitesse et masse volumique réellement vues par la maquette, le long de la veine et par section |
+| `decamber2d` | décambrage visqueux de la méthode des panneaux + couche limite selon les itérations du couplage |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
 une option de maquette retirée depuis ; son programme n'est pas conservé.
