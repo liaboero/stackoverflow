@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use lbm::cpu::{Collision, LesMode};
-use lbm::panel::{compressible_correction, panel_solve, section_coefficients, PanelOptions, PanelResult, PanelShape};
+use lbm::panel::{compressible_correction, panel_solve, section_coefficients, Coupling, PanelOptions, PanelResult, PanelShape};
 use lbm::stats::{analyze, Analysis};
 use lbm::wing::{wing_polar, PolarTable, Sections, Wing, WingParams};
 use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Turbulence, WindTunnel};
@@ -57,6 +57,7 @@ fn usage() -> ! {
          \x20         --turb auto|sa|off (Spalart–Allmaras et loi de paroi dès Re = 5·10⁴ en auto, 2D et 3D)\n\
          \x20         --transition free|turb (libre : prédite par la couche limite intégrale)\n\
          \x20         --mach 0.3 (panel : correction de compressibilité)\n\
+         \x20         --couplage faible|newton (panel : profil épaissi itéré, ou couplage simultané à la XFOIL)\n\
          \x20         --xtr 0.3 (run3d, loi de paroi : couche limite laminaire jusqu'à 30 % de la corde locale)\n\
          \x20         --stl : --unite mm|cm|m|in --ecoulement +x --haut +z --alpha 0 --beta 0 (dérapage)\n\
          \x20                 --lref (longueur de réf., unités du fichier) --sref (surface) --vitesse 30 (m/s, fixe Re) --fluide air|eau\n\
@@ -305,10 +306,17 @@ fn alpha_range(a: &Args, default: &str) -> Vec<f64> {
 
 /// Méthode des panneaux + couche limite intégrale pour la maquette de `cfg`.
 fn panel_of(cfg: &TunnelConfig, alpha: f64) -> Option<PanelResult> {
+    panel_coupled(cfg, alpha, Coupling::Weak)
+}
+
+fn panel_coupled(cfg: &TunnelConfig, alpha: f64, coupling: Coupling) -> Option<PanelResult> {
     let shape = PanelShape::from_shape(cfg.shape, &cfg.params)?;
-    let opts = match cfg.transition {
-        Transition::Free => PanelOptions::free(cfg.re),
-        Transition::Turbulent => PanelOptions::tripped(cfg.re, 0.0),
+    let opts = PanelOptions {
+        coupling,
+        ..match cfg.transition {
+            Transition::Free => PanelOptions::free(cfg.re),
+            Transition::Turbulent => PanelOptions::tripped(cfg.re, 0.0),
+        }
     };
     let r = panel_solve(&shape, alpha, &opts);
     (r.cl.is_finite() && r.cd.is_finite()).then_some(r)
@@ -335,9 +343,14 @@ fn cmd_panel(a: &Args) {
         cfg.re = 1e6;
     }
     let mach = a.get("mach", 0.0f64);
+    let coupling = match a.get("couplage", "faible".to_string()).as_str() {
+        "faible" | "weak" => Coupling::Weak,
+        "newton" => Coupling::Newton,
+        _ => usage(),
+    };
     let alphas = alpha_range(a, "-4:16:1");
     eprintln!(
-        "{} · Re = {} · transition {}{}",
+        "{} · Re = {} · transition {}{}{}",
         match cfg.shape {
             ShapeKind::Naca => format!("NACA {}", cfg.params.naca.code()),
             k => k.label().to_string(),
@@ -352,10 +365,15 @@ fn cmd_panel(a: &Args) {
             format!(" · Mach {mach}")
         } else {
             String::new()
+        },
+        if coupling == Coupling::Newton {
+            " · couplage simultané (Newton)"
+        } else {
+            ""
         }
     );
     println!("alpha_deg,Cz,Cx,Cm,Cz_attache,x_tr_extrados,x_tr_intrados,x_decollement,kirchhoff,Cp_min,critique");
-    let rows: Vec<_> = alphas.par_iter().map(|&al| (al, panel_of(&cfg, al))).collect();
+    let rows: Vec<_> = alphas.par_iter().map(|&al| (al, panel_coupled(&cfg, al, coupling))).collect();
     for (al, r) in rows {
         let Some(r) = r else {
             println!("{al},,,,,,,,,,");

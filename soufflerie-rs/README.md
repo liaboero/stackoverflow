@@ -846,8 +846,110 @@ vitesse de la couche limite figée au-delà de 95 % de corde (sinon la
 décélération vers le bord de fuite fermé du contour fait diverger δ*), il
 ne retire alors que 1,2 % (4°) et 1,7 % (10°) : la croissance de δ* sur les
 derniers pour cent de l'extrados, qui fait l'essentiel du décambrage, est
-perdue. Un couplage simultané (Newton, comme XFOIL) serait nécessaire ;
-non conservé.
+perdue. Un couplage simultané (Newton, comme XFOIL) était nécessaire : il
+est décrit ci-dessous et retire bien 8,5 % de portance à 10°.
+
+### Couplage simultané (Newton) en 2D
+
+`PanelOptions { coupling: Coupling::Newton, .. }` (`lbm/src/vii.rs`),
+`soufflerie panel --couplage newton` ; par défaut, le couplage faible reste
+celui de l'application web (`PanelOptions::free` et `tripped` inchangés).
+Méthode de XFOIL (Drela & Giles 1987, Drela 1989) :
+
+- *Écoulement potentiel* : mêmes panneaux tourbillons (Kuethe & Chow,
+  80 panneaux par face), plus des sources de transpiration σ = d(ue δ*)/ds
+  sur le profil et sur un sillage d'une corde, tracé le long de la ligne de
+  courant non visqueuse issue du bord de fuite (bissectrice sur les deux
+  premiers centièmes). La condition de glissement est écrite du côté
+  intérieur de la nappe : l'intérieur reste au repos et la vitesse normale
+  extérieure vaut σ. ue = ue_inv + D·m, m = ue δ*, D matrice d'influence
+  (sources → tourbillons par le glissement et la condition de Kutta →
+  vitesse aux stations). Sources à densité linéaire, continues aux nœuds,
+  valeurs nodales par différences compactes de m entre stations voisines
+  (des sources uniformes par panneau, vues aux points de contrôle, ne voient
+  pas un m en dents de scie : il apparaissait dans les zones décollées
+  laminaires). Vérifié sur une bosse de δ* : la transpiration rend la
+  portance du corps épaissi géométriquement à 2 % près de l'écart (essai
+  `transpiration_contre_corps_epaissi`).
+- *Couche limite* : intégrales de quantité de mouvement et d'énergie
+  cinétique, différences logarithmiques de XFOIL (BLDIF), décentrement selon
+  Hk. Fermetures de Drela & Giles (laminaire : H*, Cf, dissipation) et de
+  Drela (turbulent : H* , frottement de Swafford, dissipation
+  Cf/2·Us + Cτ(1 − Us), équation de retard de Green pour √Cτ, K_C = 5,6,
+  G–β A = 6,7, B = 0,75 ; frottement et dissipation bornés par leurs valeurs
+  laminaires aux faibles Re_θ, comme XFOIL). Sillage : Cf = 0, dissipation
+  doublée, constante de retard 0,9. Point d'arrêt : similitude de Hiemenz.
+- *Transition* : enveloppe eᴺ de Drela & Giles (N_crit = 9) avec la rampe
+  de XFOIL autour du Re_θ critique ; point de transition interpolé dans
+  l'intervalle, N₂ implicite (TRCHEK2), √Cτ initial
+  1,8 e^(−3,3/(Hk−1)) √Cτ_éq ; transition imposée par `x_trip`.
+- *Newton* : inconnues θ, m et N ou √Cτ à chaque station du profil et du
+  sillage (600 inconnues), jacobienne par différences finies locales
+  (vérifiée contre une différentiation du système complet), y compris la
+  sensibilité de l'abscisse curviligne au déplacement du point d'arrêt.
+  Comme XFOIL, ue est une variable dont l'écart à ue_inv + D·m est résorbé
+  par le pas de Newton ; pas limités (variations relatives entre −50 % et
+  +150 %). Départ : marche directe à ue non visqueuse, inverse (Hk imposé)
+  au décollement. Rien n'est figé au bord de fuite. Si Newton échoue, il
+  repart de 0° par pas de 2° au plus. Convergence en 5 à 25 itérations,
+  0,3 à 2 s par incidence.
+- *Traînée* : Squire–Young au bout du sillage.
+
+Validation (`decamber2d`, Cz/Cz_inv : rapport à la portance non visqueuse
+des mêmes panneaux) :
+
+| Cas | α | Cz | Cz/Cz_inv | Cx | Référence |
+| --- | --- | --- | --- | --- | --- |
+| NACA 0012, Re = 6·10⁶, déclenchée | 0° | 0 | — | 0,00826 | TMR (SA) 0,00809 |
+| | 4° | 0,4462 | 0,930 | 0,00879 | |
+| | 10° | 1,0924 | 0,915 | 0,01222 | TMR 1,0909 / 0,01231 ; Ladson ≈ 1,08 |
+| | 15° | 1,5526 | 0,874 | 0,01958 | TMR 1,5461 / 0,02124 |
+| NACA 0012, Re = 10⁶, libre | 0° | 0 | — | 0,00523 | transition 0,70 / 0,70 |
+| | 2° | 0,2074 | 0,864 | 0,00564 | transition 0,49 / 0,87 |
+| | 4° | 0,4251 | 0,886 | 0,00709 | transition 0,27 / 0,96 |
+| | 6° | 0,6768 | 0,942 | 0,00943 | transition 0,09 / 0,99 |
+| | 8° | 0,9273 | 0,969 | 0,01187 | transition 0,04 / 1,00 |
+| NACA 2412, Re = 3·10⁶, libre | −2° | 0,0186 | — | 0,00569 | |
+| | 0° | 0,2361 | 0,931 | 0,00531 | |
+| | 2° | 0,4504 | 0,912 | 0,00493 | |
+| | 4° | 0,6639 | 0,906 | 0,00548 | |
+| | 8° | 1,1154 | 0,923 | 0,00959 | |
+| | 10° | 1,3074 | 0,906 | 0,01155 | |
+
+À Re = 6·10⁶, la perte de portance visée est atteinte : 8,5 % à 10° (TMR et
+Ladson : 8,6 à 9,5 % sous la valeur non visqueuse 1,193), à 0,1 % de la
+portance TMR ; 12,6 % à 15°. La traînée est à 2 % de TMR à 0° et 10°, 8 %
+en dessous à 15°. Le résultat ne dépend ni du nombre de panneaux (rapport
+0,916, 0,915 et 0,914 avec 60, 80 et 120 panneaux par face) ni de la
+longueur du sillage (½, 1 et 2 cordes : 1,0855 à 1,0858 avant le passage
+aux sources linéaires). Pour le NACA 2412, α₀ ≈ −2,2° et la pente
+0,107 par degré entre 0 et 4° ; Cm ≈ −0,05. Abbott & von Doenhoff donnent
+α₀ ≈ −2° et une pente voisine (valeurs lues sur les courbes, à revérifier
+avant d'en faire un critère) ; la traînée minimale calculée (0,0049) est
+plus basse que leur 0,006 environ, la transition libre calculée tombant
+plus en arrière que sur la maquette.
+
+Le couplage faible, lui, ne retire que 1 à 2 % ; il reste l'option par
+défaut (valeurs de l'application web).
+
+Limites :
+
+- *Transition libre aux faibles Re* : à Re = 10⁶, la perte relative de
+  portance diminue avec l'incidence (14 % à 2°, 3 % à 8°). Elle ne dépend pas
+  du maillage (13,5 et 13,6 % à 2° avec 60 et 120 panneaux) : c'est la
+  réponse du modèle à une transition très dissymétrique (extrados turbulent
+  bien avant l'intrados, qui décolle en laminaire près du bord de fuite).
+  Faute de polaire XFOIL de référence sous la main, elle n'est pas validée.
+- *Convergence* : Newton échoue (Cz et Cx vides, `NaN`) quand la transition
+  tombe sur les toutes dernières stations du bord de fuite (NACA 2412,
+  Re = 3·10⁶, 6°) et au-delà de 10° environ à Re = 10⁶ et de 12° pour le
+  2412 (bulbe laminaire au bord d'attaque). La continuation en incidence
+  ne suffit pas toujours. Le point de transition ne se déplace que d'une
+  station par itération.
+- Pas de bord de fuite épais (profils refermés), pas de compressibilité
+  dans la couche limite, pas de décrochage au-delà de ce que la couche
+  limite intégrale décrit (la correction de Kirchhoff n'est pas appliquée
+  au couplage simultané).
 
 ### Programmes de diagnostic
 
@@ -869,7 +971,7 @@ arguments en tête de chaque fichier) :
 | `refine3d_check`, `sa3d_check`, `transition3d`, `noise3d`, `time_mesh` | raffinement contre grille uniforme, Spalart–Allmaras 3D, transition imposée, bruit, coût de mise en place |
 | `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
 | `freestream3d` | vitesse et masse volumique réellement vues par la maquette, le long de la veine et par section |
-| `decamber2d` | décambrage visqueux de la méthode des panneaux + couche limite selon les itérations du couplage |
+| `decamber2d` | décambrage visqueux 2D : couplage faible (1 et 20 itérations) contre couplage simultané (Newton), traînée, transition ; `decamber2d 0012 6e6 0 0:15:1`, `decamber2d 2412 3e6 libre -2:12:2` |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
 une option de maquette retirée depuis ; son programme n'est pas conservé.
@@ -1026,7 +1128,9 @@ Options de calcul : `--shape cylinder|square|ellipse|plate|naca|triangle`,
 `--transition free|turb` (libre : position prédite par la couche limite
 intégrale, paroi laminaire en amont ; turb : couche limite turbulente dès le
 bord d'attaque). `panel` accepte aussi `--mach 0.5` (Prandtl–Glauert,
-Kármán–Tsien, détection de la zone supersonique locale). Sans sous-commande,
+Kármán–Tsien, détection de la zone supersonique locale) et `--couplage
+newton` (couplage visqueux–non visqueux simultané, voir « Couplage
+simultané (Newton) en 2D » ; par défaut `faible`). Sans sous-commande,
 les mêmes options règlent l'interface au démarrage, avec `--field
 vorticity|speed|pressure|eddy` et `--graph history|cp|cf`.
 
