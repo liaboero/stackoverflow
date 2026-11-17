@@ -1744,6 +1744,22 @@ fn edge_boxes(tris: &[crate::stl::Tri], l: f64, dims: [usize; 3], le: bool, te: 
     Ok(out)
 }
 
+/// Épaisseurs (mailles de chaque couche) de couches pariétales imbriquées
+/// rendues compatibles : une couche fine d'épaisseur D est remplie, à D
+/// mailles fines (D/2 parentes) de la paroi, depuis sa couche parente, avec
+/// un pochoir de ±2 mailles parentes et la bande de raccord ; la couche
+/// parente doit donc s'étendre au-delà : D_parent ≥ D/2 + 2 MARGIN + 3.
+/// Sinon les fantômes de la couche fine sont remplis depuis des mailles que
+/// la couche parente ne calcule pas (écoulement faux).
+pub fn nested_bands(bands: &[f64]) -> Vec<f64> {
+    let mut b = bands.to_vec();
+    let m = (2 * crate::refine3d::MARGIN3 + 3) as f64;
+    for i in (0..b.len().saturating_sub(1)).rev() {
+        b[i] = b[i].max((0.5 * b[i + 1] + m).ceil());
+    }
+    b
+}
+
 /// Côté des blocs du stockage creux (mailles).
 pub(crate) const SB: usize = 8;
 const SB3: usize = SB * SB * SB;
@@ -2400,6 +2416,7 @@ impl Gpu3D {
         let mut parent = (0..full).collect::<Vec<usize>>();
         let mut lev_depth: Vec<u32> = (1..=full as u32).collect();
         let mut core: Vec<Option<[[f64; 3]; 2]>> = vec![None; full];
+        let bands = nested_bands(bands);
         if !bands.is_empty() {
             // Couches pariétales imbriquées : chacune deux fois plus fine que
             // la précédente, sur une épaisseur `bands[i]` (mailles de cette

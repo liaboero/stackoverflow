@@ -1248,6 +1248,16 @@ mailles ×16 ne font que 6 % de la corde, moins que la couche de 8 mailles
 (couche limite, zone de la loi de paroi, écoulement du bord de fuite), pas
 un nombre de mailles. À vérifier avant de s'y fier.
 
+`--bande-corde f` impose à chaque couche une épaisseur d'au moins f fois
+la longueur de référence (en ses mailles). Premier essai, f = 0,125 :
+épaisseurs 16, 16 et 32 mailles, 34 M mailles, 100 min ; écoulement faux
+dès t* = 5 (Cz 0,03 à 0,06). La couche ×16 de 32 mailles atteignait toute
+l'épaisseur de sa couche parente (16 mailles ×8) : ses fantômes étaient
+remplies depuis des mailles que la couche parente ne calcule pas.
+`nested_bands` impose désormais D_parent ≥ D/2 + 2 MARGIN + 3 (16, 16, 32
+devient 19, 23, 32) ; l'essai à trois couches de 16 mailles respectait
+déjà cette règle, son incohérence a une autre cause. Essai à refaire.
+
 Le rangement des triangles pour la distance au maillage utilisait des
 cases d'une maille quelle que soit la grille : sur une couche ×16, chaque
 recherche parcourait des dizaines de milliers de cases. Les cases ont
