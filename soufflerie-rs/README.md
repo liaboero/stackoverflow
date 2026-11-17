@@ -613,7 +613,9 @@ efforts en régime établi :
   (u_w ← u_w + 0,1 (u_s − u_w)). En régime établi, sans effet : 0,1 ou
   0,02 donnent les mêmes efforts à 0,3 % près.
 - Le glissement est borné par celui que donne aussi la vitesse relevée à h
-  (u_s ≤ u_h − pente · h : profil monotone dans la couche pariétale). Les
+  (profil monotone ; d'abord u_s ≤ u_h − pente · h, désormais
+  u_s ≤ min(u_n, u_h) − pente · y_n, voir « Couche limite de la plaque
+  plane »). Les
   deux estimations coïncident quand le profil est établi ; sans la borne,
   un nœud du bord d'attaque de TR-1208 à 8° s'emballait lentement (vitesse
   maximale stable à 1,37 U jusqu'à t* = 6,5, puis multipliée par trois en
@@ -1087,9 +1089,136 @@ arguments en tête de chaque fichier) :
 | `ibl3d` | couche limite intégrale sur le maillage (θ, H, δ*, v_n par triangle, CSV), profils de vitesse le long de la normale, couplages de transpiration (mode 1 : u_e à WM_H ; mode 2 : déplacement manquant au champ) |
 | `decamber2d` | décambrage visqueux 2D : couplage faible (1 et 20 itérations) contre couplage simultané (Newton), traînée, transition ; `decamber2d 0012 6e6 0 0:15:1`, `decamber2d 2412 3e6 libre -2:12:2` |
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
+| `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
 une option de maquette retirée depuis ; son programme n'est pas conservé.
+
+## Couche limite de la plaque plane : la couche lente est numérique
+
+Le couplage par transpiration avait montré que le champ des ailes porte au
+bord de fuite une couche lente de 4 à 6 mailles, d'épaisseur de déplacement
+environ 4 fois celle d'une vraie couche limite. Cas canonique pour en
+trouver l'origine : `plaque3d`, plaque d'épaisseur ≈ L/16 à bords d'attaque
+et de fuite demi-elliptiques 4:1, alignée sur l'écoulement, d'envergure
+périodique (elle traverse les bords y de la veine, où `Gpu3D::periodic_span`
+retire les bandes absorbantes latérales) : écoulement plan, couche limite
+turbulente dès le bord d'attaque. Profils u(y) de l'extrados moyennés sur
+l'envergure, rapportés à l'écoulement extérieur (droite ajustée entre 0,1 et
+0,2 L et prolongée jusqu'à la paroi : la plaque épaisse a sa propre
+survitesse potentielle, qui décroît en s'éloignant de la paroi) ; sous le
+premier nœud, profil de Spalding du u_τ de la loi de paroi. Épaisseur ajustée
+pour que le premier nœud soit à la même distance (« calage », 0,3 maille
+ici) des deux faces : sinon les deux faces n'ont pas la même couche lente et
+la plaque symétrique porte (±10 % de vitesse extérieure).
+
+**Constat** (borne de glissement d'origine, voir plus bas ; x = 0,5 L,
+Re_L = 10⁶ sauf mention ; δ* et θ en mailles de la
+veine ; théorie : δ* = 0,046 x Re_x^−0,2, θ = 0,036 x Re_x^−0,2,
+Cf = 0,026 Re_x^−1/7, H ≈ 1,3) :
+
+| Cas | δ* | θ | H | Cf (loi de paroi) | δ* / théorie |
+| --- | --- | --- | --- | --- | --- |
+| théorie, L = 64 | 0,107 | 0,083 | 1,29 | 0,00399 | 1 |
+| L = 32 | 0,319 | 0,254 | 1,26 | 0,00307 | 6,0 |
+| L = 64 | 0,271 | 0,212 | 1,28 | 0,00359 | 2,5 |
+| L = 128 | 0,381 | 0,297 | 1,28 | 0,00392 | 1,8 |
+| L = 32 + ×2 | 0,174 | 0,136 | 1,28 | 0,00347 | 3,3 |
+| L = 64, Re = 10⁷ | 0,226 | 0,190 | 1,19 | 0,00242 | 3,4 |
+| L = 64, calage 0,7 | 0,366 | 0,286 | 1,28 | 0,00344 | 3,4 |
+
+(théorie en mailles : × L/64.) La couche lente est numérique :
+- elle couvre toujours 3 à 4 mailles de la grille la plus fine (u/U_e =
+  0,87, 0,92, 0,97, 1,00 aux nœuds 0,3, 1,3, 2,3, 3,3 à L = 64), quand le
+  profil de Coles atteint U_e à 0,65 maille ; δ* reste de 0,2 à 0,4 maille
+  quels que soient L et Re : δ*/L ne converge qu'en 1/L ;
+- elle dépend de la place de la paroi dans la maille (calage 0,3 ou 0,7 :
+  δ* de 0,27 à 0,37) ;
+- la forme du profil est juste (H ≈ 1,27), et le frottement aussi : Cf de la
+  loi de paroi à 10 % de la théorie, frottement transmis par la paroi
+  (échange de quantité de mouvement) égal à ρu_τ² sur la partie plane, et θ
+  croît vers l'aval au rythme Cf/2. L'excès de θ (0,13 à 0,2 maille) est
+  acquis là où la loi de paroi commence, au bord d'attaque.
+
+**Où naît l'excès.** La perte de pression totale de la colonne au-dessus de
+la plaque (∫ (1 − p₀/p₀∞) dz) passe de 0,03 à 0,26 maille sur le nez, entre
+2 et 4 mailles du bord d'attaque, puis ne croît plus que du frottement ; en
+théorie, θ vaut 0,02 maille à cet endroit. Les efforts des mailles pariétales
+du nez sont pourtant ceux du glissement libre : la perte est une dissipation
+dans le fluide, pas une traînée de paroi. Le nez en glissement libre et la
+loi de paroi seulement sur la partie plane : la perte apparaît au raccord, là
+où commence la loi de paroi.
+
+**Causes écartées**, un facteur à la fois (`set_essai`, L = 64, θ à
+mi-plaque 0,21 à 0,22 dans tous les cas sauf mention) :
+- viscosité turbulente de Spalart–Allmaras hors du premier nœud retirée :
+  couche plus mince (2,5 mailles) mais même θ ;
+- sous-maille de Smagorinsky : amortie près de la paroi (Van Driest), −5 à
+  −10 % ; constante divisée par 2 ou par 4, sans effet ; sans sous-maille,
+  le calcul diverge ;
+- viscosité du premier nœud (κ u_τ h ou celle de Spalart–Allmaras), hauteur
+  de raccord h = 1,5 ou 3 mailles, relaxation du glissement, demi-précision :
+  sans effet ;
+- forme du nez : plus émoussé, pire (nez demi-circulaire : θ = 0,30) ; plus
+  effilé (10:1), sans gain ;
+- viscosité du premier nœud réduite (κ u_τ y_n, ou plafond de Clauser
+  0,0168 U δ*) : la paroi transmet alors 2,5 à 4,5 fois ρu_τ² ; avec le
+  rebond, le premier nœud doit garder une viscosité de l'ordre de κ u_τ h ;
+- glissement libre (témoin non visqueux) : il reste un défaut de 2 à 3 % sur
+  3 mailles (δ* ≈ 0,05 à 0,1 maille), perte numérique au bord d'attaque.
+
+**Cause retenue : la borne de monotonie du glissement.** Elle imposait
+u_s ≤ u_h − pente · h : le profil linéaire de la couche pariétale, prolongé
+jusqu'à h, ne devait pas dépasser la vitesse relevée à h. C'est supposer que
+la couche pariétale atteint h. Quand la couche limite est plus mince que h
+(au bord d'attaque, et partout aux résolutions courantes : 0,65 maille ici
+contre h = 2), u_h ≈ u_n et la borne retranche au glissement pente · (h − y_n)
+≈ 2 u_τ, soit 9 % de U ; sur une paroi convexe, où la vitesse potentielle
+décroît en s'éloignant de la paroi (u_n > u_h), davantage. Le premier nœud
+est freiné sans frottement correspondant ; la quantité de mouvement perdue
+reste dans la couche lente. La borne porte désormais sur le profil à la
+hauteur du nœud : u_s ≤ min(u_n, u_h) − pente · y_n. Elle arrête toujours un
+nœud qui s'emballe (u_n ≫ u_h), raison pour laquelle elle avait été
+introduite.
+
+| x = 0,5 L | Borne à h : δ* / θ | Borne au nœud : δ* / θ | Théorie |
+| --- | --- | --- | --- |
+| L = 32 | 0,319 / 0,254 | 0,314 / 0,250 | 0,053 / 0,042 |
+| L = 64 | 0,271 / 0,212 | 0,245 / 0,192 | 0,107 / 0,083 |
+| L = 128 | 0,381 / 0,297 | 0,304 / 0,232 | 0,213 / 0,167 |
+| L = 64, Re = 10⁷ | 0,226 / 0,190 | 0,182 / 0,151 | 0,067 / 0,053 |
+
+L'écart à la théorie passe de 1,8 à 1,4 fois à L = 128 ; la perte de
+pression totale du nez baisse d'un tiers.
+
+**Ce qui reste.** Le premier nœud doit garder la viscosité κ u_τ h pour que
+le rebond transmette ρu_τ², et cette viscosité fait passer le frottement aux
+nœuds 2 à 4, au-dessus de la vraie couche limite : la couche lente garde
+3 mailles. La corriger demanderait d'imposer la contrainte pariétale
+directement (populations reconstruites au premier nœud) plutôt que par un
+glissement et une viscosité.
+
+**Damier au calage ½.** Paroi à mi-chemin entre deux rangées de nœuds
+(q = 0,5 à ±0,05 près) : un mode pair–impair de période 2 mailles s'installe
+au premier nœud (δ* de 0,8 à 1,3 maille d'une maille à l'autre), en
+glissement libre comme avec la loi de paroi. C'est le rebond à mi-chemin, où
+l'interpolation de Bouzidi n'amortit plus rien, à τ ≈ 0,5. Sur une paroi
+courbe, seules quelques mailles ont q ≈ 0,5 ; non corrigé.
+
+**Effet sur les ailes** (même code, borne à h contre borne au nœud ; bilan
+sur une boîte, traînée extrapolée à volume nul) :
+
+| Cas | Borne à h : Cz / Cx | Borne au nœud : Cz / Cx | Référence |
+| --- | --- | --- | --- |
+| Aile AR 4, 4°, L = 16 + ×4 | 0,272 / 0,044 | 0,274 / 0,042 | VSPAERO 0,251 à 0,265 / 0,021 à 0,022 |
+| TR-1208, 4°, L = 8 + ×4 | 0,287 / 0,044 | 0,288 / 0,040 | mesure 0,257 / 0,011 |
+| TR-1208, 8°, L = 8 + ×4 | 0,544 / 0,049 | 0,548 / 0,045 | mesure 0,499 / 0,021 |
+
+La traînée du bilan baisse de 5 à 9 % (échange aux parois : 2 à 9 %), la
+portance ne bouge pas (+0,5 %), et TR-1208 à 8° reste stable. L'excès de
+portance ne vient donc pas de la couche lente : en l'amincissant, on ne le
+réduit pas. La part de la traînée qu'elle porte (perte de quantité de
+mouvement au bord d'attaque) n'en explique qu'une petite fraction.
 
 ## Maquettes STL (3D)
 

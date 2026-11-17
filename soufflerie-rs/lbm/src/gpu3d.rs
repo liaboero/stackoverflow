@@ -91,7 +91,7 @@ struct Params {
   tau0: f32, tauSponge: f32, spongeStart: u32, uIn: f32,
   accel: f32, c18: f32, writeMacro: u32, les: u32,
   rows: u32, sa: u32, nu: f32, lesA: f32,
-  xtr: f32, band: f32, pad0: f32, pad1: f32,
+  xtr: f32, band: f32, essai: u32, essaiNu: f32,
 };
 ";
 
@@ -202,6 +202,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // valeur ne saute pas quand la paroi traverse une rangée de nœuds).
     let k = wk0 - 1u;
     out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
+    if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
   } else {
     let ixm = cell(x - 1, y, z);
     let ixp = cell(x + 1, y, z);
@@ -257,6 +258,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let cw1 = CB1 / (KAPPA * KAPPA) + (1.0 + CB2) / SIGMA;
     let nv = (v + prod + diff - adv) / (1.0 + cw1 * fw * v / (d * d));
     out = clamp(nv, 0.0, NU_TILDE_MAX);
+    if ((P.essai & 2048u) != 0u) { out = min(out, P.essaiNu); }
   }
   nutOut[idx] = out;
 }
@@ -518,7 +520,10 @@ fn absorb(x: i32, y: i32, z: i32) -> f32 {{
   let dz = f32(min(z, i32(P.nz) - 1 - z));
   var sz = 1.0 - dz / wz;
   if ((P.rows & 2u) != 0u) {{ sz = 1.0 - f32(i32(P.nz) - 1 - z) / wz; }}
-  var s = max(max(1.0 - dy / wy, sz), 1.0 - f32(x) / wx);
+  var sy = 1.0 - dy / wy;
+  // Envergure périodique : la maquette traverse les bords y.
+  if ((P.rows & 4u) != 0u) {{ sy = 0.0; }}
+  var s = max(max(sy, sz), 1.0 - f32(x) / wx);
   if (u32(x) > P.spongeStart) {{
     s = max(s, f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart)));
   }}
@@ -614,6 +619,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // nœud à l'autre quand la paroi traverse une rangée : marches de
     // pression, volets Gurney parasites, portance qui croît en affinant).
     nuw = KAPPA * ut2 * yw;
+    // Diagnostic : viscosité de la couche pariétale κ u_τ y_n (distance du nœud).
+    if ((P.essai & 256u) != 0u) {{ nuw = KAPPA * ut2 * y0; }}
+    if ((P.essai & 1024u) != 0u) {{ nuw = min(nuw, P.essaiNu); }}
     var usv = vec3<f32>(0.0);
     if (edge) {{
       // Arête vive : l'écoulement y décolle et la loi de paroi (couche
@@ -622,20 +630,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       // de l'arête (singulière en non visqueux) jusqu'à la divergence.
       nuw = -1.0;
     }} else if (ut0 >= 1e-12) {{
-      // Profil monotone : la paroi ne glisse pas plus vite que ne le permet
-      // aussi la vitesse relevée à h (u_h − pente · h). Les deux estimations
-      // coïncident en régime établi ; la borne arrête un nœud qui
-      // s'emballerait (un nœud presque à la paroi glisse presque librement
-      // et rien d'autre ne le retient).
-      let us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw)));
+      // Profil monotone entre le nœud et la hauteur h : le profil de la
+      // couche pariétale, évalué à la hauteur du nœud, ne dépasse pas la
+      // vitesse relevée à h (u_s ≤ u_h − pente · y_n). La borne arrête un
+      // nœud qui s'emballerait (un nœud presque à la paroi glisse presque
+      // librement et rien d'autre ne le retient). Elle ne suppose pas que la
+      // couche pariétale linéaire atteint h : quand la couche limite est plus
+      // mince que h (bord d'attaque, et partout aux résolutions courantes),
+      // ou sur une paroi convexe où la vitesse potentielle décroît en
+      // s'éloignant de la paroi, la borne u_h − pente · h freinait le premier
+      // nœud sans frottement correspondant et épaississait la couche lente
+      // (plaque plane, `plaque3d` : θ −12 %, perte de pression totale du nez
+      // −30 %).
+      var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
+      // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
+      if ((P.essai & 4096u) != 0u) {{ us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }}
+      if ((P.essai & 8192u) != 0u) {{ us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw))); }}
       usv = tv0 * (us / ut0);
+    }}
+    if ((P.essai & 16u) != 0u || ((P.essai & 512u) != 0u && abs(gw.z) < 0.999)) {{
+      // Diagnostic : glissement libre (paroi non visqueuse).
+      usv = tv0;
+      nuw = 0.0;
     }}
     // Relaxation sur une dizaine de pas : une paroi qui suit à chaque pas la
     // vitesse de son propre nœud (glissement presque libre près de la paroi)
     // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
     // 0,02 : mêmes efforts à 0,3 % près).
     let prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
-    uw = prev + 0.1 * (usv - prev);
+    uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
     utau[4u * wk + 1u] = uw.x;
     utau[4u * wk + 2u] = uw.y;
     utau[4u * wk + 3u] = uw.z;
@@ -664,21 +687,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (P.sa == 1u) {{
     // Nœud pariétal : la viscosité de la couche [0, h] supposée par le
     // glissement, pour que la contrainte transmise soit τ_p.
-    tau += 3.0 * select(nu_turb(nut[idx]), nuw, nuw >= 0.0);
+    var nuc = select(nu_turb(nut[idx]), nuw, nuw >= 0.0);
+    // Diagnostics : ν_t de Spalart–Allmaras hors premier nœud retiré (1),
+    // premier nœud à la viscosité de Spalart–Allmaras (4).
+    if ((P.essai & 1u) != 0u && nuw < 0.0) {{ nuc = 0.0; }}
+    if ((P.essai & 4u) != 0u && nuw >= 0.0) {{ nuc = nu_turb(nut[idx]); }}
+    tau += 3.0 * nuc;
   }}
   if (u32(x) > P.spongeStart) {{
     let s = f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart));
     tau += (P.tauSponge - P.tau0) * s * s;
   }}
   var om = 1.0 / tau;
-  if (P.les == 1u) {{
+  if (P.les == 1u && (P.essai & 32u) == 0u) {{
     let qn = sqrt(2.0 * (pxx * pxx + pyy * pyy + pzz * pzz + 2.0 * (pxy * pxy + pxz * pxz + pyz * pyz)));
     // Amortissement de Van Driest près de la paroi, (1 − e^(−d/A))², comme en
     // 2D, sans loi de paroi seulement : avec elle, la sous-maille stabilise les
     // premiers nœuds à τ ≈ 0,5 (aile à Re = 10⁶, L = 32 : divergence sinon).
     var damp = 1.0;
-    if (P.sa == 0u) {{ damp = 1.0 - exp(-wdist[idx] / P.lesA); }}
-    om = 2.0 / (tau + sqrt(tau * tau + P.c18 * damp * damp * qn * ir));
+    if (P.sa == 0u || (P.essai & 2u) != 0u) {{ damp = 1.0 - exp(-wdist[idx] / P.lesA); }}
+    var c18 = P.c18;
+    // Diagnostic : constante de Smagorinsky divisée par 2 (64) ou par 4 (128).
+    if ((P.essai & 64u) != 0u) {{ c18 *= 0.25; }}
+    if ((P.essai & 128u) != 0u) {{ c18 *= 0.0625; }}
+    om = 2.0 / (tau + sqrt(tau * tau + c18 * damp * damp * qn * ir));
   }}
   let k = 1.0 - om;
   // Régularisation récursive (Malaspinas 2015) : moments d'ordre 3 tirés de
@@ -1287,7 +1319,10 @@ pub(crate) struct Params {
     xtr: f32,
     /// Épaisseur (mailles) de la zone sans production autour d'une paroi laminaire.
     band: f32,
-    pad: [f32; 2],
+    /// Variantes de diagnostic (bits, voir `Gpu3D::set_essai`).
+    essai: u32,
+    /// Plafond de viscosité turbulente des diagnostics 1024 et 2048.
+    essai_nu: f32,
 }
 
 #[repr(C)]
@@ -1414,6 +1449,13 @@ pub struct Gpu3D {
     pub(crate) nested: bool,
     /// Sol mobile en z = −½ et plafond glissant (au lieu de bords périodiques en z).
     ground: bool,
+    /// Maquette d'envergure périodique (plaque plane, profil infini) : pas
+    /// de bandes absorbantes sur les bords latéraux y, que la maquette
+    /// traverse (elles freineraient la couche limite de ses bords).
+    pub periodic_span: bool,
+    /// Variantes de diagnostic de la loi de paroi (bits, `set_essai`).
+    essai: u32,
+    essai_nu: f32,
     /// Grilles fines autour de la maquette (raffinement local).
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
     /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
@@ -2347,6 +2389,9 @@ impl Gpu3D {
             lost: false,
             nested,
             ground: body.ground && !nested,
+            periodic_span: false,
+            essai: 0,
+            essai_nu: 0.0,
             refine: None,
             wall_cells,
             edge_cos,
@@ -2357,6 +2402,31 @@ impl Gpu3D {
         s.set_viscosity(nu);
         s.reset(0.0);
         Ok(s)
+    }
+
+    /// Variantes de diagnostic (enquête sur l'épaisseur de la couche limite,
+    /// `plaque3d`), sur toutes les grilles ; 0 : calcul normal. Bits :
+    /// 1 ν_t de Spalart–Allmaras retiré de la collision (sauf premier nœud) ;
+    /// 2 sous-maille amortie près de la paroi (Van Driest) avec loi de paroi ;
+    /// 4 premier nœud : viscosité de Spalart–Allmaras au lieu de κ u_τ h ;
+    /// 8 glissement non relaxé ; 16 glissement libre (témoin non visqueux) ;
+    /// 32 sans sous-maille ; 64 et 128 constante de Smagorinsky divisée
+    /// par 2 et par 4 ; 256 viscosité de la couche pariétale κ u_τ y_n ;
+    /// 512 glissement libre là où la paroi n'est pas horizontale (|n_z| < 0,999) ;
+    /// 1024 viscosité de la couche pariétale plafonnée à `nu_cap` (unités de
+    /// la veine) ; 2048 ν̃ de Spalart–Allmaras plafonné à `nu_cap` partout ;
+    /// 4096 sans la borne de monotonie du glissement ; 8192 ancienne
+    /// borne (u_h − pente · h).
+    pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
+        self.essai = bits;
+        self.essai_nu = nu_cap as f32;
+        if let Some(r) = self.refine.as_mut() {
+            for (k, g) in r.levels.iter_mut().enumerate() {
+                g.essai = bits;
+                // Viscosité en unités de la grille k + 1 (2^(k+1) fois plus grande).
+                g.essai_nu = (nu_cap * (2u64 << k) as f64) as f32;
+            }
+        }
     }
 
     pub fn adapter_name(&self) -> &str {
@@ -2407,13 +2477,14 @@ impl Gpu3D {
             c18: (18.0 * self.cs * self.cs) as f32,
             write_macro: write_macro as u32,
             les: self.les as u32,
-            rows: self.nested as u32 | ((self.ground as u32) << 1),
+            rows: self.nested as u32 | ((self.ground as u32) << 1) | ((self.periodic_span as u32) << 2),
             sa: self.sa as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
             xtr: self.xtr as f32,
             band: (self.l as f32 / 10.0).max(3.0),
-            pad: [0.0; 2],
+            essai: self.essai,
+            essai_nu: self.essai_nu,
         }
     }
 
