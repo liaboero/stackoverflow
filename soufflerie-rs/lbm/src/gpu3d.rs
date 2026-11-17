@@ -514,6 +514,11 @@ fn ground_code(i: usize) -> String {
 /// avec les liens de paroi ; sinon passe des autres mailles, sans le code
 /// des liens, recopié dans chacune des 18 directions, qui demandait des
 /// registres à toutes les mailles (−24 % de durée sans lui).
+/// Taille des groupes de la collision (cœur).
+pub(crate) fn step_wg() -> u32 {
+    std::env::var("SOUFFLERIE_WG").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
+}
+
 fn wgsl_step(fp16: bool, walls: bool) -> String {
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
@@ -799,7 +804,7 @@ fn feqIn(i: u32) -> f32 {{
   return w * (3.0 * cu + 4.5 * cu * cu - 1.5 * P.uIn * P.uIn);
 }}
 
-@compute @workgroup_size(64)
+@compute @workgroup_size({wg})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
 {head}
   let wk0 = wall[idx];
@@ -930,8 +935,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         head = if walls {
             "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= arrayLength(&wcell)) { return; }\n  let idx = wcell[kw];"
         } else {
-            "  let idx = gid.x + gid.y * nwg.x * 64u;\n  if (idx >= P.N) { return; }"
+            "  let idx = gid.x + gid.y * nwg.x * WGu;\n  if (idx >= P.N) { return; }"
         },
+        wg = if walls { 64 } else { step_wg() },
         skip = if walls { "" } else { "  // Maille pariétale : passe à part.\n  if (wk0 != 0u) { return; }" },
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
@@ -1625,6 +1631,7 @@ pub struct Gpu3D {
     /// Collision des mailles pariétales (None sans paroi), et ses groupes.
     pub(crate) step_wall_pipe: Option<wgpu::ComputePipeline>,
     pub(crate) wall_disp: (u32, u32),
+    pub(crate) disp_step: (u32, u32),
     _wcell: wgpu::Buffer,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
@@ -1701,7 +1708,7 @@ impl Gpu3D {
     pub(crate) fn encode_step(&self, pass: &mut wgpu::ComputePass, slot: u32) {
         pass.set_pipeline(&self.step_pipe);
         pass.set_bind_group(0, &self.bind[self.cur], &[slot]);
-        pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+        pass.dispatch_workgroups(self.disp_step.0, self.disp_step.1, 1);
         if let Some(p) = &self.step_wall_pipe {
             pass.set_pipeline(p);
             pass.dispatch_workgroups(self.wall_disp.0, self.wall_disp.1, 1);
@@ -3040,7 +3047,7 @@ impl Gpu3D {
             })
         };
         temps("tampons", tt);
-        let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16, false), true);
+        let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16, false).replace("WGu", &format!("{}u", step_wg())), true);
         let step_wall_pipe = (wall_count > 0).then(|| pipe("d3q19_paroi", &layout, wgsl_step(fp16, true), true));
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
         let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true);
@@ -3215,6 +3222,11 @@ impl Gpu3D {
             step_pipe,
             step_wall_pipe,
             wall_disp,
+            disp_step: {
+                let groups = (ns as u32).div_ceil(step_wg());
+                let dx = groups.min(65535);
+                (dx, groups.div_ceil(dx))
+            },
             _wcell: wcell,
             init_pipe,
             slice_pipe,
@@ -4687,7 +4699,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        wgsl_step(fp16, false)
+        wgsl_step(fp16, false).replace("WGu", "64u")
     }
 }
 
