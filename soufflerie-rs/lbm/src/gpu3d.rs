@@ -343,7 +343,9 @@ fn wgsl_step(fp16: bool) -> String {
       var uwl = uw;
       if (P.sa == 1u) {{
         let nf = oct_decode(qbuf[arrayLength(&qbuf) / 2u + wk * 18u + {im1}u]);
-        uwl = uw - dot(uw, nf) * nf;
+        // Transpiration : vitesse normale de la face (déplacement de la
+        // couche limite) ; la paroi mobile de Bouzidi injecte ce débit.
+        uwl = uw - dot(uw, nf) * nf + vn * nf;
       }}
       let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
       if (q < 0.5 && qo == 0.0) {{
@@ -637,6 +639,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     utau[4u * wk + 1u] = uw.x;
     utau[4u * wk + 2u] = uw.y;
     utau[4u * wk + 3u] = uw.z;
+  }}
+  // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
+  // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
+  var vn = 0.0;
+  if (P.sa == 1u && hasWall) {{
+    vn = utau[arrayLength(&utau) / 5u * 4u + wk];
   }}
   g[0] = pop(0u, idx);
 {pull}
@@ -1421,6 +1429,53 @@ pub struct Gpu3D {
     /// Maillage de la maquette dans les coordonnées de cette grille (efforts
     /// par intégration sur la surface).
     surface: Option<std::sync::Arc<crate::stl::MeshBody>>,
+    /// Décambrage visqueux par transpiration (voir `enable_transpiration`).
+    transp: Option<Box<Transpiration>>,
+}
+
+/// Couche limite intégrale sur le maillage de la grille entière la plus
+/// fine, et sa vitesse de transpiration par maille pariétale.
+struct Transpiration {
+    topo: crate::ibl3d::Topology,
+    /// Par grille (None : la veine sans raffinement, Some(k) : niveau k de
+    /// `refine`) : triangle de chaque maille pariétale et v_n imposée.
+    maps: Vec<(Option<usize>, Vec<u32>, Vec<f32>)>,
+    xtr: f64,
+    /// Vitesse extérieure prise au bord de la couche déficitaire que le
+    /// calcul résout déjà, et seul le déplacement qui lui manque imposé
+    /// (δ* − δ*_calcul) ; sinon u_e à WM_H et δ* entier.
+    resolved: bool,
+}
+
+/// Bilan d'un couplage de transpiration (unités de la grille la plus fine).
+#[derive(Clone, Debug, Default)]
+pub struct TranspirationReport {
+    pub layer: crate::ibl3d::Layer3,
+    /// Vitesse extérieure par triangle.
+    pub ue: Vec<[f64; 3]>,
+    /// Aires et centres des triangles (mailles de cette grille).
+    pub area: Vec<f64>,
+    pub centers: Vec<[f64; 3]>,
+    /// Normales sortantes des triangles.
+    pub normals: Vec<[f64; 3]>,
+    /// Épaisseur de déplacement que le champ du calcul contient déjà,
+    /// ∫₀^{h_e} (1 − u_t/u_e) dh, et hauteur h_e du bord de cette couche
+    /// (premier maximum de u_t au-dessus de WM_H), par triangle.
+    pub dstar_res: Vec<f64>,
+    pub h_edge: Vec<f64>,
+    /// v_n imposée par triangle (avant sous-relaxation).
+    pub vn: Vec<f64>,
+    /// Part de la surface où u_e n'a pu être relevée.
+    pub missed: f64,
+    /// v_n/u_∞ moyenne (aire) des parties soufflantes et maximale.
+    pub vn_mean: f64,
+    pub vn_max: f64,
+    /// Part de la surface décollée (H plafonné).
+    pub separated: f64,
+    /// Débit de déplacement qui part dans le sillage, Σ v_n dA / (u_∞ · L²).
+    pub outflow: f64,
+    /// Mailles par longueur de référence sur cette grille.
+    pub l: f64,
 }
 
 /// Efforts par maille pariétale, moyennés par pas, en unités de la veine :
@@ -2074,8 +2129,9 @@ impl Gpu3D {
         };
         let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
         let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist));
-        // Par maille pariétale : u_τ et vitesse de glissement relaxée.
-        let utau_buf = mk("utau3d", (16 * wall_count) as u64, st);
+        // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
+        // (à la suite, une valeur par maille) la vitesse de transpiration.
+        let utau_buf = mk("utau3d", (20 * wall_count) as u64, st);
         let nsa = if sa { 4 * n as u64 } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if sa {
@@ -2296,6 +2352,7 @@ impl Gpu3D {
             edge_cos,
             rest_force,
             surface: body.mesh.clone(),
+            transp: None,
         };
         s.set_viscosity(nu);
         s.reset(0.0);
@@ -2756,6 +2813,262 @@ impl Gpu3D {
 
     /// Mailles pariétales de la grille la plus fine (diagnostic) : position
     /// (mailles de la veine) et plus petit cosinus entre les faces touchées.
+    /// Grille d'indice `k` (None : la veine, Some(i) : niveau i du raffinement).
+    fn grid_mut(&mut self, k: Option<usize>) -> &mut Gpu3D {
+        match k {
+            None => self,
+            Some(i) => &mut self.refine.as_mut().expect("raffinement").levels[i],
+        }
+    }
+
+    /// Grille entière la plus fine (indice pour `grid_mut`), son origine
+    /// (mailles de la veine) et son facteur.
+    fn full_grid(&self) -> (Option<usize>, [f64; 3], f64) {
+        match self.refine.as_ref() {
+            Some(r) => (Some(r.full - 1), r.origin[r.full - 1], (1u64 << r.full) as f64),
+            None => (None, [0.0; 3], 1.0),
+        }
+    }
+
+    /// Décambrage visqueux : prépare la couche limite intégrale sur le
+    /// maillage de la maquette (grille entière la plus fine) et le triangle
+    /// de chaque maille pariétale, sur cette grille et les grilles partielles
+    /// plus fines (bord d'attaque). Les grilles plus grossières, recouvertes
+    /// par la grille fine autour de la maquette, n'en reçoivent pas. `xtr` :
+    /// transition imposée (fraction de corde ; 0 : turbulent dès le point
+    /// d'arrêt). Erreur sans maillage ou sans loi de paroi. Rend le nombre
+    /// de triangles.
+    pub fn enable_transpiration(&mut self, xtr: f64, resolved: bool) -> Result<usize, String> {
+        if !self.sa {
+            return Err("la transpiration demande la loi de paroi (Spalart–Allmaras)".into());
+        }
+        let (kf, org_f, s_f) = self.full_grid();
+        let mesh = self.grid_mut(kf).surface.clone().ok_or("maquette sans maillage")?;
+        let topo = crate::ibl3d::Topology::new(&mesh.tris);
+        let mut grids = vec![kf];
+        if let Some(r) = self.refine.as_ref() {
+            grids.extend((r.full..r.levels.len()).map(Some));
+        }
+        let mut maps = Vec::new();
+        for k in grids {
+            let (org, s) = match (k, self.refine.as_ref()) {
+                (Some(i), Some(r)) => (r.origin[i], (1u64 << (i + 1)) as f64),
+                _ => ([0.0; 3], 1.0),
+            };
+            let g = self.grid_mut(k);
+            let (nx, ny) = (g.nx, g.ny);
+            // Position dans la grille entière la plus fine.
+            let tri: Vec<u32> = g
+                .wall_cells
+                .iter()
+                .map(|&c| {
+                    let c = c as usize;
+                    let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
+                    let q = [0, 1, 2].map(|a| (org[a] + p[a] / s - org_f[a]) * s_f);
+                    topo.nearest(q, 4.0 * s_f / s).map_or(u32::MAX, |t| t as u32)
+                })
+                .collect();
+            let n = tri.len();
+            maps.push((k, tri, vec![0f32; n]));
+        }
+        let nt = topo.c.len();
+        self.transp = Some(Box::new(Transpiration { topo, maps, xtr, resolved }));
+        Ok(nt)
+    }
+
+    /// Un couplage visqueux–non visqueux : vitesse extérieure relevée à la
+    /// hauteur de raccord de la loi de paroi (WM_H) le long de la normale de
+    /// chaque triangle, couche limite intégrale (`ibl3d::march`), vitesse de
+    /// transpiration v_n = ∇·(u_e δ* ê) (Lighthill 1958) imposée aux mailles
+    /// pariétales, sous-relaxée : v_n ← v_n + ω (v_n,calculée − v_n). None si
+    /// `enable_transpiration` n'a pas été appelée.
+    pub fn couple_transpiration(&mut self, relax: f64) -> Option<TranspirationReport> {
+        let mut tr = self.transp.take()?;
+        let (kf, _, _) = self.full_grid();
+        let u_in = self.u_in as f64;
+        let g = self.grid_mut(kf);
+        let mac = g.macros();
+        let (d, nu, lref) = ([g.nx, g.ny, g.nz], g.nu, g.l as f64);
+        let solid = &g.solid;
+        let sample = |p: [f64; 3]| -> Option<[f64; 3]> {
+            let i = p.map(|v| v.floor() as i64);
+            let w = [0, 1, 2].map(|a| p[a] - i[a] as f64);
+            let mut out = [0.0; 3];
+            for c in 0..8 {
+                let o = [c & 1, (c >> 1) & 1, (c >> 2) & 1];
+                let q = [0, 1, 2].map(|a| i[a] + o[a] as i64);
+                if (0..3).any(|a| q[a] < 0 || q[a] >= d[a] as i64) {
+                    return None;
+                }
+                let c = q[0] as usize + d[0] * (q[1] as usize + d[1] * q[2] as usize);
+                if solid[c] {
+                    return None;
+                }
+                let ww: f64 = (0..3).map(|a| if o[a] == 1 { w[a] } else { 1.0 - w[a] }).product();
+                for k in 0..3 {
+                    out[k] += ww * mac[c][k] as f64;
+                }
+            }
+            Some(out)
+        };
+        let t = &tr.topo;
+        let nt = t.c.len();
+        // Profil le long de la normale, de 1 à 8 mailles par demi-maille :
+        // vitesse à WM_H (plus loin si un nœud voisin est solide), bord de la
+        // couche déficitaire résolue (premier maximum de u_t au-dessus de
+        // WM_H) et son épaisseur de déplacement, la couche [0, WM_H] de la loi
+        // de paroi prise linéaire (vitesse à la paroi extrapolée de 1 et 2).
+        let prof: Vec<Option<([f64; 3], [f64; 3], f64, f64)>> = (0..nt)
+            .map(|k| {
+                if t.area[k] <= 0.0 {
+                    return None;
+                }
+                let (c, n) = (t.c[k], t.n[k]);
+                let pts: Vec<(f64, Option<[f64; 3]>)> = (2..=16)
+                    .map(|i| {
+                        let h = 0.5 * i as f64;
+                        let v = sample([0, 1, 2].map(|a| c[a] + h * n[a])).map(|v| {
+                            let vn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+                            [0, 1, 2].map(|a| v[a] - vn * n[a])
+                        });
+                        (h, v)
+                    })
+                    .collect();
+                let i0 = pts.iter().position(|(h, v)| *h >= WM_H && v.is_some())?;
+                if pts[i0].0 > WM_H + 2.0 {
+                    return None;
+                }
+                let uwm = pts[i0].1?;
+                let mag = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                let mut ie = i0;
+                while ie + 1 < pts.len() {
+                    match pts[ie + 1].1 {
+                        Some(v) if mag(v) > mag(pts[ie].1.unwrap()) => ie += 1,
+                        _ => break,
+                    }
+                }
+                let (he, uev) = (pts[ie].0, pts[ie].1.unwrap());
+                let ue = mag(uev).max(1e-12);
+                // Points du profil jusqu'à h_e, vitesse à la paroi extrapolée.
+                let mut pr: Vec<(f64, f64)> = pts[..=ie].iter().filter_map(|(h, v)| v.map(|v| (*h, mag(v)))).collect();
+                let u0 = match (pr.iter().find(|p| p.0 == 1.0), pr.iter().find(|p| p.0 == 2.0)) {
+                    (Some(a), Some(b)) => (2.0 * a.1 - b.1).max(0.0),
+                    _ => pr[0].1,
+                };
+                pr.insert(0, (0.0, u0));
+                let ds: f64 = pr.windows(2).map(|w| 0.5 * (w[1].0 - w[0].0) * (2.0 - (w[0].1 + w[1].1) / ue)).sum();
+                Some((uwm, uev, he, ds.max(0.0)))
+            })
+            .collect();
+        let resolved = tr.resolved;
+        let mut ue: Vec<Option<[f64; 3]>> = prof.iter().map(|p| p.map(|p| if resolved { p.1 } else { p.0 })).collect();
+        let dstar_res: Vec<f64> = prof.iter().map(|p| p.map_or(0.0, |p| p.3)).collect();
+        let h_edge: Vec<f64> = prof.iter().map(|p| p.map_or(0.0, |p| p.2)).collect();
+        let missed_area: f64 = (0..nt).filter(|&k| ue[k].is_none()).map(|k| t.area[k]).sum();
+        // Relevés manquants : moyenne des voisins relevés, projetée dans le plan.
+        for _ in 0..20 {
+            let prev = ue.clone();
+            let mut left = false;
+            for k in 0..nt {
+                if prev[k].is_some() || t.area[k] <= 0.0 {
+                    continue;
+                }
+                let (mut s, mut m) = ([0.0; 3], 0.0);
+                for e in &t.edges[k] {
+                    if let Some(v) = prev.get(e.nb as usize).copied().flatten() {
+                        s = [0, 1, 2].map(|a| s[a] + v[a]);
+                        m += 1.0;
+                    }
+                }
+                if m > 0.0 {
+                    let n = t.n[k];
+                    let vn = (s[0] * n[0] + s[1] * n[1] + s[2] * n[2]) / m;
+                    ue[k] = Some([0, 1, 2].map(|a| s[a] / m - vn * n[a]));
+                } else {
+                    left = true;
+                }
+            }
+            if !left {
+                break;
+            }
+        }
+        let ue: Vec<[f64; 3]> = ue.into_iter().map(|v| v.unwrap_or([0.0; 3])).collect();
+        let layer = crate::ibl3d::march(t, &ue, &crate::ibl3d::Options { nu, xtr: tr.xtr });
+        // Déplacement imposé : δ* entier, ou ce qui manque au champ résolu.
+        let vn_t = if resolved {
+            let m: Vec<f64> = (0..nt)
+                .map(|k| {
+                    let u = (ue[k][0] * ue[k][0] + ue[k][1] * ue[k][1] + ue[k][2] * ue[k][2]).sqrt();
+                    u * (layer.dstar[k] - dstar_res[k])
+                })
+                .collect();
+            crate::ibl3d::transpiration(t, &ue, &m).0
+        } else {
+            layer.vn.clone()
+        };
+        // Moyenne par l'aire sur le triangle et ses voisins : même débit
+        // injecté, mais un triangle effilé (aire presque nulle) ne donne plus
+        // une vitesse démesurée à la maille qui le touche.
+        let vn_t: Vec<f64> = (0..nt)
+            .map(|k| {
+                let (mut q, mut ar) = (vn_t[k] * t.area[k], t.area[k]);
+                for e in &t.edges[k] {
+                    if let (Some(&v), Some(&a)) = (vn_t.get(e.nb as usize), t.area.get(e.nb as usize)) {
+                        q += v * a;
+                        ar += a;
+                    }
+                }
+                if ar > 0.0 { q / ar } else { 0.0 }
+            })
+            .collect();
+        // Mailles pariétales : v_n du triangle, sous-relaxée, envoyée au GPU.
+        let maps = std::mem::take(&mut tr.maps);
+        let mut out_maps = Vec::with_capacity(maps.len());
+        for (k, tri, mut vn) in maps {
+            for (v, &ti) in vn.iter_mut().zip(&tri) {
+                let target = if ti == u32::MAX { 0.0 } else { vn_t[ti as usize] as f32 };
+                *v += relax as f32 * (target - *v);
+            }
+            let g = self.grid_mut(k);
+            if g.wall_count > 0 {
+                g.queue.write_buffer(&g._utau, (16 * g.wall_count) as u64, bytemuck::cast_slice(&vn));
+            }
+            out_maps.push((k, tri, vn));
+        }
+        tr.maps = out_maps;
+        let t = &tr.topo;
+        let area: f64 = t.area.iter().sum();
+        let (mut sb, mut ab, mut vmax, mut sep) = (0.0, 0.0, 0.0f64, 0.0);
+        for k in 0..nt {
+            if vn_t[k] > 0.0 {
+                sb += vn_t[k] * t.area[k];
+                ab += t.area[k];
+            }
+            vmax = vmax.max(vn_t[k].abs());
+            if layer.separated[k] {
+                sep += t.area[k];
+            }
+        }
+        let rep = TranspirationReport {
+            missed: missed_area / area.max(1e-12),
+            vn_mean: sb / ab.max(1e-12) / u_in,
+            vn_max: vmax / u_in,
+            separated: sep / area.max(1e-12),
+            outflow: layer.outflow / (u_in * lref * lref),
+            l: lref,
+            area: t.area.clone(),
+            centers: t.c.clone(),
+            normals: t.n.clone(),
+            dstar_res,
+            h_edge,
+            vn: vn_t,
+            ue,
+            layer,
+        };
+        self.transp = Some(tr);
+        Some(rep)
+    }
+
     pub fn finest_wall_cells(&self) -> Vec<([f64; 3], f32)> {
         let (g, org, s) = match self.refine.as_ref() {
             Some(r) => {

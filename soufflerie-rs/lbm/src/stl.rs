@@ -267,7 +267,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Distance au carré d'un point à un triangle (Ericson, Real-Time Collision Detection, 5.1.5).
-fn tri_dist2(p: [f64; 3], t: &Tri) -> f64 {
+pub(crate) fn tri_dist2(p: [f64; 3], t: &Tri) -> f64 {
     let [a, b, c] = *t;
     let ab = sub(b, a);
     let ac = sub(c, a);
