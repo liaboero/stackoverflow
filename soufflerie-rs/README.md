@@ -1278,6 +1278,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
+| `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
 une option de maquette retirée depuis ; son programme n'est pas conservé.
@@ -1681,6 +1682,108 @@ l'aile 3D à Re = 1000) : l'écart mesure l'effet du Reynolds, pas une erreur.
 Re = 200) alors qu'il devrait être nul : à examiner (décalage d'un quart de
 maille de la maquette, ou sillage instationnaire).
 
+## Vitesse de calcul 3D
+
+Le calcul 3D a été accéléré de deux à trois fois sans rien changer au
+modèle, au schéma, à la résolution ni à la précision des nombres (la
+demi-précision reste la demi-précision).
+
+**Banc de mesure.** `lbm/examples/banc3d.rs` reprend la boucle de
+`soufflerie run3d` sur quatre petits cas : `ar4` (aile AR 4 du STL
+`banc/wing_ar4.stl`, 4°, Re = 10⁶, L = 16, grille ×2), `ar4b` (idem plus
+une couche pariétale ×4 de 16 mailles), `ar4n` (sans raffinement) et
+`sphere` (Re = 1000, L = 16, sous-maille sans loi de paroi). Il donne les
+durées de mise en place, de calcul et de relevé, les mises à jour de
+maille par seconde (Σ n_k 2^niveau par pas de la veine), et à temps fixé
+les efforts (échange, surface, boîtes) et des sommes de contrôle du champ
+de la grille la plus fine ; `--champs f.bin --champs-ref g.bin` compare
+le champ maille par maille, `--profil 1` mesure chaque passe isolément.
+`banc/compare.py` rapporte les écarts à la dispersion de plusieurs
+références (`banc/ref` : version d'origine, t* = 6), `banc/ab.sh` compare
+deux jeux de shaders en lancements alternés (`SOUFFLERIE_WGSL=dossier`
+écrit les shaders engendrés dans le dossier, ou les relit s'ils y sont :
+essais sans recompiler).
+
+```bash
+cargo run --release -p lbm --example banc3d -- ar4b --t 6 --profil 1
+```
+
+**Gains** (GTX 1070, t* = 6, 960 pas de la veine ; mesures alternées
+ancienne et nouvelle version, GPU partagé avec un autre calcul pendant
+toute la mise au point : les durées absolues sont environ deux fois trop
+longues, les rapports restent valables) :
+
+| cas | mailles (mises à jour par pas) | calcul avant | après | gain | mise en place avant | après |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sphere` | 1,77 M (1,77 M) | 8,5–8,8 s | 4,2–4,4 s | ×2,0 | 1,2 s | 1,1 s |
+| `ar4` | 2,91 M (3,68 M) | 23–24 s | 9,8–10,1 s | ×2,4 | 1,9–2,1 s | 1,7–1,9 s |
+| `ar4b` | 4,27 M (9,10 M) | 78 s | 26 s | ×3,0 | 6,7 s | 3,1–3,6 s |
+
+Sur un calcul plus long (`ar4`, t* = 20) : 60–65 s avant, 16 s après.
+
+Par optimisation (profil par passe, `ar4` ; durées par lancement) :
+
+| optimisation | passe | avant | après | résultat |
+| --- | --- | --- | --- | --- |
+| tirage des raccords en deux passes : moments de chaque nœud parent une seule fois (un nœud sert à jusqu'à 64 mailles fantômes), puis interpolation | tirage | 3,9 ms | 0,6 ms | identique au bit |
+| index des voisins sans modulo (rangées voisines calculées une fois, début de rangée précalculé) | collision | 11,4 ms | 8,8 ms | identique au bit |
+| collision en deux passes : mailles sans lien de paroi, sans le code des liens (recopié dans les 18 directions, il réservait des registres à toutes les mailles), puis mailles pariétales sur leur liste | collision | 8,8 ms | ≈ 6 ms (−24 % en alterné) | identique au bit |
+| termes de coefficient nul retirés de la collision (0 · x n'est pas simplifiable en IEEE) | collision | | −3 % | identique au bit |
+| voisins de ν̃ sans modulo | ν̃ | 1,2 ms | 0,9 ms | identique au bit |
+| shaders de calcul sans les contrôles d'exécution de wgpu (bornes, divisions protégées, compteurs de boucle ; `SOUFFLERIE_CONTROLES=1` les rétablit) | toutes | | faible | identique au bit |
+| loi de paroi dans une passe à part (voir ci-dessous) | collision | | faible | reproductible |
+| distance à la surface par coques croissantes (même minimum que le parcours complet, test `distance_par_coques_exacte`) | mise en place des couches | 4,3 s | 1,4 s | identique au bit |
+
+**Précision.** Toutes les optimisations sauf une rendent des champs et des
+efforts identiques au bit (comparaison maille par maille des champs de
+`ar4`, `ar4b` et `sphere`). L'exception corrige un défaut : la collision
+appliquait la loi de paroi en lisant la vitesse des nœuds voisins (relevé à
+la hauteur WM_H) pendant que la même passe la réécrivait, tantôt celle du
+pas précédent, tantôt celle du pas courant selon l'ordre d'exécution des
+groupes. Les calculs avec loi de paroi n'étaient pas reproductibles :
+d'un lancement à l'autre, 10⁻⁵ à 10⁻³ d'écart relatif sur les efforts à
+t* = 6 (`banc/ref`). La loi de paroi est maintenant une passe sur les
+mailles pariétales, avant la collision, sur le champ du pas précédent :
+le calcul est reproductible au bit, et ses efforts restent dans la
+dispersion de l'ancienne version :
+
+| `ar4`, t* = 20, moyenne sur 8 | ancienne version, 6 calculs (min – max) | nouvelle |
+| --- | --- | --- |
+| Cx échange | 0,05712 – 0,05714 | 0,05711 |
+| Cz échange | 0,27212 – 0,27223 | 0,27223 |
+| Cx surface | 0,02435 – 0,02435 | 0,02435 |
+| Cz surface | 0,28962 – 0,28979 | 0,28972 |
+| Cx frottement | 0,00749 – 0,00749 | 0,00749 |
+| Cx boîte | 0,07193 – 0,07342 | 0,07301 |
+| Cz boîte | 0,26892 – 0,26903 | 0,26905 |
+
+Même constat sur `ar4b` et à t* = 6 (`banc/ref`, trois calculs) : la
+nouvelle version est un tirage de plus dans la dispersion de l'ancienne.
+
+**Essais écartés.**
+
+- Bandes absorbantes : `absorb` coûte environ 15 % de la collision, mais
+  une sortie anticipée à l'intérieur de la veine n'y change rien (le coût
+  vient des 19 branches `sig > 0` intercalées, qui occupent des
+  registres) ; regrouper ces 19 branches en une seule change l'arrondi
+  (le compilateur du pilote contracte autrement les multiplications-
+  additions) sans gain mesurable : écarté.
+- Vecteurs AVX2 pour le moteur 2D sur processeur (`target-cpu=native`) :
+  +60 % sur un fil, rien sur 12 fils (limité par la mémoire) ; écarté
+  (binaire non portable).
+- Taille des groupes de travail de la collision (`SOUFFLERIE_WG`, 32 à
+  256) : pas de différence mesurable sur le GPU partagé ; 64 gardé.
+
+**Ce qui reste.** Sans tirage des voisins ni calcul de collision, le cœur
+de la collision ne coûterait que la moitié de sa durée actuelle : le pas
+est encore limité par les instructions (calcul de la collision, index des
+voisins) plus que par la mémoire. Les pistes suivantes changeraient
+l'arrondi (réécriture algébrique de la collision régularisée, populations
+opposées calculées ensemble) ou demandent un GPU libre pour être mesurées
+(taille des groupes, voisins dans un même bloc de la couche creuse sans
+passer par la table des blocs).
+
+
 ## Installation
 
 Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
@@ -1777,6 +1880,7 @@ soufflerie-rs/
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
 │   ├── examples/       programmes de diagnostic (voir « Programmes de diagnostic »)
 │   └── tests/          validation, panneaux, aile finie, 3D, comparaison GPU/CPU
+├── banc/               banc de mesure de la vitesse 3D : maquette, références, comparaisons
 ├── validation/         résultats de validation 3D (CSV)
 ├── tools/validation3d.sh  calculs de validation 3D
 └── app/                application : interface (egui) et commandes
