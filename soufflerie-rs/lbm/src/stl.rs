@@ -121,6 +121,19 @@ pub struct MeshSetup {
     /// Décalage de la maquette dans la maille (mailles, x y z), ajouté au
     /// calage par défaut : sert à mesurer la sensibilité au placement.
     pub offset: [f64; 3],
+    /// Raffinement lisse des facettes avant la voxelisation
+    /// (`geom3d::smooth_tris`) : surface de Phong par les sommets du fichier,
+    /// arêtes vives gardées.
+    pub smooth: bool,
+    /// Arêtes vives tirées du maillage : la loi de paroi n'est coupée qu'aux
+    /// mailles à portée de lien (√2) d'une arête vive du maillage, et non
+    /// partout où les liens d'une maille touchent des faces à plus de 60° (ce
+    /// qui arrive aussi autour d'un bord d'attaque de rayon inférieur à une
+    /// maille).
+    pub mesh_edges: bool,
+    /// Arêtes vives imposées (segments, coordonnées du fichier : `.sgeo`) ;
+    /// None : d'après l'angle dièdre.
+    pub edges: Option<std::sync::Arc<Vec<[[f64; 3]; 2]>>>,
 }
 
 impl Default for MeshSetup {
@@ -136,6 +149,9 @@ impl Default for MeshSetup {
             margin: 1.0,
             ground: None,
             offset: [0.0; 3],
+            smooth: false,
+            mesh_edges: false,
+            edges: None,
         }
     }
 }

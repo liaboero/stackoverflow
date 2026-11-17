@@ -21,6 +21,7 @@ pub mod bodies3d;
 pub mod cpu;
 pub mod d2q9;
 pub mod fluid;
+pub mod geom3d;
 pub mod geometry;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -32,6 +33,7 @@ pub mod panel;
 #[cfg(feature = "gpu")]
 pub mod refine;
 pub mod sa;
+pub mod sgeo;
 pub mod shapes;
 pub mod stats;
 pub mod stl;
