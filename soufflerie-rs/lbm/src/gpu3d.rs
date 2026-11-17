@@ -1569,6 +1569,141 @@ pub struct WakeDrag {
 const PW_H1: f64 = 0.5;
 const PW_H2: f64 = 1.0;
 
+/// Boîtes des grilles des bords (mailles de la grille parente) : (coin bas,
+/// coin haut, domaine propre en mailles de la grille parente). Bord
+/// d'attaque : sommets des faces tournées vers l'amont (n_x < −0,5). Bord de
+/// fuite : arêtes vives saillantes (`geom3d::feature_edges`, seuil de la loi
+/// de paroi) orientées en envergure (|d_y| > 0,5 |d|), donc pas les contours
+/// de saumon. Points rangés en y et regroupés en tronçons d'étendue en x et
+/// z au plus w = max(0,15 L, 4 e) : une aile en flèche est couverte par une
+/// suite de boîtes au lieu d'une seule. Marges : e = MARGIN + 4 mailles
+/// partout, plus 10 % de L vers l'aval au bord d'attaque (pic de dépression
+/// et début de la recompression) et 5 % de L de part et d'autre au bord de
+/// fuite (fin de la recompression, départ du sillage). Domaines propres :
+/// les tronçons voisins se partagent l'envergure au milieu de leur écart.
+#[allow(clippy::type_complexity)]
+fn edge_boxes(tris: &[crate::stl::Tri], l: f64, dims: [usize; 3], le: bool, te: bool) -> Result<Vec<([usize; 3], [usize; 3], [[f64; 3]; 2])>, String> {
+    let e = (crate::refine3d::MARGIN3 + 4) as f64;
+    let w = (0.15 * l).max(4.0 * e);
+    let mut sets: Vec<(Vec<[f64; 3]>, [f64; 2])> = Vec::new();
+    let nrm = |t: &crate::stl::Tri| {
+        let e1 = [0, 1, 2].map(|a| t[1][a] - t[0][a]);
+        let e2 = [0, 1, 2].map(|a| t[2][a] - t[0][a]);
+        [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+    };
+    if le {
+        let vol: f64 = tris
+            .iter()
+            .map(|t| {
+                let n = nrm(t);
+                (0..3).map(|a| t[0][a] * n[a]).sum::<f64>()
+            })
+            .sum();
+        let sgn = if vol >= 0.0 { 1.0 } else { -1.0 };
+        let mut pts = Vec::new();
+        for t in tris {
+            let n = nrm(t);
+            let m = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if m > 1e-12 && sgn * n[0] / m < -0.5 {
+                pts.extend_from_slice(t);
+            }
+        }
+        if pts.is_empty() {
+            return Err("raffinement du bord d'attaque : aucune face tournée vers l'amont".into());
+        }
+        // Marges en x : [amont, aval].
+        sets.push((pts, [e, e.max(0.1 * l)]));
+    }
+    if te {
+        let ix = crate::geom3d::Indexed::from_tris(tris);
+        let mut pts = Vec::new();
+        for f in crate::geom3d::feature_edges(&ix, crate::geom3d::FEATURE_DEG) {
+            let d = [0, 1, 2].map(|a| f.b[a] - f.a[a]);
+            let dl = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if f.convex && dl > 0.0 && d[1].abs() > 0.5 * dl {
+                // Points toutes les demi-mailles le long de l'arête.
+                let n = (dl / 0.5).ceil().max(1.0) as usize;
+                for q in 0..=n {
+                    let t = q as f64 / n as f64;
+                    pts.push([0, 1, 2].map(|a| f.a[a] + t * d[a]));
+                }
+            }
+        }
+        if pts.is_empty() {
+            return Err("raffinement du bord de fuite : aucune arête vive en envergure".into());
+        }
+        let m = e.max(0.05 * l);
+        sets.push((pts, [m, m]));
+    }
+    let band = (crate::refine3d::MARGIN3 + 2) as f64;
+    let mut out = Vec::new();
+    if std::env::var("SOUFFLERIE_BOITE_ENTIERE").is_ok() {
+        // Diagnostic : une boîte qui entoure toute la maquette.
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for t in tris {
+            for v in t {
+                for q in 0..3 {
+                    lo[q] = lo[q].min(v[q]);
+                    hi[q] = hi[q].max(v[q]);
+                }
+            }
+        }
+        let blo = [0, 1, 2].map(|a| (lo[a] - e - band).floor().max(3.0) as usize);
+        let bhi = [0, 1, 2].map(|a| ((hi[a] + e + band).ceil() as usize).min(dims[a] - 4));
+        let core = [[0, 1, 2].map(|a| blo[a] as f64 + band), [0, 1, 2].map(|a| bhi[a] as f64 - band)];
+        return Ok(vec![(blo, bhi, core)]);
+    }
+    for (mut pts, mx) in sets {
+        pts.sort_by(|a, b| a[1].total_cmp(&b[1]));
+        // Tronçons d'étendue en x et z au plus w.
+        let mut chunks: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0;
+        let (mut x0, mut x1, mut z0, mut z1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (k, p) in pts.iter().enumerate() {
+            let (nx0, nx1, nz0, nz1) = (x0.min(p[0]), x1.max(p[0]), z0.min(p[2]), z1.max(p[2]));
+            if k > start && (nx1 - nx0 > w || nz1 - nz0 > w) {
+                chunks.push((start, k));
+                start = k;
+                (x0, x1, z0, z1) = (p[0], p[0], p[2], p[2]);
+            } else {
+                (x0, x1, z0, z1) = (nx0, nx1, nz0, nz1);
+            }
+        }
+        chunks.push((start, pts.len()));
+        let nc = chunks.len();
+        for (c, &(a, b)) in chunks.iter().enumerate() {
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for p in &pts[a..b] {
+                for q in 0..3 {
+                    lo[q] = lo[q].min(p[q]);
+                    hi[q] = hi[q].max(p[q]);
+                }
+            }
+            // Domaine propre en y : jusqu'au milieu de l'écart avec les voisins.
+            let ylo = if c == 0 { lo[1] - e } else { 0.5 * (pts[a - 1][1] + lo[1]) };
+            let yhi = if c + 1 == nc { hi[1] + e } else { 0.5 * (hi[1] + pts[b][1]) };
+            let blo = [
+                (lo[0] - mx[0] - band).floor().max(3.0) as usize,
+                (ylo - band - e).floor().max(3.0) as usize,
+                (lo[2] - e - band).floor().max(3.0) as usize,
+            ];
+            let bhi = [
+                ((hi[0] + mx[1] + band).ceil() as usize).min(dims[0] - 4),
+                ((yhi + band + e).ceil() as usize).min(dims[1] - 4),
+                ((hi[2] + e + band).ceil() as usize).min(dims[2] - 4),
+            ];
+            // Domaine propre : la boîte moins sa bande de bord ; en y, la part
+            // d'envergure du tronçon.
+            let core = [
+                [blo[0] as f64 + band, ylo.max(blo[1] as f64 + band), blo[2] as f64 + band],
+                [bhi[0] as f64 - band, yhi.min(bhi[1] as f64 - band), bhi[2] as f64 - band],
+            ];
+            out.push((blo, bhi, core));
+        }
+    }
+    Ok(out)
+}
+
 /// Hauteur de raccord de la loi de paroi, en mailles de la grille.
 pub const WM_H: f64 = 2.0;
 
@@ -1709,6 +1844,26 @@ impl Gpu3D {
         depth: usize,
         le: bool,
     ) -> Result<Gpu3D, String> {
+        Self::with_refinement_edges(body, nu, u_in, fp16, sa, depth, le, false)
+    }
+
+    /// Idem, avec des grilles deux fois plus fines encore, limitées aux bords
+    /// d'attaque (`le`) et de fuite (`te`) d'une maquette maillée : plusieurs
+    /// boîtes qui suivent chaque bord en envergure (voir `edge_boxes`). Au
+    /// bord de fuite, la portance dépend de la place du bord dans la maille
+    /// (condition de Kutta discrète : ±8 % à 32 mailles par corde, ±3 % à 64,
+    /// aile AR 4) ; l'erreur, d'ordre un en maille, se réduit en raffinant là.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_refinement_edges(
+        body: &Body3D,
+        nu: f64,
+        u_in: f32,
+        fp16: bool,
+        sa: bool,
+        depth: usize,
+        le: bool,
+        te: bool,
+    ) -> Result<Gpu3D, String> {
         let (device, queue, name) = Self::open_device()?;
         let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false)?;
         let depth = depth.min(crate::refine3d::EXTENT3.len());
@@ -1759,73 +1914,42 @@ impl Gpu3D {
             origin.push(porg);
         }
         let full = levels.len();
-        if le {
+        let mut parent = (0..full).collect::<Vec<usize>>();
+        let mut lev_depth: Vec<u32> = (1..=full as u32).collect();
+        let mut core: Vec<Option<[[f64; 3]; 2]>> = vec![None; full];
+        if le || te {
             let k = depth + 1;
             let sp = (1u64 << (k - 1)) as f64;
-            let mesh = parent_body.mesh.clone().ok_or("raffinement du bord d'attaque : maquette maillée seulement")?;
-            let nrm = |t: &crate::stl::Tri| {
-                let e1 = [0, 1, 2].map(|a| t[1][a] - t[0][a]);
-                let e2 = [0, 1, 2].map(|a| t[2][a] - t[0][a]);
-                [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
-            };
-            let vol: f64 = mesh.tris.iter().map(|t| { let n = nrm(t); (0..3).map(|a| t[0][a] * n[a]).sum::<f64>() }).sum();
-            let sgn = if vol >= 0.0 { 1.0 } else { -1.0 };
-            let (mut a0, mut a1) = ([f64::MAX; 3], [f64::MIN; 3]);
-            for t in &mesh.tris {
-                let n = nrm(t);
-                let m = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                if m < 1e-12 || sgn * n[0] / m > -0.5 {
-                    continue;
-                }
-                for v in t {
-                    for a in 0..3 {
-                        a0[a] = a0[a].min(v[a]);
-                        a1[a] = a1[a].max(v[a]);
-                    }
-                }
-            }
-            if a0[0] > a1[0] {
-                return Err("raffinement du bord d'attaque : aucune face tournée vers l'amont".into());
-            }
-            // Marges (mailles de la grille parente) : de quoi loger le pic de
-            // dépression et le début de la recompression (10 % de la longueur
-            // de référence vers l'aval), plus la zone de recouvrement.
-            let e = (crate::refine3d::MARGIN3 + 4) as f64;
-            let down = e.max(0.1 * parent_body.l as f64);
+            let mesh = parent_body.mesh.clone().ok_or("raffinement des bords : maquette maillée seulement")?;
             let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
-            let lo = [
-                (a0[0] - e).floor().max(3.0) as usize,
-                (a0[1] - e).floor().max(3.0) as usize,
-                (a0[2] - e).floor().max(3.0) as usize,
-            ];
-            let hi = [
-                ((a1[0] + down).ceil() as usize).min(pnx - 4),
-                ((a1[1] + e).ceil() as usize).min(pny - 4),
-                ((a1[2] + e).ceil() as usize).min(pnz - 4),
-            ];
-            let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
-            // Une seule boîte alignée sur les axes : sur une aile en flèche,
-            // elle couvre presque toute l'aile. Au-delà de quatre fois la
-            // grille parente, elle coûte autant qu'un raffinement complet
-            // (environ cinq fois) et risque d'épuiser la mémoire du GPU.
-            let n_le = dims.iter().product::<usize>();
-            if n_le > 4 * pnx * pny * pnz {
+            let boxes = edge_boxes(&mesh.tris, parent_body.l as f64, [pnx, pny, pnz], le, te)?;
+            let n_tot: usize = boxes.iter().map(|b| (0..3).map(|a| 2 * (b.1[a] - b.0[a]) + 1).product::<usize>()).sum();
+            // Au-delà de quatre fois la grille parente, les boîtes coûtent
+            // autant qu'un raffinement complet (environ cinq fois) et risquent
+            // d'épuiser la mémoire du GPU.
+            if n_tot > 4 * pnx * pny * pnz {
                 return Err(format!(
-                    "raffinement du bord d'attaque : {:.0} M mailles, plus de quatre fois la grille parente (bord d'attaque en flèche ?) : raffiner toute la maquette (--raff) plutôt",
-                    n_le as f64 / 1e6
+                    "raffinement des bords : {:.0} M mailles, plus de quatre fois la grille parente : raffiner toute la maquette (--raff) plutôt",
+                    n_tot as f64 / 1e6
                 ));
             }
-            let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
-            let nu_k = nu * (1u64 << k) as f64;
-            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
-            child.les = top.les;
-            {
-                let parent = if k == 1 { &top } else { &levels[k - 2] };
-                links.push(crate::refine3d::Link3::new(parent, &child, lo));
+            for (lo, hi, cr) in boxes {
+                let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
+                let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
+                let nu_k = nu * (1u64 << k) as f64;
+                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
+                child.les = top.les;
+                {
+                    let par = if full == 0 { &top } else { &levels[full - 1] };
+                    links.push(crate::refine3d::Link3::new(par, &child, lo));
+                }
+                levels.push(child);
+                origin.push([0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp));
+                parent.push(full);
+                lev_depth.push(k as u32);
+                // Domaine propre en mailles de la veine.
+                core.push(Some([[0, 1, 2].map(|a| porg[a] + cr[0][a] / sp), [0, 1, 2].map(|a| porg[a] + cr[1][a] / sp)]));
             }
-            levels.push(child);
-            porg = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
-            origin.push(porg);
         }
         top.refine = Some(Box::new(crate::refine3d::Refinement {
             levels,
@@ -1833,6 +1957,9 @@ impl Gpu3D {
             fresh: true,
             origin,
             full,
+            parent,
+            depth: lev_depth,
+            core,
         }));
         Ok(top)
     }
@@ -2423,8 +2550,8 @@ impl Gpu3D {
         if let Some(r) = self.refine.as_mut() {
             for (k, g) in r.levels.iter_mut().enumerate() {
                 g.essai = bits;
-                // Viscosité en unités de la grille k + 1 (2^(k+1) fois plus grande).
-                g.essai_nu = (nu_cap * (2u64 << k) as f64) as f32;
+                // Viscosité en unités de cette grille (2^niveau fois plus grande).
+                g.essai_nu = (nu_cap * (1u64 << r.depth[k]) as f64) as f32;
             }
         }
     }
@@ -2437,7 +2564,7 @@ impl Gpu3D {
         self.set_viscosity_one(nu);
         if let Some(r) = self.refine.as_mut() {
             for (k, g) in r.levels.iter_mut().enumerate() {
-                g.set_viscosity_one(nu * (2u64 << k) as f64);
+                g.set_viscosity_one(nu * (1u64 << r.depth[k]) as f64);
                 g.les = self.les;
             }
         }
@@ -2612,29 +2739,35 @@ impl Gpu3D {
                     steps: f.steps >> k,
                 };
             }
-            // Grille du bord d'attaque : ses mailles pariétales hors de sa
-            // bande de bord, et celles de la grille entière ailleurs (sous la
-            // grille fine, la grille entière reçoit l'état recopié).
-            let (fo, fs) = (r.origin[r.full - 1], (1u64 << r.full) as f64);
-            let (lo, ls) = (r.origin[r.full], (1u64 << (r.full + 1)) as f64);
-            let ld = {
-                let g = &r.levels[r.full];
-                [g.nx, g.ny, g.nz]
-            };
-            let m = (2 * crate::refine3d::MARGIN3 + 2) as f64;
-            let inner = |q: [f64; 3]| (0..3).all(|a| q[a] >= m && q[a] <= (ld[a] - 1) as f64 - m);
-            let a = r.levels[r.full - 1].take_forces_masked(|p| !inner([0, 1, 2].map(|i| (fo[i] + p[i] / fs - lo[i]) * ls)));
-            let b = r.levels[r.full].take_forces_masked(|p| inner(p));
-            for g in r.levels[r.full + 1..].iter_mut() {
-                let _ = g.take_forces_one();
+            // Grilles partielles (bords d'attaque et de fuite) : leurs mailles
+            // pariétales dans leur domaine propre ; la grille entière ailleurs
+            // (sous une grille fine, elle reçoit l'état recopié).
+            let (fo, fs) = (r.origin[r.full - 1], r.scale(r.full - 1));
+            let cores: Vec<[[f64; 3]; 2]> = r.core.iter().flatten().copied().collect();
+            let in_core = |q: [f64; 3], c: &[[f64; 3]; 2]| (0..3).all(|a| q[a] >= c[0][a] && q[a] < c[1][a]);
+            let a = r.levels[r.full - 1].take_forces_masked(|p| {
+                let q = [0, 1, 2].map(|i| fo[i] + p[i] / fs);
+                !cores.iter().any(|c| in_core(q, c))
+            });
+            let mut f = [a.fx / s, a.fy / s, a.fz / s];
+            for k in r.full..r.levels.len() {
+                let (lo, ls) = (r.origin[k], r.scale(k));
+                let core = r.core[k];
+                let b = r.levels[k].take_forces_masked(|p| {
+                    let q = [0, 1, 2].map(|i| lo[i] + p[i] / ls);
+                    core.is_some_and(|c| in_core(q, &c))
+                });
+                let sb = ls * ls;
+                f[0] += b.fx / sb;
+                f[1] += b.fy / sb;
+                f[2] += b.fz / sb;
             }
             self.lost |= r.levels.iter().any(|g| g.lost);
             self.refine = Some(r);
-            let sb = 4.0 * s;
             return Force3 {
-                fx: a.fx / s + b.fx / sb,
-                fy: a.fy / s + b.fy / sb,
-                fz: a.fz / s + b.fz / sb,
+                fx: f[0],
+                fy: f[1],
+                fz: f[2],
                 steps: a.steps >> k,
             };
         }
@@ -2731,7 +2864,7 @@ impl Gpu3D {
                     nut: g.nu_tilde(),
                     d: [g.nx, g.ny, g.nz],
                     org: r.origin[k],
-                    s: (1u64 << (k + 1)) as f64,
+                    s: (1u64 << r.depth[k]) as f64,
                     nu: g.nu,
                     // Enveloppe fantôme et zone de recouvrement exclues.
                     m: 2 * crate::refine3d::MARGIN3 + 2,
@@ -2923,7 +3056,7 @@ impl Gpu3D {
         let mut maps = Vec::new();
         for k in grids {
             let (org, s) = match (k, self.refine.as_ref()) {
-                (Some(i), Some(r)) => (r.origin[i], (1u64 << (i + 1)) as f64),
+                (Some(i), Some(r)) => (r.origin[i], r.scale(i)),
                 _ => ([0.0; 3], 1.0),
             };
             let g = self.grid_mut(k);
@@ -3159,11 +3292,34 @@ impl Gpu3D {
             .collect()
     }
 
-    /// Grille partielle du bord d'attaque : dimensions, mailles pariétales, facteur.
-    pub fn le_grid(&self) -> Option<([usize; 3], usize, usize)> {
+    /// Grilles partielles des bords, une ligne par boîte (diagnostic) :
+    /// origine, étendue et domaine propre en mailles de la veine.
+    pub fn edge_box_report(&self) -> Vec<String> {
+        let Some(r) = self.refine.as_ref() else { return Vec::new() };
+        (r.full..r.levels.len())
+            .map(|k| {
+                let (g, o, s) = (&r.levels[k], r.origin[k], r.scale(k));
+                let c = r.core[k].unwrap_or([[0.0; 3]; 2]);
+                format!(
+                    "x {:.1}..{:.1} y {:.1}..{:.1} z {:.1}..{:.1} · propre x {:.1}..{:.1} y {:.1}..{:.1} z {:.1}..{:.1} · {} mailles pariétales",
+                    o[0], o[0] + (g.nx - 1) as f64 / s, o[1], o[1] + (g.ny - 1) as f64 / s, o[2], o[2] + (g.nz - 1) as f64 / s,
+                    c[0][0], c[1][0], c[0][1], c[1][1], c[0][2], c[1][2], g.wall_count
+                )
+            })
+            .collect()
+    }
+
+    /// Grilles partielles des bords : nombre de boîtes, mailles, mailles
+    /// pariétales, facteur.
+    pub fn le_grid(&self) -> Option<(usize, usize, usize, usize)> {
         let r = self.refine.as_ref()?;
-        let g = r.levels.get(r.full)?;
-        Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << (r.full + 1)))
+        let parts = &r.levels[r.full..];
+        if parts.is_empty() {
+            return None;
+        }
+        let n = parts.iter().map(|g| g.n).sum();
+        let w = parts.iter().map(|g| g.wall_count).sum();
+        Some((parts.len(), n, w, r.scale(r.full) as usize))
     }
 
     pub fn finest(&self) -> Option<([usize; 3], usize, usize)> {
@@ -3199,11 +3355,14 @@ impl Gpu3D {
             mesh: std::sync::Arc<crate::stl::MeshBody>,
             /// Bande exclue près des bords (fantômes, recouvrement) ; 0 : grille entière.
             m: f64,
+            /// Grille partielle : domaine propre (mailles de la veine).
+            core: Option<[[f64; 3]; 2]>,
         }
         let mut levs: Vec<Lev> = Vec::new();
         match self.refine.as_mut() {
             Some(r) => {
                 for k in r.full..=r.levels.len() {
+                    let sk = r.scale(k - 1);
                     let g = &mut r.levels[k - 1];
                     let mesh = g.surface.clone()?;
                     levs.push(Lev {
@@ -3211,10 +3370,11 @@ impl Gpu3D {
                         solid: g.solid.clone(),
                         d: [g.nx, g.ny, g.nz],
                         org: r.origin[k - 1],
-                        s: (1u64 << k) as f64,
+                        s: sk,
                         nu: g.nu,
                         mesh,
                         m: if k == r.full { 0.0 } else { (2 * crate::refine3d::MARGIN3 + 2) as f64 },
+                        core: r.core[k - 1],
                     });
                 }
             }
@@ -3229,6 +3389,7 @@ impl Gpu3D {
                     nu: self.nu,
                     mesh,
                     m: 0.0,
+                    core: None,
                 });
             }
         }
@@ -3357,9 +3518,16 @@ impl Gpu3D {
                 }
                 let n = n0.map(|v| sgn * v / a2);
                 let c = [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
-                // Grille partielle : triangle entier loin de ses bords.
+                // Grille partielle : triangle entier loin de ses bords, centre
+                // dans son domaine propre (une seule des grilles sœurs).
                 if l.m > 0.0 && t.iter().any(|v| (0..3).any(|a| v[a] < l.m + 3.0 || v[a] > (l.d[a] - 1) as f64 - l.m - 3.0)) {
                     continue;
+                }
+                if let Some(cr) = l.core {
+                    let q = [0, 1, 2].map(|a| l.org[a] + c[a] / l.s);
+                    if !(0..3).all(|a| q[a] >= cr[0][a] && q[a] < cr[1][a]) {
+                        continue;
+                    }
                 }
                 let ar = 0.5 * a2;
                 match probe(l, c, n) {

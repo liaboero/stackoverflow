@@ -760,6 +760,9 @@ la baisse de ×4 à ×8 vient du bord d'attaque. La portance (boîte) passe de
 bord d'attaque d'une aile en flèche sur presque toute sa corde : 9,4 M
 mailles à ×8 (la grille ×4 en a 2,5 M), 54 M à ×16, au-delà de la mémoire du
 GPU ; `--ba` refuse au-delà de quatre fois la grille parente.
+*Correction :* une grille partielle qui coupe la maquette fausse
+l'écoulement (section « Grilles des bords » plus bas) ; l'accord de
+TR-1208 et la conclusion sur la traînée du bord d'attaque ne tiennent pas.
 
 **Traînée en champ lointain (`--sillage 1`).** `Gpu3D::wake_drag` décompose
 la traînée dans un plan transversal (Betz, Maskell) : perte de pression
@@ -1066,6 +1069,77 @@ intégrale et sa mesure restent utiles pour ces diagnostics.
 `--transpiration 1` reste disponible pour reproduire l'essai, mais ne doit
 pas servir aux calculs.
 
+### Bord de fuite : une erreur de placement d'ordre un
+
+L'excès de portance existe déjà en glissement libre (aile AR 4, 4°,
+×2 : 0,299 contre 0,265 pour VSPAERO en panneaux épais) : il n'est pas
+visqueux. Il dépend de la place du bord de fuite dans la maille.
+`run3d --decalage d` décale la maquette de d mailles de la veine ; la
+fraction f du bord de fuite dans la maille de la grille fine en découle
+(`te_snap` la cale à 0,7 sur la veine, soit 0,4 à ×2, 0,8 à ×4, 0,6 à ×8).
+Portance du bilan sur boîte, aile AR 4, 4°, L = 16 :
+
+| f (×2) | 0,15 | 0,28 | 0,40 | 0,53 | 0,65 | 0,78 | 0,90 | 0,03 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| loi de paroi, ×2 | 0,252 | 0,269 | 0,268 | 0,277 | 0,283 | 0,291 | 0,294 | 0,279 |
+
+| f (×4) | 0,80 | 0,05 | 0,30 | 0,55 |
+| --- | --- | --- | --- | --- |
+| loi de paroi, ×4 | 0,273 | 0,275 | 0,275 | 0,260 |
+
+En glissement libre (×2), même dent de scie : 0,287 et 0,299 pour f = 0,4,
+0,322 et 0,323 pour f = 0,9. La portance croît pendant que le bord de fuite
+avance vers le nœud suivant, puis retombe quand il le passe : la condition
+de Kutta discrète reste attachée aux nœuds pendant que la géométrie se
+déplace. L'écart (±8 % à ×2, ±3 % à ×4) est d'ordre un en maille ; la
+moyenne sur le placement passe de 0,276 à 0,271, et son extrapolation
+(Richardson, ordre un) donne 0,266, la valeur de VSPAERO en panneaux
+épais. L'« excès de portance » des sections précédentes est donc pour
+l'essentiel cette erreur de discrétisation au bord de fuite, plus ou moins
+forte selon où tombe le bord de fuite (le calage de `te_snap` place la
+grille ×4 près du haut de la dent). La traînée du bilan sur boîte varie
+plus encore avec le placement (0,032 à 0,070 à ×4). Le frottement retire
+7 à 9 % de portance à placement égal (0,287 → 0,268 ; 0,322 → 0,294) : le
+décambrage visqueux existe bien.
+
+### Grilles des bords (`--ba 1`, `--bf 1`) : essai
+
+Pour réduire cette erreur sans tout raffiner, les grilles partielles
+suivent maintenant les bords : plusieurs boîtes sœurs au même niveau
+(`Refinement::parent`, `depth`, `core`), qui suivent en envergure le bord
+d'attaque (faces tournées vers l'amont) et le bord de fuite (arêtes vives
+saillantes orientées en envergure, `geom3d::feature_edges`) ; sur
+TR-1208, 9 boîtes par bord au lieu d'une boîte qui couvrait presque toute
+l'aile. Chaque boîte ne compte, pour les efforts, que dans son domaine
+propre (pas de double compte entre sœurs). Une boîte qui entoure toute
+l'aile (diagnostic `SOUFFLERIE_BOITE_ENTIERE=1`) redonne le calcul ×4
+(0,2733 contre 0,2734) : le mécanisme fonctionne.
+
+Mais une boîte qui coupe la maquette fausse l'écoulement : aile AR 4, 4°,
+×2, portance 0,2685 sans boîte, 0,189 avec la boîte du bord d'attaque,
+0,174 avec celle du bord de fuite ; avant cette refonte déjà, la boîte
+unique du bord d'attaque donnait 0,318. Le Cp à mi-envergure montre une
+succion plus faible dans toute la boîte, jusqu'à 6 mailles de la paroi, et
+un saut là où la face de la boîte coupe l'extrados : la circulation
+change. Deux défauts du couplage près d'une paroi ont été corrigés (sans
+effet sur les grilles qui entourent toute la maquette) :
+- remplissage des mailles fantômes : les populations tirées d'un nœud
+  solide de la grille parente sont remplacées par le rebond du nœud
+  lui-même, et l'interpolation (linéaire près d'une paroi) ne lit plus
+  les nœuds solides ;
+- recopie vers la grille parente : une maille pariétale de la grille fine
+  rend ses moments avec leur partie hors équilibre (la contrainte), et non
+  un équilibre.
+
+Le défaut reste (0,189 avec ces corrections). Cause probable : le couplage
+par les moments n'est pas conservatif là où une paroi traverse la face
+d'une grille (couche limite et loi de paroi à deux résolutions de part et
+d'autre). Il faudrait un raccord conservatif (volumique, à la Rohde) ou
+des boîtes qui ne coupent pas la maquette. Jusque-là, `--ba` et `--bf`
+affichent un avertissement et ne doivent pas servir aux calculs ;
+l'incertitude de placement (±3 % à ×4 sur la portance) est à garder en
+tête, ou à moyenner en calculant plusieurs `--decalage`.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -1089,6 +1163,7 @@ arguments en tête de chaque fichier) :
 | `ibl3d` | couche limite intégrale sur le maillage (θ, H, δ*, v_n par triangle, CSV), profils de vitesse le long de la normale, couplages de transpiration (mode 1 : u_e à WM_H ; mode 2 : déplacement manquant au champ) |
 | `decamber2d` | décambrage visqueux 2D : couplage faible (1 et 20 itérations) contre couplage simultané (Newton), traînée, transition ; `decamber2d 0012 6e6 0 0:15:1`, `decamber2d 2412 3e6 libre -2:12:2` |
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
+| `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur

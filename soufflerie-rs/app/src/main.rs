@@ -50,7 +50,7 @@ fn usage() -> ! {
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
          soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
-         \x20         [--raff 0..3] [--ba 1 : grille ×2 de plus au bord d'attaque] [--sillage 1 : traînée en champ lointain]\n\
+         \x20         [--raff 0..3] [--ba 1, --bf 1 : grilles ×2 de plus aux bords d'attaque et de fuite] [--sillage 1 : traînée en champ lointain]\n\
          soufflerie geom  --stl fichier.stl|fichier.sgeo [mise en place] [--l 16 --raff 2] [--exporter f.sgeo|f.stl]\n\
          \x20                                  contrôle géométrique (résolution par tranche, arêtes vives), export\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
@@ -770,13 +770,26 @@ fn cmd_run3d(a: &Args) {
     };
     let depth = a.get("raff", 0usize).min(3);
     let le = a.get("ba", 0usize) > 0;
-    let mut sim = match Gpu3D::with_refinement_le(&body, nu, U, fp16, sa, depth, le) {
+    let te = a.get("bf", 0usize) > 0;
+    if le || te {
+        eprintln!(
+            "Attention : grilles des bords expérimentales. Une boîte qui coupe la maquette fausse l'écoulement (portance −20 à −30 % sur l'aile AR 4) : voir le README, « Grilles des bords »."
+        );
+    }
+    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");
             std::process::exit(1);
         }
     };
+    // Variantes de diagnostic de la loi de paroi (bits de `Gpu3D::set_essai`,
+    // 16 : glissement libre).
+    let essai = a.get("essai", 0u32);
+    if essai != 0 {
+        sim.set_essai(essai, a.get("essai-nu", 0.0f64));
+        eprintln!("Diagnostic : variantes de paroi {essai}");
+    }
     let xtr = a.get("xtr", 0.0f64);
     if sa && xtr > 0.0 {
         sim.set_transition(xtr);
@@ -826,14 +839,8 @@ fn cmd_run3d(a: &Args) {
             l * s
         );
     }
-    if let Some((d, w, s)) = sim.le_grid() {
-        eprintln!(
-            "Grille du bord d'attaque ×{s} : {}×{}×{} = {:.2} M mailles, {w} mailles pariétales",
-            d[0],
-            d[1],
-            d[2],
-            (d[0] * d[1] * d[2]) as f64 / 1e6
-        );
+    if let Some((nb, n, w, s)) = sim.le_grid() {
+        eprintln!("Grilles des bords ×{s} : {nb} boîtes, {:.2} M mailles, {w} mailles pariétales", n as f64 / 1e6);
     }
     if sa {
         // y⁺ attendu au premier nœud (plaque plane turbulente, nœud à une demi-maille).

@@ -79,6 +79,14 @@ fn common() -> String {
     let cy = list((0..19).map(|i| C3[i][1].to_string()).collect());
     let cz = list((0..19).map(|i| C3[i][2].to_string()).collect());
     let w = list((0..19).map(|i| f(w3(i))).collect());
+    let op = list(
+        (0..19)
+            .map(|i| {
+                let c = C3[i];
+                C3.iter().position(|d| d[0] == -c[0] && d[1] == -c[1] && d[2] == -c[2]).unwrap().to_string()
+            })
+            .collect(),
+    );
     let mut regul = String::new();
     for i in 0..19 {
         let [x, y, z] = C3[i].map(|v| v as f64);
@@ -126,6 +134,7 @@ const CX = array<i32, 19>({cx});
 const CY = array<i32, 19>({cy});
 const CZ = array<i32, 19>({cz});
 const W = array<f32, 19>({w});
+const OP = array<u32, 19>({op});
 
 fn moments(f: array<f32, 19>) -> Mom {{
   var rho = 0.0;
@@ -216,17 +225,27 @@ const GATHER: &str = "
 @group(0) @binding(1) var<storage, read_write> gm: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> gidx: array<u32>;
 @group(0) @binding(5) var<storage, read> pnut: array<f32>;
+@group(0) @binding(6) var<storage, read> pwall: array<u32>;
 
 fn pcell(x: i32, y: i32, z: i32) -> u32 {
   let q = clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1));
   return u32(q.x) + P.pnx * (u32(q.y) + P.pny * u32(q.z));
 }
 
-// Moments avant collision au nœud parent, ramenés à la grille fine.
+// Moments avant collision au nœud parent, ramenés à la grille fine. Une
+// population tirée d'un nœud solide (grille fine qui coupe la maquette)
+// est renvoyée par la paroi : population opposée du nœud lui-même (rebond à
+// mi-chemin), au lieu du contenu sans signification du nœud solide.
 fn pre_at(x: i32, y: i32, z: i32) -> Mom {
   var f: array<f32, 19>;
+  let here = pcell(x, y, z);
   for (var i = 0u; i < 19u; i++) {
-    f[i] = ld_pf(i, pcell(x - CX[i], y - CY[i], z - CZ[i]));
+    let src = pcell(x - CX[i], y - CY[i], z - CZ[i]);
+    if (pwall[src] == 0xffffffffu) {
+      f[i] = ld_pf(OP[i], here);
+    } else {
+      f[i] = ld_pf(i, src);
+    }
   }
   var m = moments(f);
   var v = 3.0 * P.nu_p;
@@ -254,6 +273,15 @@ fn stencil(x2: i32) -> St {
   return St(4, vec4<i32>(i0 - 1, i0, i0 + 1, i0 + 2), vec4<f32>(-0.0625, 0.5625, 0.5625, -0.0625));
 }
 
+// Pochoir linéaire le long d'un axe (près d'une paroi).
+fn lin(x2: i32) -> St {
+  if ((x2 & 1) == 0) {
+    return St(1, vec4<i32>(x2 / 2, 0, 0, 0), vec4<f32>(1.0, 0.0, 0.0, 0.0));
+  }
+  let i0 = (x2 - 1) / 2;
+  return St(2, vec4<i32>(i0, i0 + 1, 0, 0), vec4<f32>(0.5, 0.5, 0.0, 0.0));
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let g = flat(gid, nwg);
@@ -269,15 +297,55 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let sy = stencil(i32(2u * P.oy + y));
   let sz = stencil(i32(2u * P.oz + z));
   var m = Mom(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+  // Pochoir cubique s'il ne touche aucun nœud solide ; sinon linéaire sur
+  // les seuls nœuds fluides, poids renormalisés (grille fine qui coupe la
+  // maquette : l'interpolation ne lit pas l'intérieur du corps).
+  var solid = false;
   for (var k = 0; k < sz.n; k++) {
     for (var j = 0; j < sy.n; j++) {
       for (var i = 0; i < sx.n; i++) {
-        let w = sx.w[i] * sy.w[j] * sz.w[k];
-        let q = pre_at(sx.o[i], sy.o[j], sz.o[k]);
-        m.a += w * q.a;
-        m.b += w * q.b;
-        m.c += w * q.c;
+        solid = solid || pwall[pcell(sx.o[i], sy.o[j], sz.o[k])] == 0xffffffffu;
       }
+    }
+  }
+  if (!solid) {
+    for (var k = 0; k < sz.n; k++) {
+      for (var j = 0; j < sy.n; j++) {
+        for (var i = 0; i < sx.n; i++) {
+          let w = sx.w[i] * sy.w[j] * sz.w[k];
+          let q = pre_at(sx.o[i], sy.o[j], sz.o[k]);
+          m.a += w * q.a;
+          m.b += w * q.b;
+          m.c += w * q.c;
+        }
+      }
+    }
+  } else {
+    let lx = lin(i32(2u * P.ox + x));
+    let ly = lin(i32(2u * P.oy + y));
+    let lz = lin(i32(2u * P.oz + z));
+    var ws = 0.0;
+    for (var k = 0; k < lz.n; k++) {
+      for (var j = 0; j < ly.n; j++) {
+        for (var i = 0; i < lx.n; i++) {
+          if (pwall[pcell(lx.o[i], ly.o[j], lz.o[k])] == 0xffffffffu) { continue; }
+          let w = lx.w[i] * ly.w[j] * lz.w[k];
+          let q = pre_at(lx.o[i], ly.o[j], lz.o[k]);
+          m.a += w * q.a;
+          m.b += w * q.b;
+          m.c += w * q.c;
+          ws += w;
+        }
+      }
+    }
+    if (ws > 1e-6) {
+      m.a /= ws;
+      m.b /= ws;
+      m.c /= ws;
+    } else {
+      // Maille fantôme dans le corps : état au repos (jamais tiré, les liens
+      // qui y mènent sont des liens de paroi).
+      m = Mom(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0), vec4<f32>(0.0, 0.0, 0.0, 0.5 + 3.0 * P.nu_c));
     }
   }
   gm[6u * g + 3u] = m.a;
@@ -348,8 +416,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let tau_p = 0.5 + 3.0 * (P.nu_p + 0.5 * vt);
     let k = 2.0 * (tau_p - 1.0) / tau_c;
     p = regul(m.a.x, m.a.yzw, k * m.b.x, k * m.b.y, k * m.b.z, k * m.c.x, k * m.c.y, k * m.c.z);
+  } else if (cwall[cidx] < 0xfffffffeu) {
+    // Maille pariétale de la grille fine (fluide, liens de paroi : pas de
+    // tirage possible) : moments après collision, partie hors équilibre
+    // ramenée avant collision (÷ (1 − 1/τ_c)), puis à la grille parente comme
+    // pour les autres mailles. Une grille fine qui coupe la maquette rend
+    // ainsi à la grille parente la contrainte de paroi, et pas un équilibre.
+    for (var i = 0u; i < 19u; i++) {
+      f[i] = ld_cc(i, cidx);
+    }
+    m = moments(f);
+    let tau_c = 0.5 + 3.0 * (P.nu_c + vt);
+    let tau_p = 0.5 + 3.0 * (P.nu_p + 0.5 * vt);
+    let post = 1.0 - 1.0 / tau_c;
+    var k = 0.0;
+    if (abs(post) > 0.1) { k = 2.0 * (tau_p - 1.0) / tau_c / post; }
+    p = regul(m.a.x, m.a.yzw, k * m.b.x, k * m.b.y, k * m.b.z, k * m.c.x, k * m.c.y, k * m.c.z);
   } else {
-    // Maille pariétale ou solide dans la grille fine : équilibre (affichage).
+    // Maille solide ou fantôme dans la grille fine : équilibre (affichage).
     for (var i = 0u; i < 19u; i++) {
       f[i] = ld_cc(i, cidx);
     }
@@ -521,6 +605,7 @@ impl Link3 {
                         (3, &p.pops[1 - cur][0]),
                         (4, &p.pops[1 - cur][1]),
                         (5, &p.nut[cur]),
+                        (6, &p.wall),
                     ],
                 )
             })
@@ -583,8 +668,24 @@ pub(crate) struct Refinement {
     /// Nœud 0 de chaque grille fine, en mailles de la veine.
     pub(crate) origin: Vec<[f64; 3]>,
     /// Grilles qui entourent toute la maquette (les suivantes n'en couvrent
-    /// qu'une partie : bord d'attaque).
+    /// qu'une partie : bords d'attaque et de fuite).
     pub(crate) full: usize,
+    /// Parent de chaque grille fine : 0 pour la veine, i + 1 pour `levels[i]`
+    /// (les grilles partielles d'un même niveau sont sœurs).
+    pub(crate) parent: Vec<usize>,
+    /// Niveau de chaque grille fine : 2^niveau fois plus fine que la veine.
+    pub(crate) depth: Vec<u32>,
+    /// Grilles partielles : domaine propre (mailles de la veine, coins bas et
+    /// haut), où leurs efforts comptent ; les domaines de sœurs ne se
+    /// recouvrent pas. None pour les grilles entières.
+    pub(crate) core: Vec<Option<[[f64; 3]; 2]>>,
+}
+
+impl Refinement {
+    /// Rapport de raffinement de `levels[i]` par rapport à la veine.
+    pub(crate) fn scale(&self, i: usize) -> f64 {
+        (1u64 << self.depth[i]) as f64
+    }
 }
 
 /// Emprise des grilles fines autour de la maquette, en longueurs de
@@ -592,8 +693,10 @@ pub(crate) struct Refinement {
 pub(crate) const EXTENT3: [(f64, f64, f64); 3] = [(0.6, 1.5, 0.6), (0.35, 0.7, 0.4), (0.2, 0.4, 0.25)];
 pub(crate) const MARGIN3: usize = MARGIN;
 
-/// Un pas de la grille k, suivi de deux pas de chaque grille plus fine.
-fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], pass: &mut wgpu::ComputePass, k: usize, slot: u32) {
+/// Un pas de la grille `k` (0 : veine, i + 1 : `levels[i]`), suivi de deux
+/// pas de chacune de ses grilles filles ; `links[c − 1]` relie la grille c à
+/// son parent.
+fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], pass: &mut wgpu::ComputePass, k: usize, slot: u32) {
     {
         let lev = &mut *levels[k];
         pass.set_pipeline(&lev.step_pipe);
@@ -606,33 +709,38 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], pass: &mut wgpu::ComputePa
         }
         lev.cur = 1 - lev.cur;
     }
-    let Some(link) = links.get(k) else { return };
-    link.gather(pass, levels[k].cur);
-    let (dx, dy) = disp(link.ng);
-    for a in 0..2 {
-        pass.set_pipeline(&link.fill);
-        pass.set_bind_group(0, &link.fill_bind[levels[k + 1].cur * 2 + a], &[]);
-        pass.dispatch_workgroups(dx, dy, 1);
-        encode(levels, links, pass, k + 1, slot);
+    for &c in &children[k] {
+        let link = &links[c - 1];
+        link.gather(pass, levels[k].cur);
+        let (dx, dy) = disp(link.ng);
+        for a in 0..2 {
+            pass.set_pipeline(&link.fill);
+            pass.set_bind_group(0, &link.fill_bind[levels[c].cur * 2 + a], &[]);
+            pass.dispatch_workgroups(dx, dy, 1);
+            encode(levels, links, children, pass, c, slot);
+        }
+        let nr = (link.r[0] * link.r[1] * link.r[2]) as u32;
+        let (rx, ry) = disp(nr);
+        pass.set_pipeline(&link.restrict);
+        pass.set_bind_group(0, &link.restrict_bind[levels[k].cur * 2 + levels[c].cur], &[]);
+        pass.dispatch_workgroups(rx, ry, 1);
     }
-    let nr = (link.r[0] * link.r[1] * link.r[2]) as u32;
-    let (rx, ry) = disp(nr);
-    pass.set_pipeline(&link.restrict);
-    pass.set_bind_group(0, &link.restrict_bind[levels[k].cur * 2 + levels[k + 1].cur], &[]);
-    pass.dispatch_workgroups(rx, ry, 1);
 }
 
 /// `n` pas de la veine `top` et de ses grilles fines.
 pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::cpu::Ramp) {
     for k in 0..r.links.len() {
-        let (p, c) = if k == 0 {
-            (&*top, &r.levels[0])
-        } else {
-            (&r.levels[k - 1], &r.levels[k])
-        };
+        let p = if r.parent[k] == 0 { &*top } else { &r.levels[r.parent[k] - 1] };
         let link = &mut r.links[k];
-        link.prepare(p, c);
+        link.prepare(p, &r.levels[k]);
     }
+    // Filles de chaque grille (indices de `all`).
+    let mut children = vec![Vec::new(); r.levels.len() + 1];
+    for k in 0..r.levels.len() {
+        children[r.parent[k]].push(k + 1);
+    }
+    // Niveau de chaque grille de `all`.
+    let lev_depth: Vec<u32> = std::iter::once(0).chain(r.depth.iter().copied()).collect();
     let device = top.device.clone();
     let queue = top.queue.clone();
     let mut all: Vec<&mut Gpu3D> = std::iter::once(top).chain(r.levels.iter_mut()).collect();
@@ -642,14 +750,14 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
             let mut pass = enc.begin_compute_pass(&Default::default());
             for (k, link) in r.links.iter().enumerate() {
                 for _ in 0..2 {
-                    link.gather(&mut pass, all[k].cur);
+                    link.gather(&mut pass, all[r.parent[k]].cur);
                 }
             }
         }
         queue.submit([enc.finish()]);
         r.fresh = false;
     }
-    let cost: usize = all.iter().enumerate().map(|(k, g)| g.n << k).sum();
+    let cost: usize = all.iter().enumerate().map(|(k, g)| g.n << lev_depth[k]).sum();
     let per_submit = (30_000_000 / cost.max(1)).clamp(1, crate::gpu3d::BATCH);
     let mut left = n;
     while left > 0 {
@@ -660,7 +768,7 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
             for s in 0..kc {
                 let (u, a) = ramp.at(t0 + s as u64);
                 let last = left == kc && s == kc - 1;
-                let p = g.params_for(u, a / (1u64 << k) as f32, last);
+                let p = g.params_for(u, a / (1u64 << lev_depth[k]) as f32, last);
                 let o = s * crate::gpu3d::SLOT as usize;
                 bytes[o..o + std::mem::size_of_val(&p)].copy_from_slice(bytemuck::bytes_of(&p));
             }
@@ -670,12 +778,12 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
             for s in 0..kc {
-                encode(&mut all, &r.links, &mut pass, 0, (s as u64 * crate::gpu3d::SLOT) as u32);
+                encode(&mut all, &r.links, &children, &mut pass, 0, (s as u64 * crate::gpu3d::SLOT) as u32);
             }
         }
         queue.submit([enc.finish()]);
         for (k, g) in all.iter_mut().enumerate() {
-            let steps = (kc as u64) << k;
+            let steps = (kc as u64) << lev_depth[k];
             g.time += steps;
             g.force_steps += steps;
         }

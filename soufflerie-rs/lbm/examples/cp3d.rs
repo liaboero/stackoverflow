@@ -19,7 +19,8 @@ fn main() {
     let (l, raff, re, eta, t, avg) = (g(5, 16.0) as usize, g(6, 2.0) as usize, g(7, 1e6), g(9, 0.0), g(10, 20.0), g(11, 6.0));
     let (body, _) = Body3D::from_mesh(&tris, l, &setup).unwrap();
     let u = 0.1f32;
-    let mut sim = Gpu3D::with_refinement(&body, u as f64 * l as f64 / re, u, g(12, 1.0) > 0.5, true, raff).unwrap();
+    let edges = std::env::var("SOUFFLERIE_BORDS").unwrap_or_default();
+    let mut sim = Gpu3D::with_refinement_edges(&body, u as f64 * l as f64 / re, u, g(12, 1.0) > 0.5, true, raff, edges.contains('a'), edges.contains('f')).unwrap();
     let spt = l as f64 / u as f64;
     let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
     sim.run(((t - avg) * spt) as usize, &ramp);
