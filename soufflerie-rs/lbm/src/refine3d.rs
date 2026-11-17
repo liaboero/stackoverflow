@@ -232,14 +232,15 @@ fn access(name: &str, ba: u32, bb: u32, fp16: bool, write: bool, n: &str) -> Str
     s
 }
 
-const GATHER: &str = "
-@group(0) @binding(1) var<storage, read_write> gm: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> gidx: array<u32>;
+/// Tirage, première passe : moments avant collision de chaque nœud parent
+/// des pochoirs (liste `pnode`, chaque nœud une seule fois ; un nœud sert
+/// à jusqu'à 64 mailles fantômes).
+const PRE: &str = "
+@group(0) @binding(1) var<storage, read_write> pm: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> pnode: array<i32>;
 @group(0) @binding(5) var<storage, read> pnut: array<f32>;
 @group(0) @binding(6) var<storage, read> pwall: array<u32>;
-@group(0) @binding(7) var<storage, read> gpos: array<u32>;
 @group(0) @binding(8) var<storage, read> pblk: array<u32>;
-
 // Rang d'une maille de la grille parente (boîte, ou couche par blocs).
 fn pcell(x: i32, y: i32, z: i32) -> u32 {
   let q = vec3<u32>(clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1)));
@@ -277,6 +278,30 @@ fn pre_at(x: i32, y: i32, z: i32) -> Mom {
   m.c = vec4<f32>(m.c.xyz * k, tau_c);
   return m;
 }
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let k = flat(gid, nwg);
+  if (k >= arrayLength(&pnode) / 3u) { return; }
+  let m = pre_at(pnode[3u * k], pnode[3u * k + 1u], pnode[3u * k + 2u]);
+  pm[3u * k] = m.a;
+  pm[3u * k + 1u] = m.b;
+  pm[3u * k + 2u] = m.c;
+}
+";
+
+/// Tirage, seconde passe : interpolation des moments des nœuds parents
+/// (`pm`) sur chaque maille fantôme, nœuds du pochoir dans l'ordre de
+/// `gslot` (u32::MAX : nœud solide sauté), pochoir linéaire si le bit 31
+/// de `gstart` est mis. Mêmes opérations, dans le même ordre, que le calcul
+/// direct d'autrefois (moments de chaque nœud recalculés pour chaque maille
+/// fantôme) : résultats identiques au bit près.
+const GATHER: &str = "
+@group(0) @binding(1) var<storage, read_write> gm: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> pm: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> gpos: array<u32>;
+@group(0) @binding(9) var<storage, read> gstart: array<u32>;
+@group(0) @binding(10) var<storage, read> gslot: array<u32>;
 
 struct St { n: i32, o: vec4<i32>, w: vec4<f32>, };
 // Pochoir le long d'un axe : nœud parent (coordonnée paire), ou interpolation
@@ -317,23 +342,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   // Pochoir cubique s'il ne touche aucun nœud solide ; sinon linéaire sur
   // les seuls nœuds fluides, poids renormalisés (grille fine qui coupe la
   // maquette : l'interpolation ne lit pas l'intérieur du corps).
-  var solid = false;
-  for (var k = 0; k < sz.n; k++) {
-    for (var j = 0; j < sy.n; j++) {
-      for (var i = 0; i < sx.n; i++) {
-        solid = solid || pwall[pcell(sx.o[i], sy.o[j], sz.o[k])] == 0xffffffffu;
-      }
-    }
-  }
-  if (!solid) {
+  let st = gstart[g];
+  var ptr = st & 0x7fffffffu;
+  if ((st >> 31u) == 0u) {
     for (var k = 0; k < sz.n; k++) {
       for (var j = 0; j < sy.n; j++) {
         for (var i = 0; i < sx.n; i++) {
           let w = sx.w[i] * sy.w[j] * sz.w[k];
-          let q = pre_at(sx.o[i], sy.o[j], sz.o[k]);
-          m.a += w * q.a;
-          m.b += w * q.b;
-          m.c += w * q.c;
+          let s = 3u * gslot[ptr];
+          ptr++;
+          m.a += w * pm[s];
+          m.b += w * pm[s + 1u];
+          m.c += w * pm[s + 2u];
         }
       }
     }
@@ -345,12 +365,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     for (var k = 0; k < lz.n; k++) {
       for (var j = 0; j < ly.n; j++) {
         for (var i = 0; i < lx.n; i++) {
-          if (pwall[pcell(lx.o[i], ly.o[j], lz.o[k])] == 0xffffffffu) { continue; }
+          let sl = gslot[ptr];
+          ptr++;
+          if (sl == 0xffffffffu) { continue; }
+          let s = 3u * sl;
           let w = lx.w[i] * ly.w[j] * lz.w[k];
-          let q = pre_at(lx.o[i], ly.o[j], lz.o[k]);
-          m.a += w * q.a;
-          m.b += w * q.b;
-          m.c += w * q.c;
+          m.a += w * pm[s];
+          m.b += w * pm[s + 1u];
+          m.c += w * pm[s + 2u];
           ws += w;
         }
       }
@@ -498,6 +520,16 @@ pub(crate) struct Link3 {
     gidx: wgpu::Buffer,
     /// Position (indice de la boîte fine) de chaque maille fantôme.
     gpos: wgpu::Buffer,
+    /// Tirage en deux passes : nœuds parents des pochoirs (x, y, z), leurs
+    /// moments, et pour chaque maille fantôme le début de sa liste de nœuds
+    /// (bit 31 : pochoir linéaire) dans `gslot`.
+    nn: u32,
+    pnode: wgpu::Buffer,
+    pm: wgpu::Buffer,
+    gstart: wgpu::Buffer,
+    gslot: wgpu::Buffer,
+    pre: wgpu::ComputePipeline,
+    pre_bind: Vec<wgpu::BindGroup>,
     gather: wgpu::ComputePipeline,
     fill: wgpu::ComputePipeline,
     restrict: wgpu::ComputePipeline,
@@ -537,14 +569,84 @@ impl Link3 {
             gpos = ghosts.clone();
         }
         let ng = ghosts.len() as u32;
+        // Pochoirs du tirage (comme `stencil` et `lin` du shader) : nœuds
+        // parents distincts, et liste des nœuds de chaque maille fantôme.
+        let pd = [parent.nx as i32, parent.ny as i32, parent.nz as i32];
+        let prank = |p: [i32; 3]| -> usize {
+            let q = [0, 1, 2].map(|a| p[a].clamp(0, pd[a] - 1) as usize);
+            match parent.sparse.as_ref() {
+                Some(m) => m.id(q[0], q[1], q[2]),
+                None => q[0] + parent.nx * (q[1] + parent.ny * q[2]),
+            }
+        };
+        let psolid = |p: [i32; 3]| parent.solid[prank(p)];
+        let cubic = |x2: i32| -> Vec<i32> {
+            if x2 & 1 == 0 {
+                vec![x2 / 2]
+            } else {
+                let i0 = (x2 - 1) / 2;
+                vec![i0 - 1, i0, i0 + 1, i0 + 2]
+            }
+        };
+        let linear = |x2: i32| -> Vec<i32> {
+            if x2 & 1 == 0 {
+                vec![x2 / 2]
+            } else {
+                let i0 = (x2 - 1) / 2;
+                vec![i0, i0 + 1]
+            }
+        };
+        let mut node_of: std::collections::HashMap<[i32; 3], u32> = std::collections::HashMap::new();
+        let mut pnode: Vec<i32> = Vec::new();
+        let mut gstart: Vec<u32> = Vec::with_capacity(gpos.len());
+        let mut gslot: Vec<u32> = Vec::new();
+        for &c in &gpos {
+            let c = c as usize;
+            let x2 = [2 * o[0] + c % cnx, 2 * o[1] + (c / cnx) % cny, 2 * o[2] + c / (cnx * cny)].map(|v| v as i32);
+            let s3 = x2.map(cubic);
+            let mut solid = false;
+            for &z in &s3[2] {
+                for &y in &s3[1] {
+                    for &x in &s3[0] {
+                        solid |= psolid([x, y, z]);
+                    }
+                }
+            }
+            gstart.push(gslot.len() as u32 | if solid { 1 << 31 } else { 0 });
+            let a3 = if solid { x2.map(linear) } else { s3 };
+            for &z in &a3[2] {
+                for &y in &a3[1] {
+                    for &x in &a3[0] {
+                        let p = [x, y, z];
+                        if solid && psolid(p) {
+                            gslot.push(u32::MAX);
+                            continue;
+                        }
+                        let k = *node_of.entry(p).or_insert_with(|| {
+                            pnode.extend_from_slice(&p);
+                            (pnode.len() / 3 - 1) as u32
+                        });
+                        gslot.push(k);
+                    }
+                }
+            }
+        }
+        let nn = (pnode.len() / 3) as u32;
+        if pnode.is_empty() {
+            pnode.extend_from_slice(&[0, 0, 0]);
+        }
+        if gstart.is_empty() {
+            gstart.push(0);
+        }
+        if gslot.is_empty() {
+            gslot.push(0);
+        }
         let base = common();
         let module = |label: &str, body: String| {
-            d.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(format!("{base}{body}").into()),
-            })
+            crate::gpu3d::compute_module(d, label, format!("{base}{body}"))
         };
-        let gather = module("gather3d", format!("{}{GATHER}", access("pf", 3, 4, fp16, false, "P.pn")));
+        let pre = module("pre3d", format!("{}{PRE}", access("pf", 3, 4, fp16, false, "P.pn")));
+        let gather = module("gather3d", GATHER.to_string());
         let fill = module("fill3d", format!("{}{FILL}", access("cf", 3, 4, fp16, true, "P.cn")));
         let restrict = module(
             "restrict3d",
@@ -624,6 +726,25 @@ impl Link3 {
                 contents: bytemuck::cast_slice(&gpos),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
+            nn,
+            pm: mk("pre_mom3d", 48 * nn as u64, wgpu::BufferUsages::STORAGE),
+            pnode: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pre_node3d"),
+                contents: bytemuck::cast_slice(&pnode),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            gstart: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost_start3d"),
+                contents: bytemuck::cast_slice(&gstart),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            gslot: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost_slot3d"),
+                contents: bytemuck::cast_slice(&gslot),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            pre: pipe(&pre, "pre3d"),
+            pre_bind: Vec::new(),
             gather: pipe(&gather, "gather3d"),
             fill: pipe(&fill, "fill3d"),
             restrict: pipe(&restrict, "restrict3d"),
@@ -684,23 +805,34 @@ impl Link3 {
             })
         };
         // Après un pas, `cur` désigne le nouvel état ; l'ancien fournit les tirages.
-        self.gather_bind = (0..2)
+        self.pre_bind = (0..2)
             .map(|cur| {
                 group(
-                    &self.gather,
+                    &self.pre,
                     vec![
                         (0, &self.params[0]),
-                        (1, &self.gm),
+                        (1, &self.pm),
+                        (2, &self.pnode),
                         (3, &p.pops[1 - cur][0]),
                         (4, &p.pops[1 - cur][1]),
                         (5, &p.nut[cur]),
                         (6, &p.wall),
-                        (7, &self.gpos),
                         (8, &p.blk_buf),
                     ],
                 )
             })
             .collect();
+        self.gather_bind = vec![group(
+            &self.gather,
+            vec![
+                (0, &self.params[0]),
+                (1, &self.gm),
+                (2, &self.pm),
+                (7, &self.gpos),
+                (9, &self.gstart),
+                (10, &self.gslot),
+            ],
+        )];
         self.fill_bind = (0..4)
             .map(|i| {
                 let (cur, a) = (i / 2, i % 2);
@@ -745,10 +877,48 @@ impl Link3 {
             .collect();
     }
 
+    /// Profilage (banc de mesure) : durée de chaque passe du raccord.
+    pub(crate) fn profile(
+        &self,
+        p: &Gpu3D,
+        c: &Gpu3D,
+        time: &dyn Fn(&Gpu3D, &dyn Fn(&mut wgpu::ComputePass)) -> f64,
+    ) -> Vec<(String, usize, f64)> {
+        let (dx, dy) = disp(self.ng);
+        let (rx, ry) = disp(self.nr);
+        vec![
+            ("tirage".into(), self.ng as usize, time(p, &|pass| self.gather(pass, p.cur))),
+            (
+                "remplissage".into(),
+                self.ng as usize,
+                time(p, &|pass| {
+                    pass.set_pipeline(&self.fill);
+                    pass.set_bind_group(0, &self.fill_bind[c.cur * 2], &[]);
+                    pass.dispatch_workgroups(dx, dy, 1);
+                }),
+            ),
+            (
+                "recopie".into(),
+                self.nr as usize,
+                time(p, &|pass| {
+                    pass.set_pipeline(&self.restrict);
+                    pass.set_bind_group(0, &self.restrict_bind[p.cur * 2 + c.cur], &[]);
+                    pass.dispatch_workgroups(rx, ry, 1);
+                }),
+            ),
+        ]
+    }
+
     fn gather(&self, pass: &mut wgpu::ComputePass, pcur: usize) {
+        if self.nn > 0 {
+            let (dx, dy) = disp(self.nn);
+            pass.set_pipeline(&self.pre);
+            pass.set_bind_group(0, &self.pre_bind[pcur], &[]);
+            pass.dispatch_workgroups(dx, dy, 1);
+        }
         let (dx, dy) = disp(self.ng);
         pass.set_pipeline(&self.gather);
-        pass.set_bind_group(0, &self.gather_bind[pcur], &[]);
+        pass.set_bind_group(0, &self.gather_bind[0], &[]);
         pass.dispatch_workgroups(dx, dy, 1);
     }
 }
@@ -793,6 +963,9 @@ pub(crate) const MARGIN3: usize = MARGIN;
 fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], pass: &mut wgpu::ComputePass, k: usize, slot: u32) {
     {
         let lev = &mut *levels[k];
+        if let Some(w) = &lev.wall_pass {
+            w.encode(pass, slot);
+        }
         pass.set_pipeline(&lev.step_pipe);
         pass.set_bind_group(0, &lev.bind[lev.cur], &[slot]);
         pass.dispatch_workgroups(lev.disp.0, lev.disp.1, 1);
