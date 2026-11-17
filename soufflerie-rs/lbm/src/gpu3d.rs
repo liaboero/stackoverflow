@@ -1805,10 +1805,6 @@ impl SparseMap {
         (p[0] < dims[0] && p[1] < dims[1] && p[2] < dims[2]).then_some(p)
     }
 
-    fn dense_of(&self, i: usize, dims: [usize; 3]) -> Option<usize> {
-        self.pos(i, dims).map(|p| p[0] + dims[0] * (p[1] + dims[1] * p[2]))
-    }
-
     /// Données des shaders : table des blocs puis coordonnées tassées
     /// (x | y << 10 | z << 20) de chaque rang.
     fn gpu_table(&self) -> Vec<u32> {
@@ -1816,6 +1812,378 @@ impl SparseMap {
         v.extend(self.coords.iter().map(|c| if c[0] == u32::MAX { 0 } else { c[0] | (c[1] << 10) | (c[2] << 20) }));
         v
     }
+}
+
+/// Tableaux par maille d'une grille, rangés comme sur le GPU.
+struct CellSetup {
+    /// Stockage creux par blocs (couche pariétale) ; None : boîte entière.
+    sparse: Option<SparseMap>,
+    /// Mailles stockées.
+    ns: usize,
+    /// Type de chaque maille : 0 fluide, k + 1 maille pariétale k, SOLID, GHOST.
+    wall: Vec<u32>,
+    /// Fractions q des liens de chaque maille pariétale (18 par maille).
+    qs: Vec<f32>,
+    wall_count: usize,
+    /// Rang et position de chaque maille pariétale.
+    wall_cells: Vec<u32>,
+    wall_pos: Vec<[f64; 3]>,
+    edge_cos: Vec<f32>,
+    /// Mailles qui ne portent que des liens de paroi mince (affichage).
+    thin: Vec<u32>,
+    solid_count: usize,
+    band_fill: Option<Vec<u32>>,
+    band_fill_pos: Option<Vec<u32>>,
+    band_deep: Option<Vec<bool>>,
+    /// Distance à la paroi de chaque maille.
+    dist: Vec<f32>,
+    /// Étendue en x du corps par tranche y.
+    slab: Vec<[f32; 2]>,
+}
+
+/// Liens de paroi d'une maille fluide en `p` : fractions q, normales des
+/// faces (codées), plus petit cosinus entre elles, et si un voisin est
+/// solide. `solid_at` dit si le nœud voisin est solide.
+fn wall_links(body: &Body3D, p: [usize; 3], solid_at: &dyn Fn(i64, i64, i64) -> bool) -> Option<([f32; 18], [f32; 18], f32, bool)> {
+    let mut row = [0f32; 18];
+    let mut nrow = [0f32; 18];
+    let mut nraw: Vec<[f64; 3]> = Vec::new();
+    let mut beside_solid = false;
+    for i in 1..19 {
+        let [cx, cy, cz] = C3[i];
+        let pf = [p[0] as f64, p[1] as f64, p[2] as f64];
+        let d = [-cx as f64, -cy as f64, -cz as f64];
+        // Maillage : intersection exacte du lien avec les triangles, y
+        // compris entre deux mailles fluides (paroi plus mince qu'une maille).
+        let hit = body.mesh.as_ref().and_then(|m| m.segment_hit_normal(pf, d));
+        let solid = solid_at(p[0] as i64 - cx as i64, p[1] as i64 - cy as i64, p[2] as i64 - cz as i64);
+        beside_solid |= solid;
+        let q = match (hit, solid) {
+            (Some((t, n)), _) => Some(((t as f32).clamp(0.02, 1.0), Some(n))),
+            (None, true) => Some((link_q(body, pf, d), None)),
+            (None, false) => None,
+        };
+        if let Some((q, n)) = q {
+            row[i - 1] = q;
+            // Sans triangle : gradient de la distance juste devant la paroi.
+            let n = n.unwrap_or_else(|| {
+                let t = (q as f64 - 0.25).max(0.0);
+                body.wall_normal([pf[0] + t * d[0], pf[1] + t * d[1], pf[2] + t * d[2]]).0
+            });
+            nrow[i - 1] = oct_encode(n);
+            nraw.push(n);
+        }
+    }
+    if nraw.is_empty() {
+        return None;
+    }
+    let mut cmin = 1.0f64;
+    for a in 0..nraw.len() {
+        for b in a + 1..nraw.len() {
+            cmin = cmin.min((0..3).map(|t| nraw[a][t] * nraw[b][t]).sum::<f64>());
+        }
+    }
+    Some((row, nrow, cmin as f32, beside_solid))
+}
+
+/// Grille boîte (veine ou grille fine qui entoure la maquette).
+fn dense_setup(body: &Body3D, nested: bool) -> CellSetup {
+    let (nx, ny, nz) = (body.nx, body.ny, body.nz);
+    let n = nx * ny * nz;
+    let b = body.bounds;
+    let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
+    let x0 = ((b.x0.floor() as i64) - 1).max(1) as usize;
+    let x1 = ((b.x1.ceil() as i64) + 1).min(nx as i64 - 2) as usize;
+    let y0 = ((b.y0.floor() as i64) - 1).max(0) as usize;
+    let y1 = ((b.y1.ceil() as i64) + 1).min(ny as i64 - 1) as usize;
+    let z0 = ((b.z0.floor() as i64) - 1).max(0) as usize;
+    let z1 = ((b.z1.ceil() as i64) + 1).min(nz as i64 - 1) as usize;
+    let mut wall = vec![0u32; n];
+    let mut solid_count = 0;
+    for z in z0..=z1 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if body.inside(x as f64, y as f64, z as f64) {
+                    wall[idx(x, y, z)] = SOLID;
+                    solid_count += 1;
+                }
+            }
+        }
+    }
+    let mut qs: Vec<f32> = Vec::new();
+    let mut qn: Vec<f32> = Vec::new();
+    let mut edge_cos: Vec<f32> = Vec::new();
+    let mut thin: Vec<u32> = Vec::new();
+    let mut wall_cells: Vec<u32> = Vec::new();
+    let mut wall_pos: Vec<[f64; 3]> = Vec::new();
+    {
+        // Voisin solide, bords latéraux périodiques (comme les tirages).
+        let wall_ro = wall.clone();
+        let solid_at = |x: i64, y: i64, z: i64| {
+            let x = x.clamp(0, nx as i64 - 1) as usize;
+            let y = y.rem_euclid(ny as i64) as usize;
+            let z = z.rem_euclid(nz as i64) as usize;
+            wall_ro[idx(x, y, z)] == SOLID
+        };
+        for z in z0.saturating_sub(1)..=(z1 + 1).min(nz - 1) {
+            for y in y0.saturating_sub(1)..=(y1 + 1).min(ny - 1) {
+                for x in (x0 - 1).max(1)..=(x1 + 1).min(nx - 2) {
+                    let c = idx(x, y, z);
+                    if wall[c] == SOLID {
+                        continue;
+                    }
+                    if let Some((row, nrow, cmin, beside)) = wall_links(body, [x, y, z], &solid_at) {
+                        wall_cells.push(c as u32);
+                        wall_pos.push([x as f64, y as f64, z as f64]);
+                        wall[c] = wall_cells.len() as u32;
+                        qs.extend_from_slice(&row);
+                        qn.extend_from_slice(&nrow);
+                        edge_cos.push(cmin);
+                        if !beside {
+                            thin.push(c as u32);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let wall_count = wall_cells.len();
+    // Normales des liens rangées après les fractions q (même tampon).
+    qs.extend_from_slice(&qn);
+    let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+    let dist = body.wall_distance(&solid_mask);
+    if nested {
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if x == 0 || y == 0 || z == 0 || x == nx - 1 || y == ny - 1 || z == nz - 1 {
+                        wall[idx(x, y, z)] = crate::refine3d::GHOST;
+                    }
+                }
+            }
+        }
+    }
+    let slab = slab_of(ny, wall.iter().enumerate().filter(|(_, &w)| w != 0 && w < crate::refine3d::GHOST || w == SOLID).map(|(c, _)| [c % nx, (c / nx) % ny]));
+    CellSetup {
+        sparse: None,
+        ns: n,
+        wall,
+        qs,
+        wall_count,
+        wall_cells,
+        wall_pos,
+        edge_cos,
+        thin,
+        solid_count,
+        band_fill: None,
+        band_fill_pos: None,
+        band_deep: None,
+        dist,
+        slab,
+    }
+}
+
+/// Étendue en x du corps (mailles solides et pariétales) dans chaque tranche y.
+fn slab_of(ny: usize, cells: impl Iterator<Item = [usize; 2]>) -> Vec<[f32; 2]> {
+    let mut slab = vec![[1.0f32, 0.0f32]; ny];
+    for [x, y] in cells {
+        let x = x as f32;
+        if slab[y][0] > slab[y][1] {
+            slab[y] = [x, x];
+        } else {
+            slab[y] = [slab[y][0].min(x), slab[y][1].max(x)];
+        }
+    }
+    slab
+}
+
+/// Couche pariétale d'épaisseur `band` (mailles) en stockage creux : seuls
+/// les blocs de 8³ mailles près de la surface sont examinés (distance au
+/// maillage du centre du bloc), puis, maille par maille : solide, fluide à
+/// moins de `band` de la paroi (active), ou fantôme. Mémoire et calcul de la
+/// mise en place proportionnels à la surface, pas au volume de la boîte.
+fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
+    let mesh = body.mesh.clone().ok_or("couche pariétale : maquette maillée seulement")?;
+    let (nx, ny, nz) = (body.nx, body.ny, body.nz);
+    let dims = [nx, ny, nz];
+    let bd = [nx.div_ceil(SB), ny.div_ceil(SB), nz.div_ceil(SB)];
+    // Blocs : centre à moins de band + demi-diagonale (√3 · 4 ≈ 6,9) + 2 de
+    // la surface (de quoi loger les fantômes voisins des mailles actives).
+    let reach = band + 0.5 * (3.0f64).sqrt() * SB as f64 + 2.0;
+    let used: Vec<bool> = (0..bd[0] * bd[1] * bd[2])
+        .into_par_iter()
+        .map(|b| {
+            let c = [b % bd[0], (b / bd[0]) % bd[1], b / (bd[0] * bd[1])].map(|v| (v * SB) as f64 + 0.5 * (SB - 1) as f64);
+            let bb = body.bounds;
+            let lo = [bb.x0, bb.y0, bb.z0];
+            let hi = [bb.x1, bb.y1, bb.z1];
+            if (0..3).any(|a| c[a] < lo[a] - reach || c[a] > hi[a] + reach) {
+                return false;
+            }
+            mesh.distance(c, reach + 1.0) <= reach
+        })
+        .collect();
+    let map = SparseMap::new(bd, &used);
+    let ns = map.slots() * SB3;
+    // Type et distance de chaque maille gardée.
+    let ghost = crate::refine3d::GHOST;
+    let cells: Vec<(u32, f32)> = (0..ns)
+        .into_par_iter()
+        .map(|i| {
+            let Some(p) = map.pos(i, dims) else { return (ghost, 1e3) };
+            if p[0] == 0 || p[1] == 0 || p[2] == 0 || p[0] == nx - 1 || p[1] == ny - 1 || p[2] == nz - 1 {
+                return (ghost, 1e3);
+            }
+            let pf = p.map(|v| v as f64);
+            if body.inside(pf[0], pf[1], pf[2]) {
+                return (SOLID, 0.0);
+            }
+            let d = mesh.distance(pf, band + 3.0);
+            (if d > band { ghost } else { 0 }, d as f32)
+        })
+        .collect();
+    let mut wall: Vec<u32> = cells.iter().map(|c| c.0).collect();
+    let dist: Vec<f32> = cells.iter().map(|c| c.1).collect();
+    let solid_count = wall.iter().filter(|&&w| w == SOLID).count();
+    let at = |x: i64, y: i64, z: i64| -> Option<usize> {
+        (x >= 0 && y >= 0 && z >= 0 && (x as usize) < nx && (y as usize) < ny && (z as usize) < nz).then(|| map.id(x as usize, y as usize, z as usize))
+    };
+    // Liens de paroi des mailles fluides actives (en parallèle, puis numérotées dans l'ordre).
+    let links: Vec<Option<([f32; 18], [f32; 18], f32, bool)>> = {
+        let wall_ro = &wall;
+        let solid_at = |x: i64, y: i64, z: i64| at(x, y, z).is_some_and(|c| wall_ro[c] == SOLID);
+        (0..ns)
+            .into_par_iter()
+            .map(|i| {
+                if wall_ro[i] != 0 {
+                    return None;
+                }
+                let p = map.pos(i, dims)?;
+                wall_links(body, p, &solid_at)
+            })
+            .collect()
+    };
+    let mut qs: Vec<f32> = Vec::new();
+    let mut qn: Vec<f32> = Vec::new();
+    let mut edge_cos: Vec<f32> = Vec::new();
+    let mut thin: Vec<u32> = Vec::new();
+    let mut wall_cells: Vec<u32> = Vec::new();
+    let mut wall_pos: Vec<[f64; 3]> = Vec::new();
+    for (i, l) in links.into_iter().enumerate() {
+        if let Some((row, nrow, cmin, beside)) = l {
+            let p = map.pos(i, dims).unwrap();
+            wall_cells.push(i as u32);
+            wall_pos.push(p.map(|v| v as f64));
+            wall[i] = wall_cells.len() as u32;
+            qs.extend_from_slice(&row);
+            qn.extend_from_slice(&nrow);
+            edge_cos.push(cmin);
+            if !beside {
+                thin.push(i as u32);
+            }
+        }
+    }
+    let wall_count = wall_cells.len();
+    qs.extend_from_slice(&qn);
+    // Fantômes à remplir : voisins (26) d'une maille active.
+    let active = |c: usize| wall[c] < ghost;
+    let mut fill = Vec::new();
+    let mut fill_pos = Vec::new();
+    for i in 0..ns {
+        if wall[i] != ghost {
+            continue;
+        }
+        let Some(p) = map.pos(i, dims) else { continue };
+        let mut near = false;
+        'nb: for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if let Some(c) = at(p[0] as i64 + dx, p[1] as i64 + dy, p[2] as i64 + dz) {
+                        if active(c) {
+                            near = true;
+                            break 'nb;
+                        }
+                    }
+                }
+            }
+        }
+        if near {
+            fill.push(i as u32);
+            fill_pos.push((p[0] + nx * (p[1] + ny * p[2])) as u32);
+        }
+    }
+    // Mailles « profondes » (recopiées vers la grille parente) : actives,
+    // et à plus de (2 MARGIN + 1) √3 mailles de toute fantôme, la distance à
+    // la paroi variant d'au plus une maille par maille parcourue.
+    let r = (2 * crate::refine3d::MARGIN3 + 1) as f64 * (3.0f64).sqrt();
+    let deep: Vec<bool> = (0..ns).map(|i| active(i) && (dist[i] as f64) <= band - r).collect();
+    // Blocs gardés pour de bon : ceux qui contiennent une maille active ou
+    // une fantôme à remplir (la sélection par le centre du bloc est large).
+    let mut keep = vec![false; map.slots()];
+    keep[0] = true;
+    for i in 0..ns {
+        if active(i) {
+            keep[i / SB3] = true;
+        }
+    }
+    for &i in &fill {
+        keep[i as usize / SB3] = true;
+    }
+    let mut used2 = vec![false; bd[0] * bd[1] * bd[2]];
+    for (slot, c) in map.coords.iter().enumerate().skip(1) {
+        if keep[slot] {
+            used2[c[0] as usize + bd[0] * (c[1] as usize + bd[1] * c[2] as usize)] = true;
+        }
+    }
+    let map2 = SparseMap::new(bd, &used2);
+    let ns2 = map2.slots() * SB3;
+    // Nouveau rang de chaque ancien rang (blocs gardés, dans le même ordre).
+    let mut new_slot = vec![0usize; map.slots()];
+    let mut k = 0;
+    for (slot, &kp) in keep.iter().enumerate() {
+        if kp {
+            new_slot[slot] = k;
+            k += 1;
+        }
+    }
+    let remap = |i: usize| new_slot[i / SB3] * SB3 + i % SB3;
+    let mut wall2 = vec![ghost; ns2];
+    let mut dist2 = vec![1e3f32; ns2];
+    let mut deep2 = vec![false; ns2];
+    for i in 0..ns {
+        if keep[i / SB3] && i >= SB3 {
+            let j = remap(i);
+            wall2[j] = wall[i];
+            dist2[j] = dist[i];
+            deep2[j] = deep[i];
+        }
+    }
+    let (wall, dist, deep, ns) = (wall2, dist2, deep2, ns2);
+    let wall_cells: Vec<u32> = wall_cells.iter().map(|&i| remap(i as usize) as u32).collect();
+    let thin: Vec<u32> = thin.iter().map(|&i| remap(i as usize) as u32).collect();
+    let fill: Vec<u32> = fill.iter().map(|&i| remap(i as usize) as u32).collect();
+    let map = map2;
+    let slab = slab_of(
+        ny,
+        (0..ns).filter(|&i| wall[i] != 0 && wall[i] < ghost || wall[i] == SOLID).filter_map(|i| map.pos(i, dims)).map(|p| [p[0], p[1]]),
+    );
+    Ok(CellSetup {
+        sparse: Some(map),
+        ns,
+        wall,
+        qs,
+        wall_count,
+        wall_cells,
+        wall_pos,
+        edge_cos,
+        thin,
+        solid_count,
+        band_fill: Some(fill),
+        band_fill_pos: Some(fill_pos),
+        band_deep: Some(deep),
+        dist,
+        slab,
+    })
 }
 
 /// Hauteur de raccord de la loi de paroi, en mailles de la grille.
@@ -1958,7 +2326,7 @@ impl Gpu3D {
         depth: usize,
         le: bool,
     ) -> Result<Gpu3D, String> {
-        Self::with_refinement_edges(body, nu, u_in, fp16, sa, depth, le, false, 0.0)
+        Self::with_refinement_edges(body, nu, u_in, fp16, sa, depth, le, false, &[])
     }
 
     /// Idem, avec des grilles deux fois plus fines encore, limitées aux bords
@@ -1977,7 +2345,7 @@ impl Gpu3D {
         depth: usize,
         le: bool,
         te: bool,
-        band: f64,
+        bands: &[f64],
     ) -> Result<Gpu3D, String> {
         let (device, queue, name) = Self::open_device()?;
         let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, 0.0)?;
@@ -2032,44 +2400,62 @@ impl Gpu3D {
         let mut parent = (0..full).collect::<Vec<usize>>();
         let mut lev_depth: Vec<u32> = (1..=full as u32).collect();
         let mut core: Vec<Option<[[f64; 3]; 2]>> = vec![None; full];
-        if band > 0.0 {
-            // Couche pariétale : grille deux fois plus fine sur une épaisseur
-            // `band` (mailles fines) autour de toute la surface, boîte qui
-            // entoure la maquette mais calcul limité à la couche.
-            let k = depth + 1;
-            let sp = (1u64 << (k - 1)) as f64;
-            let pb = parent_body.bounds;
-            let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
-            // Marge (mailles parentes) : demi-épaisseur de la couche, plus la
-            // bande de raccord.
-            let mg = 0.5 * band + (2 * crate::refine3d::MARGIN3 + 3) as f64;
-            let lo = [
-                (pb.x0 - mg).floor().max(3.0) as usize,
-                (pb.y0 - mg).floor().max(3.0) as usize,
-                (pb.z0 - mg).floor().max(3.0) as usize,
-            ];
-            let hi = [
-                ((pb.x1 + mg).ceil() as usize).min(pnx - 4),
-                ((pb.y1 + mg).ceil() as usize).min(pny - 4),
-                ((pb.z1 + mg).ceil() as usize).min(pnz - 4),
-            ];
-            let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
-            let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
-            let nu_k = nu * (1u64 << k) as f64;
-            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, band)?;
-            child.les = top.les;
-            {
-                let par = if full == 0 { &top } else { &levels[full - 1] };
-                links.push(crate::refine3d::Link3::new(par, &child, lo));
+        if !bands.is_empty() {
+            // Couches pariétales imbriquées : chacune deux fois plus fine que
+            // la précédente, sur une épaisseur `bands[i]` (mailles de cette
+            // couche) autour de toute la surface ; boîte qui entoure la
+            // maquette, calcul et stockage limités à la couche.
+            for (bi, &band) in bands.iter().enumerate() {
+                let k = depth + 1 + bi;
+                let sp = (1u64 << (k - 1)) as f64;
+                let pb = parent_body.bounds;
+                let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
+                // Marge (mailles parentes) : demi-épaisseur de la couche, plus
+                // la bande de raccord.
+                let mg = 0.5 * band + (2 * crate::refine3d::MARGIN3 + 3) as f64;
+                let lo = [
+                    (pb.x0 - mg).floor().max(3.0) as usize,
+                    (pb.y0 - mg).floor().max(3.0) as usize,
+                    (pb.z0 - mg).floor().max(3.0) as usize,
+                ];
+                let hi = [
+                    ((pb.x1 + mg).ceil() as usize).min(pnx - 4),
+                    ((pb.y1 + mg).ceil() as usize).min(pny - 4),
+                    ((pb.z1 + mg).ceil() as usize).min(pnz - 4),
+                ];
+                let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
+                let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
+                let nu_k = nu * (1u64 << k) as f64;
+                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, band)?;
+                child.les = top.les;
+                // Mémoire du GPU : environ 100 octets par maille en demi-précision
+                // (200 en simple) ; au-delà de 40 M mailles en tout, on s'arrête.
+                let total: usize = std::iter::once(top.n).chain(levels.iter().map(|g| g.n)).chain(std::iter::once(child.n)).sum();
+                if total > 40_000_000 / if fp16 { 1 } else { 2 } {
+                    return Err(format!(
+                        "couche pariétale {} (×{}) : {:.0} M mailles en tout, au-delà de la mémoire du GPU ; moins de couches ou plus minces",
+                        bi + 1,
+                        1u64 << k,
+                        total as f64 / 1e6
+                    ));
+                }
+                let pi = levels.len();
+                {
+                    let par = if pi == 0 { &top } else { &levels[pi - 1] };
+                    links.push(crate::refine3d::Link3::new(par, &child, lo));
+                }
+                levels.push(child);
+                let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
+                origin.push(o);
+                parent.push(pi);
+                lev_depth.push(k as u32);
+                // Domaine propre : toute la boîte (les efforts viennent des
+                // mailles pariétales, toutes dans la couche ; la couche la
+                // plus fine l'emporte).
+                core.push(Some([o, [0, 1, 2].map(|a| o[a] + (dims[a] - 1) as f64 / (2.0 * sp))]));
+                parent_body = cb;
+                porg = o;
             }
-            levels.push(child);
-            let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
-            origin.push(o);
-            parent.push(full);
-            lev_depth.push(k as u32);
-            // Domaine propre : toute la boîte (les efforts viennent des mailles
-            // pariétales, toutes dans la couche).
-            core.push(Some([o, [0, 1, 2].map(|a| o[a] + (dims[a] - 1) as f64 / (2.0 * sp))]));
         } else if le || te {
             let k = depth + 1;
             let sp = (1u64 << (k - 1)) as f64;
@@ -2177,10 +2563,6 @@ impl Gpu3D {
         band: f64,
     ) -> Result<Gpu3D, String> {
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
-        // Mailles de la boîte (tableaux de la mise en place) ; les mailles
-        // stockées sur le GPU (`ns`) en sont un sous-ensemble par blocs pour
-        // une couche pariétale.
-        let n = nx * ny * nz;
         let al = device.limits();
         let words_a = if fp16 { 5 } else { 10 };
         let words_b = if fp16 { 5 } else { 9 };
@@ -2200,231 +2582,30 @@ impl Gpu3D {
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
 
-        // Voxelisation : mailles solides, puis mailles pariétales et fractions q.
-        let b = body.bounds;
-        let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
-        let x0 = ((b.x0.floor() as i64) - 1).max(1) as usize;
-        let x1 = ((b.x1.ceil() as i64) + 1).min(nx as i64 - 2) as usize;
-        let y0 = ((b.y0.floor() as i64) - 1).max(0) as usize;
-        let y1 = ((b.y1.ceil() as i64) + 1).min(ny as i64 - 1) as usize;
-        let z0 = ((b.z0.floor() as i64) - 1).max(0) as usize;
-        let z1 = ((b.z1.ceil() as i64) + 1).min(nz as i64 - 1) as usize;
-        let mut wall = vec![0u32; n];
-        let mut solid_count = 0;
-        for z in z0..=z1 {
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    if body.inside(x as f64, y as f64, z as f64) {
-                        wall[idx(x, y, z)] = SOLID;
-                        solid_count += 1;
-                    }
-                }
-            }
-        }
-        let mut qs: Vec<f32> = Vec::new();
-        // Normale de la face touchée par chaque lien (codage octaédrique).
-        let mut qn: Vec<f32> = Vec::new();
-        // Plus petit cosinus entre les normales des faces que touchent les
-        // liens de chaque maille pariétale (arêtes vives : < 0,5).
-        let mut edge_cos: Vec<f32> = Vec::new();
-        let mut k = 0u32;
-        // Mailles fluides qui ne portent que des liens de paroi mince (affichage).
-        let mut thin: Vec<usize> = Vec::new();
-        for z in z0.saturating_sub(1)..=(z1 + 1).min(nz - 1) {
-            for y in y0.saturating_sub(1)..=(y1 + 1).min(ny - 1) {
-                for x in (x0 - 1).max(1)..=(x1 + 1).min(nx - 2) {
-                    let c = idx(x, y, z);
-                    if wall[c] == SOLID {
-                        continue;
-                    }
-                    let mut row = [0f32; 18];
-                    let mut nrow = [0f32; 18];
-                    let mut nraw: Vec<[f64; 3]> = Vec::new();
-                    let mut any = false;
-                    let mut beside_solid = false;
-                    for i in 1..19 {
-                        let [cx, cy, cz] = C3[i];
-                        let sx = (x as i32 - cx) as usize;
-                        let sy = ((y as i32 - cy + ny as i32) % ny as i32) as usize;
-                        let sz = ((z as i32 - cz + nz as i32) % nz as i32) as usize;
-                        let p = [x as f64, y as f64, z as f64];
-                        let d = [-cx as f64, -cy as f64, -cz as f64];
-                        // Maillage : intersection exacte du lien avec les
-                        // triangles, y compris entre deux mailles fluides
-                        // (paroi plus mince qu'une maille : aile, dérive…).
-                        let hit = body.mesh.as_ref().and_then(|m| m.segment_hit_normal(p, d));
-                        let solid = wall[idx(sx, sy, sz)] == SOLID;
-                        beside_solid |= solid;
-                        let q = match (hit, solid) {
-                            (Some((t, n)), _) => Some(((t as f32).clamp(0.02, 1.0), Some(n))),
-                            (None, true) => Some((link_q(body, p, d), None)),
-                            (None, false) => None,
-                        };
-                        if let Some((q, n)) = q {
-                            row[i - 1] = q;
-                            // Sans triangle : gradient de la distance juste devant la paroi.
-                            let n = n.unwrap_or_else(|| {
-                                let t = (q as f64 - 0.25).max(0.0);
-                                body.wall_normal([p[0] + t * d[0], p[1] + t * d[1], p[2] + t * d[2]]).0
-                            });
-                            nrow[i - 1] = oct_encode(n);
-                            nraw.push(n);
-                            any = true;
-                        }
-                    }
-                    if any {
-                        k += 1;
-                        wall[c] = k;
-                        qs.extend_from_slice(&row);
-                        qn.extend_from_slice(&nrow);
-                        let mut cmin = 1.0f64;
-                        for a in 0..nraw.len() {
-                            for b in a + 1..nraw.len() {
-                                cmin = cmin.min((0..3).map(|t| nraw[a][t] * nraw[b][t]).sum::<f64>());
-                            }
-                        }
-                        edge_cos.push(cmin as f32);
-                        if !beside_solid {
-                            thin.push(c);
-                        }
-                    }
-                }
-            }
-        }
-        let wall_count = k as usize;
-        // Normales des liens rangées après les fractions q (même tampon).
-        qs.extend_from_slice(&qn);
-        // Maille de chaque lien pariétal (numéro → maille), pour les efforts par maille.
-        let rest_force: Vec<[f32; 3]> = qs
-            .chunks_exact(18)
-            .take(wall_count)
-            .map(|row| {
-                let mut r = [0f32; 3];
-                for i in 1..19 {
-                    if row[i - 1] > 0.0 {
-                        for a in 0..3 {
-                            r[a] -= (2.0 * w3(i)) as f32 * C3[i][a] as f32;
-                        }
-                    }
-                }
-                r
-            })
-            .collect();
-        let mut wall_cells = vec![0u32; wall_count];
-        for (c, &w) in wall.iter().enumerate() {
-            if w != 0 && w < SOLID - 1 {
-                wall_cells[w as usize - 1] = c as u32;
-            }
-        }
-        if nested {
-            for z in 0..nz {
-                for y in 0..ny {
-                    for x in 0..nx {
-                        if x == 0 || y == 0 || z == 0 || x == nx - 1 || y == ny - 1 || z == nz - 1 {
-                            wall[idx(x, y, z)] = crate::refine3d::GHOST;
-                        }
-                    }
-                }
-            }
-        }
-        // Couche pariétale : les mailles fluides à plus de `band` mailles de
-        // la paroi deviennent fantômes ; les faces de raccord avec la grille
-        // parente sont alors parallèles à la paroi, dans le fluide, et ne
-        // coupent jamais la maquette.
-        let (band_fill, band_deep) = if nested && band > 0.0 {
-            let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
-            let dist = body.wall_distance(&solid_mask);
-            for c in 0..n {
-                if wall[c] == 0 && dist[c] as f64 > band {
-                    wall[c] = crate::refine3d::GHOST;
-                }
-            }
-            let ghost: Vec<bool> = wall.iter().map(|&w| w == crate::refine3d::GHOST).collect();
-            let active = |c: usize| wall[c] < crate::refine3d::GHOST;
-            // Fantômes à remplir : voisins (26) d'une maille active.
-            let mut fill = Vec::new();
-            for z in 0..nz {
-                for y in 0..ny {
-                    for x in 0..nx {
-                        let c = idx(x, y, z);
-                        if !ghost[c] {
-                            continue;
-                        }
-                        let mut near = false;
-                        'nb: for dz in -1i64..=1 {
-                            for dy in -1i64..=1 {
-                                for dx in -1i64..=1 {
-                                    let (a, b, e) = (x as i64 + dx, y as i64 + dy, z as i64 + dz);
-                                    if a < 0 || b < 0 || e < 0 || a >= nx as i64 || b >= ny as i64 || e >= nz as i64 {
-                                        continue;
-                                    }
-                                    if active(idx(a as usize, b as usize, e as usize)) {
-                                        near = true;
-                                        break 'nb;
-                                    }
-                                }
-                            }
-                        }
-                        if near {
-                            fill.push(c as u32);
-                        }
-                    }
-                }
-            }
-            // Mailles « profondes » : aucune fantôme à moins de 2 MARGIN + 1
-            // mailles (dilatation séparable du masque des fantômes).
-            let r = 2 * crate::refine3d::MARGIN3 + 1;
-            let mut m: Vec<bool> = ghost.clone();
-            for axis in 0..3 {
-                let mut out = m.clone();
-                for z in 0..nz {
-                    for y in 0..ny {
-                        for x in 0..nx {
-                            let p = [x, y, z];
-                            let len = [nx, ny, nz][axis];
-                            let lo = p[axis].saturating_sub(r);
-                            let hi = (p[axis] + r).min(len - 1);
-                            let mut any = false;
-                            for v in lo..=hi {
-                                let mut q = p;
-                                q[axis] = v;
-                                if m[idx(q[0], q[1], q[2])] {
-                                    any = true;
-                                    break;
-                                }
-                            }
-                            out[idx(x, y, z)] = any;
-                        }
-                    }
-                }
-                m = out;
-            }
-            let deep: Vec<bool> = (0..n).map(|c| !m[c]).collect();
-            (Some(fill), Some(deep))
+        // Voxelisation, liens de paroi et couche pariétale : tableaux par
+        // maille rangés comme sur le GPU (boîte, ou blocs près de la surface).
+        let cs = if nested && band > 0.0 {
+            band_setup(body, band)?
         } else {
-            (None, None)
+            dense_setup(body, nested)
         };
-        // Stockage creux de la couche pariétale : blocs de 8³ mailles qui
-        // contiennent une maille active ou une fantôme à remplir ; le bloc 0
-        // (vide, mailles fantômes) reçoit toute lecture hors des blocs.
-        let sparse = band_fill.as_ref().map(|fill| {
-            let bd = [nx.div_ceil(SB), ny.div_ceil(SB), nz.div_ceil(SB)];
-            let mut used = vec![false; bd[0] * bd[1] * bd[2]];
-            let blk = |c: usize| {
-                let (x, y, z) = (c % nx, (c / nx) % ny, c / (nx * ny));
-                x / SB + bd[0] * (y / SB + bd[1] * (z / SB))
-            };
-            for (c, &w) in wall.iter().enumerate() {
-                if w < crate::refine3d::GHOST {
-                    used[blk(c)] = true;
-                }
-            }
-            for &c in fill {
-                used[blk(c as usize)] = true;
-            }
-            SparseMap::new(bd, &used)
-        });
-        let ns = sparse.as_ref().map_or(n, |m| m.slots() * SB3);
+        let CellSetup {
+            sparse,
+            ns,
+            wall: wall_gpu,
+            mut qs,
+            wall_count,
+            wall_cells,
+            wall_pos,
+            edge_cos,
+            thin,
+            solid_count,
+            band_fill,
+            band_fill_pos,
+            band_deep,
+            dist: dist_gpu,
+            slab,
+        } = cs;
         let biggest = (words_a * ns * 4).max(16 * ns) as u64;
         if biggest > max_bind {
             return Err(format!(
@@ -2449,32 +2630,22 @@ impl Gpu3D {
             contents: bytemuck::cast_slice(&blk_data),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        // Tableau par maille, rangé comme sur le GPU (blocs, ou boîte).
-        let to_gpu = |dense_id: &dyn Fn(usize) -> Option<usize>| -> Vec<usize> {
-            (0..ns).map(|i| dense_id(i).unwrap_or(usize::MAX)).collect()
-        };
-        let dense_of: Vec<usize> = match sparse.as_ref() {
-            Some(m) => to_gpu(&|i| m.dense_of(i, [nx, ny, nz])),
-            None => Vec::new(),
-        };
-        let gpu_u32 = |v: &[u32], void: u32| -> Vec<u32> {
-            if sparse.is_none() {
-                return v.to_vec();
-            }
-            dense_of.iter().map(|&d| if d == usize::MAX { void } else { v[d] }).collect()
-        };
-        let gpu_id = |c: usize| -> u32 {
-            match sparse.as_ref() {
-                Some(m) => m.id(c % nx, (c / nx) % ny, c / (nx * ny)) as u32,
-                None => c as u32,
-            }
-        };
-        let wall_gpu = gpu_u32(&wall, crate::refine3d::GHOST);
-        let band_fill_pos = band_fill.clone();
-        let band_fill = band_fill.map(|f| f.iter().map(|&c| gpu_id(c as usize)).collect::<Vec<u32>>());
-        for c in wall_cells.iter_mut() {
-            *c = gpu_id(*c as usize);
-        }
+        // Maille de chaque lien pariétal (numéro → maille), pour les efforts par maille.
+        let rest_force: Vec<[f32; 3]> = qs
+            .chunks_exact(18)
+            .take(wall_count)
+            .map(|row| {
+                let mut r = [0f32; 3];
+                for i in 1..19 {
+                    if row[i - 1] > 0.0 {
+                        for a in 0..3 {
+                            r[a] -= (2.0 * w3(i)) as f32 * C3[i][a] as f32;
+                        }
+                    }
+                }
+                r
+            })
+            .collect();
         if qs.is_empty() {
             qs.resize(18, 0.0);
         }
@@ -2487,7 +2658,7 @@ impl Gpu3D {
             }
         }
         for &c in &thin {
-            let c = gpu_id(c) as usize;
+            let c = c as usize;
             vox[c >> 4] |= 2 << ((c & 15) * 2);
         }
         let vox_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2528,21 +2699,14 @@ impl Gpu3D {
             usage: wgpu::BufferUsages::STORAGE,
         });
         // Spalart–Allmaras : normale et distance des mailles pariétales (dans
-        // l'ordre de leur numéro), distance à la paroi de toutes les mailles.
-        let (geo,) = if sa {
-            let mut cells = vec![0usize; wall_count];
-            for (c, &w) in wall.iter().enumerate() {
-                if w != 0 && w < crate::refine3d::GHOST {
-                    cells[w as usize - 1] = c;
-                }
-            }
+        // l'ordre de leur numéro).
+        let geo: Vec<[f32; 4]> = if sa {
             // Distance négative : maille d'arête vive (faces touchées à plus
             // de 60° l'une de l'autre).
-            let geo: Vec<[f32; 4]> = cells
+            wall_pos
                 .par_iter()
                 .enumerate()
-                .map(|(w, &c)| {
-                    let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
+                .map(|(w, &p)| {
                     let (nrm, d) = body.wall_normal(p);
                     let d = (d as f32).max(0.1);
                     // Avec les arêtes vives du maillage : seulement à portée
@@ -2553,25 +2717,10 @@ impl Gpu3D {
                     let d = if sharp { -d } else { d };
                     [nrm[0] as f32, nrm[1] as f32, nrm[2] as f32, d]
                 })
-                .collect();
-            (geo,)
+                .collect()
         } else {
-            (Vec::new(),)
+            Vec::new()
         };
-        let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
-        let dist = body.wall_distance(&solid_mask);
-        // Étendue en x du corps (mailles solides et pariétales) dans chaque tranche y.
-        let mut slab = vec![[1.0f32, 0.0f32]; ny];
-        for (c, &w) in wall.iter().enumerate() {
-            if w != 0 && w != crate::refine3d::GHOST {
-                let (x, y) = ((c % nx) as f32, (c / nx) % ny);
-                if slab[y][0] > slab[y][1] {
-                    slab[y] = [x, x];
-                } else {
-                    slab[y] = [slab[y][0].min(x), slab[y][1].max(x)];
-                }
-            }
-        }
         let slab_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("slab3d"),
             contents: bytemuck::cast_slice(&slab),
@@ -2589,11 +2738,6 @@ impl Gpu3D {
             }
         };
         let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
-        let dist_gpu: Vec<f32> = if sparse.is_none() {
-            dist
-        } else {
-            dense_of.iter().map(|&d| if d == usize::MAX { 1e3 } else { dist[d] }).collect()
-        };
         let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist_gpu));
         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
         // (à la suite, une valeur par maille) la vitesse de transpiration.
@@ -3063,9 +3207,12 @@ impl Gpu3D {
             for k in r.full..r.levels.len() {
                 let (lo, ls) = (r.origin[k], r.scale(k));
                 let core = r.core[k];
+                // Domaines des grilles plus fines (couches imbriquées) : comptés là-bas.
+                let deeper: Vec<[[f64; 3]; 2]> =
+                    (r.full..r.levels.len()).filter(|&j| r.depth[j] > r.depth[k]).filter_map(|j| r.core[j]).collect();
                 let b = r.levels[k].take_forces_masked(|p| {
                     let q = [0, 1, 2].map(|i| lo[i] + p[i] / ls);
-                    core.is_some_and(|c| in_core(q, &c))
+                    core.is_some_and(|c| in_core(q, &c)) && !deeper.iter().any(|c| in_core(q, c))
                 });
                 let sb = ls * ls;
                 f[0] += b.fx / sb;
@@ -3178,8 +3325,9 @@ impl Gpu3D {
                     org: r.origin[k],
                     s: (1u64 << r.depth[k]) as f64,
                     nu: g.nu,
-                    // Enveloppe fantôme et zone de recouvrement exclues.
-                    m: 2 * crate::refine3d::MARGIN3 + 2,
+                    // Enveloppe fantôme et zone de recouvrement exclues ; une
+                    // couche pariétale ne couvre pas le plan (marge infinie).
+                    m: if g.sparse.is_some() { usize::MAX / 4 } else { 2 * crate::refine3d::MARGIN3 + 2 },
                     map: g.sparse.clone(),
                 });
             }
@@ -3643,7 +3791,7 @@ impl Gpu3D {
         }
         let n = parts.iter().map(|g| g.n).sum();
         let w = parts.iter().map(|g| g.wall_count).sum();
-        Some((parts.len(), n, w, r.scale(r.full) as usize))
+        Some((parts.len(), n, w, r.scale(r.levels.len() - 1) as usize))
     }
 
     pub fn finest(&self) -> Option<([usize; 3], usize, usize)> {
@@ -3957,8 +4105,11 @@ impl Gpu3D {
         for (k, c) in v.chunks_exact(4).enumerate() {
             let p = self.cell_xyz(self.wall_cells[k] as usize);
             if keep(p.map(|v| v as f64)) {
+                // Sans la part de la pression de référence (nulle seulement
+                // en somme sur une surface fermée, pas sur une partie).
+                let r = self.rest_force[k];
                 for a in 0..3 {
-                    f[a] += c[a] as f64;
+                    f[a] += c[a] as f64 - steps as f64 * r[a] as f64;
                 }
             }
         }

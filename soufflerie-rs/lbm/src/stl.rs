@@ -527,7 +527,15 @@ impl MeshBody {
     /// rayons (x, y, z) au lieu de la parité d'un seul.
     pub fn new(tris: Vec<Tri>, robust: bool) -> MeshBody {
         let (lo, hi) = bbox(&tris);
-        let cell = 1.0;
+        // Cases du rangement : une maille, ou la longueur médiane des arêtes si
+        // les triangles sont plus grands (grilles fines : sinon une recherche
+        // de distance parcourt des dizaines de milliers de cases).
+        let mut edges: Vec<f64> = tris
+            .iter()
+            .map(|t| [0, 1, 2].map(|a| t[1][a] - t[0][a]).iter().map(|v| v * v).sum::<f64>().sqrt())
+            .collect();
+        edges.sort_by(f64::total_cmp);
+        let cell = edges.get(edges.len() / 2).copied().unwrap_or(1.0).max(1.0);
         let gdim = [0, 1, 2].map(|a| ((hi[a] - lo[a]) / cell).floor() as usize + 1);
         let mut grid = vec![Vec::new(); gdim[0] * gdim[1] * gdim[2]];
         for (k, t) in tris.iter().enumerate() {

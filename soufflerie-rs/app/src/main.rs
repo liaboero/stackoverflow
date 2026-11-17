@@ -50,7 +50,7 @@ fn usage() -> ! {
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
          soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
-         \x20         [--raff 0..3] [--ba 1, --bf 1 : grilles ×2 de plus aux bords (essai)] [--bande 8 : couche pariétale ×2 de 8 mailles fines] [--sillage 1 : traînée en champ lointain]\n\
+         \x20         [--raff 0..3] [--ba 1, --bf 1 : grilles ×2 de plus aux bords (essai)] [--bande 16,16 | auto : couches pariétales imbriquées, ×2 chacune (épaisseur en mailles de chaque couche ; auto : selon le rayon du bord d'attaque)] [--sillage 1 : traînée en champ lointain]\n\
          soufflerie geom  --stl fichier.stl|fichier.sgeo [mise en place] [--l 16 --raff 2] [--exporter f.sgeo|f.stl]\n\
          \x20                                  contrôle géométrique (résolution par tranche, arêtes vives), export\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
@@ -776,7 +776,37 @@ fn cmd_run3d(a: &Args) {
             "Attention : grilles des bords expérimentales. Une boîte qui coupe la maquette fausse l'écoulement (portance −20 à −30 % sur l'aile AR 4) : voir le README, « Grilles des bords »."
         );
     }
-    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, a.get("bande", 0.0f64)) {
+    // Couches pariétales imbriquées : épaisseurs (mailles de chaque couche),
+    // « --bande 16,16,12 ».
+    let bande = a.get("bande", String::new());
+    let mut bands: Vec<f64> = bande.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).filter(|&v| v > 0.0).collect();
+    if bande.starts_with("auto") {
+        // Raffiner là où la géométrie l'exige : assez de couches pour mettre
+        // au moins 2 mailles dans le plus petit rayon de bord d'attaque des
+        // coupes (hors saumons), au plus 4 couches de 16 mailles.
+        let thick = bande.strip_prefix("auto:").and_then(|v| v.parse::<f64>().ok()).unwrap_or(16.0);
+        let secs = body.mesh.as_ref().map(|m| lbm::geom3d::sections(&m.tris, 20)).unwrap_or_default();
+        let r = secs.iter().map(|s| s.le_radius).filter(|r| r.is_finite() && *r > 0.0).fold(f64::INFINITY, f64::min);
+        // Bord d'attaque à facettes : un coin de plus de 60° entre facettes
+        // successives, le rayon ajusté est celui du coin, pas de l'aile.
+        let corner = secs.iter().map(|s| s.le_corner_deg).fold(0.0f64, f64::max);
+        if corner > 60.0 {
+            eprintln!(
+                "Attention : bord d'attaque à facettes (coin de {corner:.0}° entre facettes) : le rayon mesuré est celui des facettes ; --lisser 1 rend la surface lisse."
+            );
+        }
+        let mut n = 0;
+        while n < 4 && r * ((1u64 << (depth + n)) as f64) < 2.0 {
+            n += 1;
+        }
+        bands = vec![thick; n];
+        eprintln!(
+            "Couches pariétales automatiques : rayon de bord d'attaque minimal {:.2} mailles de la veine → {n} couche(s) ({:.1} mailles dans le rayon à la plus fine)",
+            r,
+            r * (1u64 << (depth + n)) as f64
+        );
+    }
+    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, &bands) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");

@@ -1213,6 +1213,46 @@ non visqueux. Sur TR-1208, l'excès de portance ne se résorbe donc pas
 avec la résolution près de la paroi, contrairement à l'aile AR 4 où la
 moyenne sur le placement rejoint VSPAERO.
 
+**Couches imbriquées (`--bande 16,16,…`, `--bande auto`).** Chaque couche
+est deux fois plus fine que la précédente et n'existe qu'à moins de son
+épaisseur (en ses propres mailles) de la paroi ; une couche est la grille
+parente de la suivante (remplissage et recopie lisent la couche parente
+par sa table de blocs). La mise en place est elle aussi creuse : les blocs
+sont choisis par la distance de leur centre au maillage, puis classés
+maille par maille (solide, active à moins de D de la paroi, fantôme), et
+seuls sont gardés ceux qui contiennent une maille active ou une fantôme à
+remplir ; mémoire et temps de mise en place suivent la surface. Les
+efforts d'une couche comptent hors des couches plus fines (échange aux
+parois sans la part de la pression de référence, qui ne s'annule que sur
+une surface fermée). `--bande auto` choisit le nombre de couches pour
+mettre au moins 2 mailles dans le plus petit rayon de bord d'attaque des
+coupes (au plus 4 couches de 16 mailles) et prévient si le bord d'attaque
+est à facettes (coin de plus de 60° : le rayon mesuré est celui des
+facettes, `--lisser 1` le rend). Au-delà de 40 M mailles en tout, la mise
+en place s'arrête.
+
+Aile AR 4, 4°, grille ×2 :
+
+| couches | mailles des couches | Cz boîte | Cz échange | Cz surface | Cx boîte | durée |
+| --- | --- | --- | --- | --- | --- | --- |
+| aucune | — | 0,2684 | 0,2715 | — | 0,073 | 0,4 min |
+| ×4 (16) | 1,4 M | 0,2714 | 0,2783 | — | 0,043 | 1,8 min |
+| ×4, ×8 (16, 16) | 7,0 M | 0,2694 | 0,2692 | — | 0,046 | 10,5 min |
+| ×4, ×8, ×16 (`auto`) | 21,2 M | 0,2797 | 0,2820 | 0,2712 | 0,033 | 55 min |
+
+Avec deux couches, le calcul rejoint la grille ×4 complète plus une couche
+×8 (0,2685). La troisième couche n'est pas encore sûre : les trois mesures
+de la portance s'écartent (0,271 à 0,282) et la tendance s'inverse. Seize
+mailles ×16 ne font que 6 % de la corde, moins que la couche de 8 mailles
+×4 (12 %) déjà trop mince : l'épaisseur nécessaire est sans doute physique
+(couche limite, zone de la loi de paroi, écoulement du bord de fuite), pas
+un nombre de mailles. À vérifier avant de s'y fier.
+
+Le rangement des triangles pour la distance au maillage utilisait des
+cases d'une maille quelle que soit la grille : sur une couche ×16, chaque
+recherche parcourait des dizaines de milliers de cases. Les cases ont
+maintenant la longueur médiane des arêtes (au moins une maille).
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de

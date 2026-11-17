@@ -47,6 +47,11 @@ struct LinkParams {
     cbny: u32,
     cbnz: u32,
     cbcoord: u32,
+    /// Idem pour la grille parente (couches pariétales imbriquées).
+    pbnx: u32,
+    pbny: u32,
+    pbnz: u32,
+    pbcoord: u32,
 }
 
 const LINK_WGSL: &str = "
@@ -57,6 +62,7 @@ struct L {
   rx: u32, ry: u32, rz: u32, margin: u32,
   sa: u32, alpha: f32, nu_p: f32, nu_c: f32,
   cbnx: u32, cbny: u32, cbnz: u32, cbcoord: u32,
+  pbnx: u32, pbny: u32, pbnz: u32, pbcoord: u32,
 };
 @group(0) @binding(0) var<uniform> P: L;
 const CV1_3 = 357.911;
@@ -232,10 +238,14 @@ const GATHER: &str = "
 @group(0) @binding(5) var<storage, read> pnut: array<f32>;
 @group(0) @binding(6) var<storage, read> pwall: array<u32>;
 @group(0) @binding(7) var<storage, read> gpos: array<u32>;
+@group(0) @binding(8) var<storage, read> pblk: array<u32>;
 
+// Rang d'une maille de la grille parente (boîte, ou couche par blocs).
 fn pcell(x: i32, y: i32, z: i32) -> u32 {
-  let q = clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1));
-  return u32(q.x) + P.pnx * (u32(q.y) + P.pny * u32(q.z));
+  let q = vec3<u32>(clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1)));
+  if (P.pbnx == 0u) { return q.x + P.pnx * (q.y + P.pny * q.z); }
+  let s = pblk[(q.x >> 3u) + P.pbnx * ((q.y >> 3u) + P.pbny * (q.z >> 3u))];
+  return s * 512u + (q.x & 7u) + 8u * ((q.y & 7u) + 8u * (q.z & 7u));
 }
 
 // Moments avant collision au nœud parent, ramenés à la grille fine. Une
@@ -391,6 +401,13 @@ const RESTRICT: &str = "
 @group(0) @binding(11) var<storage, read> pwall: array<u32>;
 @group(0) @binding(12) var<storage, read> rlist: array<u32>;
 @group(0) @binding(13) var<storage, read> cblk: array<u32>;
+@group(0) @binding(14) var<storage, read> pblk: array<u32>;
+
+fn pid(x: u32, y: u32, z: u32) -> u32 {
+  if (P.pbnx == 0u) { return x + P.pnx * (y + P.pny * z); }
+  let s = pblk[(x >> 3u) + P.pbnx * ((y >> 3u) + P.pbny * (z >> 3u))];
+  return s * 512u + (x & 7u) + 8u * ((y & 7u) + 8u * (z & 7u));
+}
 
 // Rang d'une maille de la grille fine (boîte, ou stockage creux par blocs).
 fn cid(x: u32, y: u32, z: u32) -> u32 {
@@ -405,11 +422,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (r >= P.rx) { return; }
   // Nœuds parents recopiés : liste (boîte moins sa marge, ou cœur de la
   // couche pariétale fine).
-  let pidx = rlist[r];
-  let px = pidx % P.pnx;
-  let py = (pidx / P.pnx) % P.pny;
-  let pz = pidx / (P.pnx * P.pny);
-  if (pwall[pidx] == 0xffffffffu) { return; }
+  // Liste : positions dans la boîte parente ; rang par `pid` (couche
+  // parente par blocs). Pas de recopie dans un nœud solide ou fantôme.
+  let ppos = rlist[r];
+  let px = ppos % P.pnx;
+  let py = (ppos / P.pnx) % P.pny;
+  let pz = ppos / (P.pnx * P.pny);
+  let pidx = pid(px, py, pz);
+  if (pwall[pidx] >= 0xfffffffeu) { return; }
   let cx = 2u * (px - P.ox);
   let cy = 2u * (py - P.oy);
   let cz = 2u * (pz - P.oz);
@@ -565,7 +585,7 @@ impl Link3 {
             for hy in MARGIN..=half[1] - MARGIN {
                 for hx in MARGIN..=half[0] - MARGIN {
                     let keep = match child.band_deep.as_ref() {
-                        Some(d) => d[2 * hx + cnx * (2 * hy + cny * 2 * hz)],
+                        Some(d) => d[child.sparse.as_ref().map_or(2 * hx + cnx * (2 * hy + cny * 2 * hz), |m| m.id(2 * hx, 2 * hy, 2 * hz))],
                         None => true,
                     };
                     if keep {
@@ -641,6 +661,10 @@ impl Link3 {
                 cbny: c.sparse.as_ref().map_or(0, |m| m.bd()[1] as u32),
                 cbnz: c.sparse.as_ref().map_or(0, |m| m.bd()[2] as u32),
                 cbcoord: c.sparse.as_ref().map_or(0, |m| m.table_len() as u32),
+                pbnx: p.sparse.as_ref().map_or(0, |m| m.bd()[0] as u32),
+                pbny: p.sparse.as_ref().map_or(0, |m| m.bd()[1] as u32),
+                pbnz: p.sparse.as_ref().map_or(0, |m| m.bd()[2] as u32),
+                pbcoord: p.sparse.as_ref().map_or(0, |m| m.table_len() as u32),
             };
             p.queue.write_buffer(buf, 0, bytemuck::bytes_of(&lp));
         }
@@ -672,6 +696,7 @@ impl Link3 {
                         (5, &p.nut[cur]),
                         (6, &p.wall),
                         (7, &self.gpos),
+                        (8, &p.blk_buf),
                     ],
                 )
             })
@@ -713,6 +738,7 @@ impl Link3 {
                         (11, &p.wall),
                         (12, &self.rlist),
                         (13, &c.blk_buf),
+                        (14, &p.blk_buf),
                     ],
                 )
             })
