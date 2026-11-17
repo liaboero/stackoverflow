@@ -50,7 +50,7 @@ fn usage() -> ! {
          soufflerie wing  --alpha -6:20:1 [--span 1]   aile finie (surface portante), CSV\n\
          soufflerie run3d --shape sphere|cube|cylinder|wing | --stl fichier.stl --re 100 --l 12 [--alpha 8] [--t 40] [--avg 15] [--fp32 1]\n\
          \x20                                  soufflerie 3D (D3Q19, GPU)\n\
-         \x20         [--raff 0..3] [--ba 1, --bf 1 : grilles ×2 de plus aux bords d'attaque et de fuite] [--sillage 1 : traînée en champ lointain]\n\
+         \x20         [--raff 0..3] [--ba 1, --bf 1 : grilles ×2 de plus aux bords (essai)] [--bande 8 : couche pariétale ×2 de 8 mailles fines] [--sillage 1 : traînée en champ lointain]\n\
          soufflerie geom  --stl fichier.stl|fichier.sgeo [mise en place] [--l 16 --raff 2] [--exporter f.sgeo|f.stl]\n\
          \x20                                  contrôle géométrique (résolution par tranche, arêtes vives), export\n\
          \x20         --naca 2412 --ar 8 --taper 0.5 --sweep 0 --dihedral 0 --twist 0 --re 1e6 --strips 40\n\n\
@@ -776,7 +776,7 @@ fn cmd_run3d(a: &Args) {
             "Attention : grilles des bords expérimentales. Une boîte qui coupe la maquette fausse l'écoulement (portance −20 à −30 % sur l'aile AR 4) : voir le README, « Grilles des bords »."
         );
     }
-    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te) {
+    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, a.get("bande", 0.0f64)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");

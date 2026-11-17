@@ -1140,6 +1140,55 @@ affichent un avertissement et ne doivent pas servir aux calculs ;
 l'incertitude de placement (±3 % à ×4 sur la portance) est à garder en
 tête, ou à moyenner en calculant plusieurs `--decalage`.
 
+### Couche pariétale fine (`--bande D`)
+
+Plutôt que des boîtes, une grille deux fois plus fine sur une couche
+d'épaisseur D (mailles fines) autour de toute la surface, comme les
+régions de résolution décalées de la paroi des codes Boltzmann
+commerciaux. Les faces de raccord avec la grille parente sont parallèles à
+la paroi, dans le fluide : elles ne coupent jamais la maquette (le défaut
+des grilles des bords). Première étape : la grille fine reste une boîte
+qui entoure la maquette, mais les mailles fluides à plus de D de la paroi
+sont des mailles fantômes, remplies depuis la grille parente et non
+calculées. Seules les fantômes voisines d'une maille active sont remplies
+(`band_fill`), et seules les mailles actives à plus de 2 MARGIN + 1 de
+toute fantôme sont recopiées vers la grille parente (`band_deep` ; la
+recopie suit désormais une liste de nœuds, boîte ou couche).
+
+Aile AR 4, 4°, L = 16, grille ×2 et couche ×4, contre la grille ×4
+complète (même placement du bord de fuite) :
+
+| D (mailles ×4) | 8 | 12 | 16 | ×4 complet |
+| --- | --- | --- | --- | --- |
+| Cz (boîte) | 0,257 | 0,2775 | 0,2732 | 0,2734 |
+| Cx (boîte, volume nul) | 0,062 | 0,0421 | 0,0422 | 0,0421 |
+| Cz (échange) | 0,292 | 0,280 | 0,279 | — |
+| durée | 1,0 min | 1,2 min | 1,4 min | ≈ 10 min |
+
+À 8 mailles, la couche est trop mince : le raccord tombe dans la couche
+limite et la zone de la loi de paroi, et l'échange et la boîte se
+contredisent. À 16 mailles (un quart de corde à ×4), la couche redonne le
+×4 complet, sept fois plus vite. TR-1208, 8°, grille ×4 et couche ×8
+(D = 16) : Cz 0,558 (boîte), 0,564 (échange), Cx 0,0388 (surface), contre
+0,5545, 0,561 et 0,0393 pour le ×8 complet ; 4,6 min au lieu d'environ
+30.
+
+Erreur de placement du bord de fuite avec la couche ×8 (aile AR 4, grille
+×4 et couche D = 16) :
+
+| f (×8) | 0,60 | 0,85 | 0,10 | 0,35 | moyenne |
+| --- | --- | --- | --- | --- | --- |
+| Cz (boîte) | 0,2685 | 0,2767 | 0,2677 | 0,2626 | 0,269 |
+
+La moyenne sur le placement converge (0,276 à ×2, 0,271 à ×4, 0,269 à ×8,
+vers environ 0,267 ; VSPAERO en panneaux épais : 0,265), et l'écart diminue
+(±8 %, ±3 %, ±2,6 % sur quatre placements seulement).
+
+Limite de cette première étape : la mémoire reste celle de la boîte
+entière (16 M mailles pour la couche ×8 de TR-1208). La deuxième étape
+(stockage creux par blocs, mémoire proportionnelle à la surface) est
+nécessaire pour aller à ×16.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de

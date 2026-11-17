@@ -1460,6 +1460,12 @@ pub struct Gpu3D {
     pub(crate) refine: Option<Box<crate::refine3d::Refinement>>,
     /// Maille de chaque maille pariétale (dans l'ordre de leur numéro).
     wall_cells: Vec<u32>,
+    /// Couche pariétale fine (grille partielle qui épouse la surface) :
+    /// mailles fantômes à remplir depuis la grille parente (voisines d'une
+    /// maille active), et mailles actives loin de toute maille fantôme (leur
+    /// état est recopié vers la grille parente). None : grille boîte.
+    pub(crate) band_fill: Option<Vec<u32>>,
+    pub(crate) band_deep: Option<Vec<bool>>,
     /// Plus petit cosinus entre les normales des faces touchées par les liens
     /// de chaque maille pariétale (arête vive : < 0,5).
     edge_cos: Vec<f32>,
@@ -1844,7 +1850,7 @@ impl Gpu3D {
         depth: usize,
         le: bool,
     ) -> Result<Gpu3D, String> {
-        Self::with_refinement_edges(body, nu, u_in, fp16, sa, depth, le, false)
+        Self::with_refinement_edges(body, nu, u_in, fp16, sa, depth, le, false, 0.0)
     }
 
     /// Idem, avec des grilles deux fois plus fines encore, limitées aux bords
@@ -1863,9 +1869,10 @@ impl Gpu3D {
         depth: usize,
         le: bool,
         te: bool,
+        band: f64,
     ) -> Result<Gpu3D, String> {
         let (device, queue, name) = Self::open_device()?;
-        let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false)?;
+        let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, 0.0)?;
         let depth = depth.min(crate::refine3d::EXTENT3.len());
         if depth == 0 {
             return Ok(top);
@@ -1902,7 +1909,7 @@ impl Gpu3D {
             let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
             let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
             let nu_k = nu * (1u64 << k) as f64;
-            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
+            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, 0.0)?;
             child.les = top.les;
             {
                 let parent = if k == 1 { &top } else { &levels[k - 2] };
@@ -1917,7 +1924,45 @@ impl Gpu3D {
         let mut parent = (0..full).collect::<Vec<usize>>();
         let mut lev_depth: Vec<u32> = (1..=full as u32).collect();
         let mut core: Vec<Option<[[f64; 3]; 2]>> = vec![None; full];
-        if le || te {
+        if band > 0.0 {
+            // Couche pariétale : grille deux fois plus fine sur une épaisseur
+            // `band` (mailles fines) autour de toute la surface, boîte qui
+            // entoure la maquette mais calcul limité à la couche.
+            let k = depth + 1;
+            let sp = (1u64 << (k - 1)) as f64;
+            let pb = parent_body.bounds;
+            let (pnx, pny, pnz) = (parent_body.nx, parent_body.ny, parent_body.nz);
+            // Marge (mailles parentes) : demi-épaisseur de la couche, plus la
+            // bande de raccord.
+            let mg = 0.5 * band + (2 * crate::refine3d::MARGIN3 + 3) as f64;
+            let lo = [
+                (pb.x0 - mg).floor().max(3.0) as usize,
+                (pb.y0 - mg).floor().max(3.0) as usize,
+                (pb.z0 - mg).floor().max(3.0) as usize,
+            ];
+            let hi = [
+                ((pb.x1 + mg).ceil() as usize).min(pnx - 4),
+                ((pb.y1 + mg).ceil() as usize).min(pny - 4),
+                ((pb.z1 + mg).ceil() as usize).min(pnz - 4),
+            ];
+            let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
+            let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
+            let nu_k = nu * (1u64 << k) as f64;
+            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, band)?;
+            child.les = top.les;
+            {
+                let par = if full == 0 { &top } else { &levels[full - 1] };
+                links.push(crate::refine3d::Link3::new(par, &child, lo));
+            }
+            levels.push(child);
+            let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
+            origin.push(o);
+            parent.push(full);
+            lev_depth.push(k as u32);
+            // Domaine propre : toute la boîte (les efforts viennent des mailles
+            // pariétales, toutes dans la couche).
+            core.push(Some([o, [0, 1, 2].map(|a| o[a] + (dims[a] - 1) as f64 / (2.0 * sp))]));
+        } else if le || te {
             let k = depth + 1;
             let sp = (1u64 << (k - 1)) as f64;
             let mesh = parent_body.mesh.clone().ok_or("raffinement des bords : maquette maillée seulement")?;
@@ -1937,7 +1982,7 @@ impl Gpu3D {
                 let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
                 let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
                 let nu_k = nu * (1u64 << k) as f64;
-                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true)?;
+                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, 0.0)?;
                 child.les = top.les;
                 {
                     let par = if full == 0 { &top } else { &levels[full - 1] };
@@ -2021,6 +2066,7 @@ impl Gpu3D {
         fp16: bool,
         sa: bool,
         nested: bool,
+        band: f64,
     ) -> Result<Gpu3D, String> {
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
         let n = nx * ny * nz;
@@ -2184,6 +2230,83 @@ impl Gpu3D {
                 }
             }
         }
+        // Couche pariétale : les mailles fluides à plus de `band` mailles de
+        // la paroi deviennent fantômes ; les faces de raccord avec la grille
+        // parente sont alors parallèles à la paroi, dans le fluide, et ne
+        // coupent jamais la maquette.
+        let (band_fill, band_deep) = if nested && band > 0.0 {
+            let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+            let dist = body.wall_distance(&solid_mask);
+            for c in 0..n {
+                if wall[c] == 0 && dist[c] as f64 > band {
+                    wall[c] = crate::refine3d::GHOST;
+                }
+            }
+            let ghost: Vec<bool> = wall.iter().map(|&w| w == crate::refine3d::GHOST).collect();
+            let active = |c: usize| wall[c] < crate::refine3d::GHOST;
+            // Fantômes à remplir : voisins (26) d'une maille active.
+            let mut fill = Vec::new();
+            for z in 0..nz {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        let c = idx(x, y, z);
+                        if !ghost[c] {
+                            continue;
+                        }
+                        let mut near = false;
+                        'nb: for dz in -1i64..=1 {
+                            for dy in -1i64..=1 {
+                                for dx in -1i64..=1 {
+                                    let (a, b, e) = (x as i64 + dx, y as i64 + dy, z as i64 + dz);
+                                    if a < 0 || b < 0 || e < 0 || a >= nx as i64 || b >= ny as i64 || e >= nz as i64 {
+                                        continue;
+                                    }
+                                    if active(idx(a as usize, b as usize, e as usize)) {
+                                        near = true;
+                                        break 'nb;
+                                    }
+                                }
+                            }
+                        }
+                        if near {
+                            fill.push(c as u32);
+                        }
+                    }
+                }
+            }
+            // Mailles « profondes » : aucune fantôme à moins de 2 MARGIN + 1
+            // mailles (dilatation séparable du masque des fantômes).
+            let r = 2 * crate::refine3d::MARGIN3 + 1;
+            let mut m: Vec<bool> = ghost.clone();
+            for axis in 0..3 {
+                let mut out = m.clone();
+                for z in 0..nz {
+                    for y in 0..ny {
+                        for x in 0..nx {
+                            let p = [x, y, z];
+                            let len = [nx, ny, nz][axis];
+                            let lo = p[axis].saturating_sub(r);
+                            let hi = (p[axis] + r).min(len - 1);
+                            let mut any = false;
+                            for v in lo..=hi {
+                                let mut q = p;
+                                q[axis] = v;
+                                if m[idx(q[0], q[1], q[2])] {
+                                    any = true;
+                                    break;
+                                }
+                            }
+                            out[idx(x, y, z)] = any;
+                        }
+                    }
+                }
+                m = out;
+            }
+            let deep: Vec<bool> = (0..n).map(|c| !m[c]).collect();
+            (Some(fill), Some(deep))
+        } else {
+            (None, None)
+        };
         if qs.is_empty() {
             qs.resize(18, 0.0);
         }
@@ -2521,6 +2644,8 @@ impl Gpu3D {
             essai_nu: 0.0,
             refine: None,
             wall_cells,
+            band_fill,
+            band_deep,
             edge_cos,
             rest_force,
             surface: body.mesh.clone(),

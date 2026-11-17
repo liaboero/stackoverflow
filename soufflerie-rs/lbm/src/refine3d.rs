@@ -382,15 +382,18 @@ const RESTRICT: &str = "
 @group(0) @binding(9) var<storage, read_write> pnut: array<f32>;
 @group(0) @binding(10) var<storage, read_write> pmacro: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read> pwall: array<u32>;
+@group(0) @binding(12) var<storage, read> rlist: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let r = flat(gid, nwg);
-  if (r >= P.rx * P.ry * P.rz) { return; }
-  let px = P.ox + P.margin + r % P.rx;
-  let py = P.oy + P.margin + (r / P.rx) % P.ry;
-  let pz = P.oz + P.margin + r / (P.rx * P.ry);
-  let pidx = px + P.pnx * (py + P.pny * pz);
+  if (r >= P.rx) { return; }
+  // Nœuds parents recopiés : liste (boîte moins sa marge, ou cœur de la
+  // couche pariétale fine).
+  let pidx = rlist[r];
+  let px = pidx % P.pnx;
+  let py = (pidx / P.pnx) % P.pny;
+  let pz = pidx / (P.pnx * P.pny);
   if (pwall[pidx] == 0xffffffffu) { return; }
   let cx = 2u * (px - P.ox);
   let cy = 2u * (py - P.oy);
@@ -452,7 +455,9 @@ pub(crate) struct Link3 {
     oy: usize,
     oz: usize,
     ng: u32,
-    r: [usize; 3],
+    /// Nœuds parents recopiés depuis la grille fine.
+    nr: u32,
+    rlist: wgpu::Buffer,
     params: [wgpu::Buffer; 2],
     gm: wgpu::Buffer,
     gidx: wgpu::Buffer,
@@ -476,7 +481,11 @@ impl Link3 {
         let fp16 = parent.fp16;
         let (cnx, cny, cnz) = (child.nx, child.ny, child.nz);
         let mut ghosts = Vec::new();
-        for z in 0..cnz {
+        let shell = child.band_fill.is_none();
+        if let Some(f) = child.band_fill.as_ref() {
+            ghosts = f.clone();
+        }
+        for z in (0..cnz).filter(|_| shell) {
             for y in 0..cny {
                 for x in 0..cnx {
                     if x == 0 || y == 0 || z == 0 || x == cnx - 1 || y == cny - 1 || z == cnz - 1 {
@@ -525,12 +534,39 @@ impl Link3 {
             })
         };
         let half = [(cnx - 1) / 2, (cny - 1) / 2, (cnz - 1) / 2];
+        // Nœuds parents recopiés : la boîte moins sa marge ; avec une couche
+        // pariétale, seulement ceux dont le nœud fin est loin de ses mailles
+        // fantômes (`band_deep`).
+        let (pnx, pny) = (parent.nx, parent.ny);
+        let mut rl: Vec<u32> = Vec::new();
+        for hz in MARGIN..=half[2] - MARGIN {
+            for hy in MARGIN..=half[1] - MARGIN {
+                for hx in MARGIN..=half[0] - MARGIN {
+                    let keep = match child.band_deep.as_ref() {
+                        Some(d) => d[2 * hx + cnx * (2 * hy + cny * 2 * hz)],
+                        None => true,
+                    };
+                    if keep {
+                        rl.push(((o[0] + hx) + pnx * ((o[1] + hy) + pny * (o[2] + hz))) as u32);
+                    }
+                }
+            }
+        }
+        let nr = rl.len() as u32;
+        if rl.is_empty() {
+            rl.push(0);
+        }
         Link3 {
             ox: o[0],
             oy: o[1],
             oz: o[2],
             ng,
-            r: half.map(|h| h + 1 - 2 * MARGIN),
+            nr,
+            rlist: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("restrict_list3d"),
+                contents: bytemuck::cast_slice(&rl),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
             params: [
                 mk("link3_0", std::mem::size_of::<LinkParams>() as u64, uni),
                 mk("link3_1", std::mem::size_of::<LinkParams>() as u64, uni),
@@ -566,9 +602,9 @@ impl Link3 {
                 oy: self.oy as u32,
                 oz: self.oz as u32,
                 ng: self.ng,
-                rx: self.r[0] as u32,
-                ry: self.r[1] as u32,
-                rz: self.r[2] as u32,
+                rx: self.nr,
+                ry: 1,
+                rz: 1,
                 margin: MARGIN as u32,
                 sa: (p.sa && c.sa) as u32,
                 alpha: 0.5 * a as f32,
@@ -645,6 +681,7 @@ impl Link3 {
                         (9, &p.nut[pc]),
                         (10, &p.macro_buf),
                         (11, &p.wall),
+                        (12, &self.rlist),
                     ],
                 )
             })
@@ -719,7 +756,7 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
             pass.dispatch_workgroups(dx, dy, 1);
             encode(levels, links, children, pass, c, slot);
         }
-        let nr = (link.r[0] * link.r[1] * link.r[2]) as u32;
+        let nr = link.nr;
         let (rx, ry) = disp(nr);
         pass.set_pipeline(&link.restrict);
         pass.set_bind_group(0, &link.restrict_bind[levels[k].cur * 2 + levels[c].cur], &[]);
