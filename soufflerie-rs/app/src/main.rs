@@ -642,7 +642,7 @@ fn cmd_geom(a: &Args) {
     let e = 6.0f64;
     let down = e.max(0.1 * l as f64 * f);
     println!(
-        "Grille du bord d'attaque (--ba 1, ×{}) : {:.1} M mailles en une boîte (solveur), {:.1} M en huit boîtes suivant le bord d'attaque",
+        "Grille du bord d'attaque (--ba 1, ×{}) : {:.1} M mailles en une boîte, {:.1} M en huit tronçons d'envergure (le solveur découpe ses tronçons selon l'étendue en x et z, voir run3d)",
         2.0 * f,
         8.0 * le_cover(&fine, 1, e, down) / 1e6,
         8.0 * le_cover(&fine, 8, e, down) / 1e6
