@@ -41,7 +41,12 @@ struct LinkParams {
     alpha: f32,
     nu_p: f32,
     nu_c: f32,
-    pad: [u32; 4],
+    /// Grille fine en stockage creux : blocs selon x, y, z (0 : boîte) et
+    /// début des coordonnées des blocs dans sa table.
+    cbnx: u32,
+    cbny: u32,
+    cbnz: u32,
+    cbcoord: u32,
 }
 
 const LINK_WGSL: &str = "
@@ -51,7 +56,7 @@ struct L {
   ox: u32, oy: u32, oz: u32, ng: u32,
   rx: u32, ry: u32, rz: u32, margin: u32,
   sa: u32, alpha: f32, nu_p: f32, nu_c: f32,
-  pad0: u32, pad1: u32, pad2: u32, pad3: u32,
+  cbnx: u32, cbny: u32, cbnz: u32, cbcoord: u32,
 };
 @group(0) @binding(0) var<uniform> P: L;
 const CV1_3 = 357.911;
@@ -226,6 +231,7 @@ const GATHER: &str = "
 @group(0) @binding(2) var<storage, read> gidx: array<u32>;
 @group(0) @binding(5) var<storage, read> pnut: array<f32>;
 @group(0) @binding(6) var<storage, read> pwall: array<u32>;
+@group(0) @binding(7) var<storage, read> gpos: array<u32>;
 
 fn pcell(x: i32, y: i32, z: i32) -> u32 {
   let q = clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1));
@@ -289,7 +295,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   gm[6u * g] = gm[6u * g + 3u];
   gm[6u * g + 1u] = gm[6u * g + 4u];
   gm[6u * g + 2u] = gm[6u * g + 5u];
-  let c = gidx[g];
+  // Position de la maille fantôme dans la boîte de la grille fine.
+  let c = gpos[g];
   let x = c % P.cnx;
   let y = (c / P.cnx) % P.cny;
   let z = c / (P.cnx * P.cny);
@@ -383,6 +390,14 @@ const RESTRICT: &str = "
 @group(0) @binding(10) var<storage, read_write> pmacro: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read> pwall: array<u32>;
 @group(0) @binding(12) var<storage, read> rlist: array<u32>;
+@group(0) @binding(13) var<storage, read> cblk: array<u32>;
+
+// Rang d'une maille de la grille fine (boîte, ou stockage creux par blocs).
+fn cid(x: u32, y: u32, z: u32) -> u32 {
+  if (P.cbnx == 0u) { return x + P.cnx * (y + P.cny * z); }
+  let s = cblk[(x >> 3u) + P.cbnx * ((y >> 3u) + P.cbny * (z >> 3u))];
+  return s * 512u + (x & 7u) + 8u * ((y & 7u) + 8u * (z & 7u));
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -398,7 +413,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let cx = 2u * (px - P.ox);
   let cy = 2u * (py - P.oy);
   let cz = 2u * (pz - P.oz);
-  let cidx = cx + P.cnx * (cy + P.cny * cz);
+  let cidx = cid(cx, cy, cz);
   var v = 0.0;
   var vt = 0.0;
   if (P.sa != 0u) {
@@ -412,7 +427,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // Populations avant collision au temps t + 1, tirées du demi-pas t + ½.
     for (var i = 0u; i < 19u; i++) {
       let s = vec3<i32>(i32(cx) - CX[i], i32(cy) - CY[i], i32(cz) - CZ[i]);
-      f[i] = ld_cs(i, u32(s.x) + P.cnx * (u32(s.y) + P.cny * u32(s.z)));
+      f[i] = ld_cs(i, cid(u32(s.x), u32(s.y), u32(s.z)));
     }
     m = moments(f);
     let tau_c = 0.5 + 3.0 * (P.nu_c + vt);
@@ -461,6 +476,8 @@ pub(crate) struct Link3 {
     params: [wgpu::Buffer; 2],
     gm: wgpu::Buffer,
     gidx: wgpu::Buffer,
+    /// Position (indice de la boîte fine) de chaque maille fantôme.
+    gpos: wgpu::Buffer,
     gather: wgpu::ComputePipeline,
     fill: wgpu::ComputePipeline,
     restrict: wgpu::ComputePipeline,
@@ -482,8 +499,10 @@ impl Link3 {
         let (cnx, cny, cnz) = (child.nx, child.ny, child.nz);
         let mut ghosts = Vec::new();
         let shell = child.band_fill.is_none();
-        if let Some(f) = child.band_fill.as_ref() {
+        let mut gpos: Vec<u32> = Vec::new();
+        if let (Some(f), Some(p)) = (child.band_fill.as_ref(), child.band_fill_pos.as_ref()) {
             ghosts = f.clone();
+            gpos = p.clone();
         }
         for z in (0..cnz).filter(|_| shell) {
             for y in 0..cny {
@@ -493,6 +512,9 @@ impl Link3 {
                     }
                 }
             }
+        }
+        if shell {
+            gpos = ghosts.clone();
         }
         let ng = ghosts.len() as u32;
         let base = common();
@@ -577,6 +599,11 @@ impl Link3 {
                 contents: bytemuck::cast_slice(&ghosts),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
+            gpos: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost_pos3d"),
+                contents: bytemuck::cast_slice(&gpos),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
             gather: pipe(&gather, "gather3d"),
             fill: pipe(&fill, "fill3d"),
             restrict: pipe(&restrict, "restrict3d"),
@@ -610,7 +637,10 @@ impl Link3 {
                 alpha: 0.5 * a as f32,
                 nu_p: p.nu as f32,
                 nu_c: c.nu as f32,
-                pad: [0; 4],
+                cbnx: c.sparse.as_ref().map_or(0, |m| m.bd()[0] as u32),
+                cbny: c.sparse.as_ref().map_or(0, |m| m.bd()[1] as u32),
+                cbnz: c.sparse.as_ref().map_or(0, |m| m.bd()[2] as u32),
+                cbcoord: c.sparse.as_ref().map_or(0, |m| m.table_len() as u32),
             };
             p.queue.write_buffer(buf, 0, bytemuck::bytes_of(&lp));
         }
@@ -637,11 +667,11 @@ impl Link3 {
                     vec![
                         (0, &self.params[0]),
                         (1, &self.gm),
-                        (2, &self.gidx),
                         (3, &p.pops[1 - cur][0]),
                         (4, &p.pops[1 - cur][1]),
                         (5, &p.nut[cur]),
                         (6, &p.wall),
+                        (7, &self.gpos),
                     ],
                 )
             })
@@ -682,6 +712,7 @@ impl Link3 {
                         (10, &p.macro_buf),
                         (11, &p.wall),
                         (12, &self.rlist),
+                        (13, &c.blk_buf),
                     ],
                 )
             })

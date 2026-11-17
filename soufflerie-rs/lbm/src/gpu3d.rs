@@ -92,7 +92,24 @@ struct Params {
   accel: f32, c18: f32, writeMacro: u32, les: u32,
   rows: u32, sa: u32, nu: f32, lesA: f32,
   xtr: f32, band: f32, essai: u32, essaiNu: f32,
+  bnx: u32, bny: u32, bnz: u32, bcoord: u32,
 };
+";
+
+/// Rang d'une maille et position d'un rang : grille boîte (P.bnx = 0) ou
+/// stockage creux par blocs de 8³ (table `blk`, puis coordonnées des blocs).
+const SPARSE_FNS: &str = "
+fn id_of(x: u32, y: u32, z: u32) -> u32 {
+  if (P.bnx == 0u) { return x + P.nx * (y + P.ny * z); }
+  let s = blk[(x >> 3u) + P.bnx * ((y >> 3u) + P.bny * (z >> 3u))];
+  return s * 512u + (x & 7u) + 8u * ((y & 7u) + 8u * (z & 7u));
+}
+fn pos_of(i: u32) -> vec3<i32> {
+  if (P.bnx == 0u) { return vec3<i32>(i32(i % P.nx), i32((i / P.nx) % P.ny), i32(i / (P.nx * P.ny))); }
+  let c = blk[P.bcoord + (i >> 9u)];
+  let l = i & 511u;
+  return vec3<i32>(i32((c & 1023u) * 8u + (l & 7u)), i32(((c >> 10u) & 1023u) * 8u + ((l >> 3u) & 7u)), i32((c >> 20u) * 8u + (l >> 6u)));
+}
 ";
 
 /// Zone laminaire imposée : abscisse locale rapportée à la corde de la
@@ -167,6 +184,8 @@ const CW3_6 = 64.0;
 const CV1_3 = 357.911;
 const NU_TILDE_MAX = 0.15;
 
+@group(0) @binding(9) var<storage, read> blk: array<u32>;
+SPARSE_FNS
 fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
   let ny = i32(P.ny);
   let nz = i32(P.nz);
@@ -174,16 +193,17 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
   var zz = (zi + nz) % nz;
   if ((P.rows & 2u) != 0u) { zz = clamp(zi, 0, nz - 1); }
   let xx = clamp(xi, 0, i32(P.nx) - 1);
-  return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
+  return id_of(u32(xx), u32(yy), u32(zz));
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let idx = gid.x + gid.y * nwg.x * 64u;
   if (idx >= P.N) { return; }
-  let x = i32(idx % P.nx);
-  let y = i32((idx / P.nx) % P.ny);
-  let z = i32(idx / (P.nx * P.ny));
+  let pp = pos_of(idx);
+  let x = pp.x;
+  let y = pp.y;
+  let z = pp.z;
   let wk0 = wall[idx];
   let nu = P.nu;
   var out: f32;
@@ -481,6 +501,8 @@ fn wgsl_step(fp16: bool) -> String {
 @group(0) @binding(12) var<storage, read> wdist: array<f32>;
 // Étendue en x du corps par tranche y (zone laminaire).
 @group(0) @binding(13) var<storage, read> slab: array<vec2<f32>>;
+@group(0) @binding(14) var<storage, read> blk: array<u32>;
+{SPARSE_FNS}
 {lam_fns}
 {sa_fns}
 {load}
@@ -492,7 +514,7 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {{
   let yy = (yi + ny) % ny;
   let zz = (zi + nz) % nz;
   let xx = clamp(xi, 0, i32(P.nx) - 1);
-  return u32(xx) + P.nx * (u32(yy) + P.ny * u32(zz));
+  return id_of(u32(xx), u32(yy), u32(zz));
 }}
 
 fn oct_decode(k: f32) -> vec3<f32> {{
@@ -548,9 +570,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (wk0 >= 0xfffffffeu) {{ return; }}
   let wk = select(wk0 - 1u, 0xffffffffu, wk0 == 0u);
   let hasWall = wk != 0xffffffffu;
-  let x = i32(idx % P.nx);
-  let y = i32((idx / P.nx) % P.ny);
-  let z = i32(idx / (P.nx * P.ny));
+  let pp = pos_of(idx);
+  let x = pp.x;
+  let y = pp.y;
+  let z = pp.z;
   var g: array<f32, 19>;
   var fsum = vec3<f32>(0.0);
   // Loi de paroi : glissement tangentiel tiré de la vitesse du pas précédent.
@@ -1323,6 +1346,12 @@ pub(crate) struct Params {
     essai: u32,
     /// Plafond de viscosité turbulente des diagnostics 1024 et 2048.
     essai_nu: f32,
+    /// Stockage creux : blocs selon x, y, z (0 : grille boîte) et début des
+    /// coordonnées des blocs dans la table.
+    bnx: u32,
+    bny: u32,
+    bnz: u32,
+    bcoord: u32,
 }
 
 #[repr(C)]
@@ -1466,6 +1495,11 @@ pub struct Gpu3D {
     /// état est recopié vers la grille parente). None : grille boîte.
     pub(crate) band_fill: Option<Vec<u32>>,
     pub(crate) band_deep: Option<Vec<bool>>,
+    /// Positions (indices de la boîte) des fantômes à remplir.
+    pub(crate) band_fill_pos: Option<Vec<u32>>,
+    /// Stockage creux par blocs (couche pariétale), et sa table pour les shaders.
+    pub(crate) sparse: Option<std::sync::Arc<SparseMap>>,
+    pub(crate) blk_buf: wgpu::Buffer,
     /// Plus petit cosinus entre les normales des faces touchées par les liens
     /// de chaque maille pariétale (arête vive : < 0,5).
     edge_cos: Vec<f32>,
@@ -1708,6 +1742,80 @@ fn edge_boxes(tris: &[crate::stl::Tri], l: f64, dims: [usize; 3], le: bool, te: 
         }
     }
     Ok(out)
+}
+
+/// Côté des blocs du stockage creux (mailles).
+pub(crate) const SB: usize = 8;
+const SB3: usize = SB * SB * SB;
+
+/// Stockage creux par blocs d'une couche pariétale : la maille (x, y, z)
+/// du bloc de rang `slot` est rangée en slot · 512 + local. Le rang 0 est un
+/// bloc vide (mailles fantômes) qui reçoit toute lecture hors des blocs.
+#[derive(Clone, Debug)]
+pub(crate) struct SparseMap {
+    /// Nombre de blocs selon x, y, z (boîte entière).
+    bd: [usize; 3],
+    /// Rang de chaque bloc de la boîte (0 : absent).
+    table: Vec<u32>,
+    /// Coordonnées (en blocs) de chaque rang.
+    coords: Vec<[u32; 3]>,
+}
+
+impl SparseMap {
+    fn new(bd: [usize; 3], used: &[bool]) -> SparseMap {
+        let mut table = vec![0u32; used.len()];
+        let mut coords = vec![[u32::MAX; 3]];
+        for (b, &u) in used.iter().enumerate() {
+            if u {
+                table[b] = coords.len() as u32;
+                coords.push([(b % bd[0]) as u32, ((b / bd[0]) % bd[1]) as u32, (b / (bd[0] * bd[1])) as u32]);
+            }
+        }
+        SparseMap { bd, table, coords }
+    }
+
+    pub(crate) fn slots(&self) -> usize {
+        self.coords.len()
+    }
+
+    pub(crate) fn bd(&self) -> [usize; 3] {
+        self.bd
+    }
+
+    pub(crate) fn table_len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// Rang de la maille (x, y, z) (dans le bloc vide si son bloc est absent).
+    pub(crate) fn id(&self, x: usize, y: usize, z: usize) -> usize {
+        let b = x / SB + self.bd[0] * (y / SB + self.bd[1] * (z / SB));
+        let slot = self.table.get(b).copied().unwrap_or(0) as usize;
+        slot * SB3 + (x % SB) + SB * ((y % SB) + SB * (z % SB))
+    }
+
+    /// Position de la maille de rang `i`, None dans le bloc vide ou hors de
+    /// la boîte `dims`.
+    pub(crate) fn pos(&self, i: usize, dims: [usize; 3]) -> Option<[usize; 3]> {
+        let c = self.coords[i / SB3];
+        if c[0] == u32::MAX {
+            return None;
+        }
+        let l = i % SB3;
+        let p = [c[0] as usize * SB + l % SB, c[1] as usize * SB + (l / SB) % SB, c[2] as usize * SB + l / (SB * SB)];
+        (p[0] < dims[0] && p[1] < dims[1] && p[2] < dims[2]).then_some(p)
+    }
+
+    fn dense_of(&self, i: usize, dims: [usize; 3]) -> Option<usize> {
+        self.pos(i, dims).map(|p| p[0] + dims[0] * (p[1] + dims[1] * p[2]))
+    }
+
+    /// Données des shaders : table des blocs puis coordonnées tassées
+    /// (x | y << 10 | z << 20) de chaque rang.
+    fn gpu_table(&self) -> Vec<u32> {
+        let mut v = self.table.clone();
+        v.extend(self.coords.iter().map(|c| if c[0] == u32::MAX { 0 } else { c[0] | (c[1] << 10) | (c[2] << 20) }));
+        v
+    }
 }
 
 /// Hauteur de raccord de la loi de paroi, en mailles de la grille.
@@ -2044,7 +2152,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(13);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(14);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -2069,20 +2177,14 @@ impl Gpu3D {
         band: f64,
     ) -> Result<Gpu3D, String> {
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
+        // Mailles de la boîte (tableaux de la mise en place) ; les mailles
+        // stockées sur le GPU (`ns`) en sont un sous-ensemble par blocs pour
+        // une couche pariétale.
         let n = nx * ny * nz;
         let al = device.limits();
         let words_a = if fp16 { 5 } else { 10 };
         let words_b = if fp16 { 5 } else { 9 };
-        let biggest = (words_a * n * 4).max(16 * n) as u64;
         let max_bind = (al.max_storage_buffer_binding_size as u64).min(al.max_buffer_size);
-        if biggest > max_bind {
-            return Err(format!(
-                "{:.1} M mailles : tampon de {} Mo, au-delà de la limite de l'adaptateur ({} Mo)",
-                n as f64 / 1e6,
-                biggest >> 20,
-                max_bind >> 20
-            ));
-        }
         let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let mk = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -2092,16 +2194,11 @@ impl Gpu3D {
                 mapped_at_creation: false,
             })
         };
-        let pops = [
-            [mk("a0", (words_a * n * 4) as u64, st), mk("b0", (words_b * n * 4) as u64, st)],
-            [mk("a1", (words_a * n * 4) as u64, st), mk("b1", (words_b * n * 4) as u64, st)],
-        ];
         let params = mk(
             "params3d",
             SLOT * BATCH as u64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let macro_buf = mk("macro3d", 16 * n as u64, st);
 
         // Voxelisation : mailles solides, puis mailles pariétales et fractions q.
         let b = body.bounds;
@@ -2307,18 +2404,90 @@ impl Gpu3D {
         } else {
             (None, None)
         };
+        // Stockage creux de la couche pariétale : blocs de 8³ mailles qui
+        // contiennent une maille active ou une fantôme à remplir ; le bloc 0
+        // (vide, mailles fantômes) reçoit toute lecture hors des blocs.
+        let sparse = band_fill.as_ref().map(|fill| {
+            let bd = [nx.div_ceil(SB), ny.div_ceil(SB), nz.div_ceil(SB)];
+            let mut used = vec![false; bd[0] * bd[1] * bd[2]];
+            let blk = |c: usize| {
+                let (x, y, z) = (c % nx, (c / nx) % ny, c / (nx * ny));
+                x / SB + bd[0] * (y / SB + bd[1] * (z / SB))
+            };
+            for (c, &w) in wall.iter().enumerate() {
+                if w < crate::refine3d::GHOST {
+                    used[blk(c)] = true;
+                }
+            }
+            for &c in fill {
+                used[blk(c as usize)] = true;
+            }
+            SparseMap::new(bd, &used)
+        });
+        let ns = sparse.as_ref().map_or(n, |m| m.slots() * SB3);
+        let biggest = (words_a * ns * 4).max(16 * ns) as u64;
+        if biggest > max_bind {
+            return Err(format!(
+                "{:.1} M mailles : tampon de {} Mo, au-delà de la limite de l'adaptateur ({} Mo)",
+                ns as f64 / 1e6,
+                biggest >> 20,
+                max_bind >> 20
+            ));
+        }
+        let pops = [
+            [mk("a0", (words_a * ns * 4) as u64, st), mk("b0", (words_b * ns * 4) as u64, st)],
+            [mk("a1", (words_a * ns * 4) as u64, st), mk("b1", (words_b * ns * 4) as u64, st)],
+        ];
+        let macro_buf = mk("macro3d", 16 * ns as u64, st);
+        // Table des blocs pour les shaders (vide : grille boîte).
+        let blk_data: Vec<u32> = match sparse.as_ref() {
+            Some(m) => m.gpu_table(),
+            None => vec![0u32; 4],
+        };
+        let blk_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blocs3d"),
+            contents: bytemuck::cast_slice(&blk_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        // Tableau par maille, rangé comme sur le GPU (blocs, ou boîte).
+        let to_gpu = |dense_id: &dyn Fn(usize) -> Option<usize>| -> Vec<usize> {
+            (0..ns).map(|i| dense_id(i).unwrap_or(usize::MAX)).collect()
+        };
+        let dense_of: Vec<usize> = match sparse.as_ref() {
+            Some(m) => to_gpu(&|i| m.dense_of(i, [nx, ny, nz])),
+            None => Vec::new(),
+        };
+        let gpu_u32 = |v: &[u32], void: u32| -> Vec<u32> {
+            if sparse.is_none() {
+                return v.to_vec();
+            }
+            dense_of.iter().map(|&d| if d == usize::MAX { void } else { v[d] }).collect()
+        };
+        let gpu_id = |c: usize| -> u32 {
+            match sparse.as_ref() {
+                Some(m) => m.id(c % nx, (c / nx) % ny, c / (nx * ny)) as u32,
+                None => c as u32,
+            }
+        };
+        let wall_gpu = gpu_u32(&wall, crate::refine3d::GHOST);
+        let band_fill_pos = band_fill.clone();
+        let band_fill = band_fill.map(|f| f.iter().map(|&c| gpu_id(c as usize)).collect::<Vec<u32>>());
+        for c in wall_cells.iter_mut() {
+            *c = gpu_id(*c as usize);
+        }
         if qs.is_empty() {
             qs.resize(18, 0.0);
         }
-        let solid: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
+        let solid: Vec<bool> = wall_gpu.iter().map(|&w| w == SOLID).collect();
         // Affichage des mailles du calcul : 2 bits par maille (1 solide, 2 paroi mince).
-        let mut vox = vec![0u32; n.div_ceil(16)];
+        let mut vox = vec![0u32; ns.div_ceil(16)];
         for (c, &s) in solid.iter().enumerate() {
             if s {
                 vox[c >> 4] |= 1 << ((c & 15) * 2);
             }
         }
         for &c in &thin {
+            let c = gpu_id(c) as usize;
             vox[c >> 4] |= 2 << ((c & 15) * 2);
         }
         let vox_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2350,7 +2519,7 @@ impl Gpu3D {
         );
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),
-            contents: bytemuck::cast_slice(&wall),
+            contents: bytemuck::cast_slice(&wall_gpu),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let qbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2420,15 +2589,20 @@ impl Gpu3D {
             }
         };
         let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
-        let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist));
+        let dist_gpu: Vec<f32> = if sparse.is_none() {
+            dist
+        } else {
+            dense_of.iter().map(|&d| if d == usize::MAX { 1e3 } else { dist[d] }).collect()
+        };
+        let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist_gpu));
         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
         // (à la suite, une valeur par maille) la vitesse de transpiration.
         let utau_buf = mk("utau3d", (20 * wall_count) as u64, st);
-        let nsa = if sa { 4 * n as u64 } else { 16 };
+        let nsa = if sa { 4 * ns as u64 } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if sa {
             let inf = crate::sa::nu_tilde_inf(nu);
-            wall.iter().map(|&w| if w == SOLID { 0.0 } else { inf }).collect()
+            wall_gpu.iter().map(|&w| if w == SOLID { 0.0 } else { inf }).collect()
         } else {
             Vec::new()
         };
@@ -2454,6 +2628,7 @@ impl Gpu3D {
                 storage(11, false),
                 storage(12, true),
                 storage(13, true),
+                storage(14, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2468,6 +2643,7 @@ impl Gpu3D {
                 storage(6, true),
                 storage(7, false),
                 storage(8, true),
+                storage(9, true),
             ],
         });
         let init_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2495,7 +2671,7 @@ impl Gpu3D {
         };
         let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16));
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16));
-        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{SA3_WGSL}"));
+        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)));
         let slice_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("slice"),
             entries: &[
@@ -2543,6 +2719,7 @@ impl Gpu3D {
                         buf_entry(11, &utau_buf, None),
                         buf_entry(12, &dist_buf, None),
                         buf_entry(13, &slab_buf, None),
+                        buf_entry(14, &blk_buf, None),
                     ],
                 })
             })
@@ -2562,6 +2739,7 @@ impl Gpu3D {
                         buf_entry(6, &nut[s], None),
                         buf_entry(7, &nut[1 - s], None),
                         buf_entry(8, &slab_buf, None),
+                        buf_entry(9, &blk_buf, None),
                     ],
                 })
             })
@@ -2579,7 +2757,7 @@ impl Gpu3D {
                 })
             })
             .collect();
-        let groups = (n as u32).div_ceil(64);
+        let groups = (ns as u32).div_ceil(64);
         let dx = groups.min(65535);
         let disp = (dx, groups.div_ceil(dx));
         let mut s = Gpu3D {
@@ -2589,7 +2767,7 @@ impl Gpu3D {
             nx,
             ny,
             nz,
-            n,
+            n: ns,
             fp16,
             u_in,
             tau0: 0.5,
@@ -2646,6 +2824,9 @@ impl Gpu3D {
             wall_cells,
             band_fill,
             band_deep,
+            band_fill_pos,
+            sparse: sparse.map(std::sync::Arc::new),
+            blk_buf,
             edge_cos,
             rest_force,
             surface: body.mesh.clone(),
@@ -2737,6 +2918,10 @@ impl Gpu3D {
             band: (self.l as f32 / 10.0).max(3.0),
             essai: self.essai,
             essai_nu: self.essai_nu,
+            bnx: self.sparse.as_ref().map_or(0, |m| m.bd[0] as u32),
+            bny: self.sparse.as_ref().map_or(0, |m| m.bd[1] as u32),
+            bnz: self.sparse.as_ref().map_or(0, |m| m.bd[2] as u32),
+            bcoord: self.sparse.as_ref().map_or(0, |m| m.table.len() as u32),
         }
     }
 
@@ -2972,6 +3157,7 @@ impl Gpu3D {
             s: f64,
             nu: f64,
             m: usize,
+            map: Option<std::sync::Arc<SparseMap>>,
         }
         let mut levs = vec![Lev {
             mac: self.macros(),
@@ -2981,6 +3167,7 @@ impl Gpu3D {
             s: 1.0,
             nu: self.nu,
             m: 0,
+            map: None,
         }];
         if let Some(r) = self.refine.as_mut() {
             for (k, g) in r.levels.iter_mut().enumerate() {
@@ -2993,6 +3180,7 @@ impl Gpu3D {
                     nu: g.nu,
                     // Enveloppe fantôme et zone de recouvrement exclues.
                     m: 2 * crate::refine3d::MARGIN3 + 2,
+                    map: g.sparse.clone(),
                 });
             }
         }
@@ -3029,7 +3217,11 @@ impl Gpu3D {
                             let wy = if pick > 0 && dj.abs() == half { 0.5 } else { 1.0 };
                             let wz = if pick > 0 && dk.abs() == half { 0.5 } else { 1.0 };
                             let w = wy * wz / (l.s * l.s);
-                            let c = cx as usize + l.d[0] * ((cy + dj) as usize + l.d[1] * (cz + dk) as usize);
+                            let (qx, qy, qz) = (cx as usize, (cy + dj) as usize, (cz + dk) as usize);
+                            let c = match l.map.as_ref() {
+                                Some(m) => m.id(qx, qy, qz),
+                                None => qx + l.d[0] * (qy + l.d[1] * qz),
+                            };
                             let v = l.mac[c];
                             let (u, vv, ww, rho) = (v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64);
                             let p = (rho - 1.0) / 3.0;
@@ -3185,14 +3377,12 @@ impl Gpu3D {
                 _ => ([0.0; 3], 1.0),
             };
             let g = self.grid_mut(k);
-            let (nx, ny) = (g.nx, g.ny);
             // Position dans la grille entière la plus fine.
             let tri: Vec<u32> = g
                 .wall_cells
                 .iter()
                 .map(|&c| {
-                    let c = c as usize;
-                    let p = [(c % nx) as f64, ((c / nx) % ny) as f64, (c / (nx * ny)) as f64];
+                    let p = g.cell_xyz(c as usize).map(|v| v as f64);
                     let q = [0, 1, 2].map(|a| (org[a] + p[a] / s - org_f[a]) * s_f);
                     topo.nearest(q, 4.0 * s_f / s).map_or(u32::MAX, |t| t as u32)
                 })
@@ -3417,6 +3607,15 @@ impl Gpu3D {
             .collect()
     }
 
+    /// Position de la maille de rang `c` (origine de la grille si `c` est
+    /// dans le bloc vide).
+    pub(crate) fn cell_xyz(&self, c: usize) -> [usize; 3] {
+        match self.sparse.as_ref() {
+            Some(m) => m.pos(c, [self.nx, self.ny, self.nz]).unwrap_or([0; 3]),
+            None => [c % self.nx, (c / self.nx) % self.ny, c / (self.nx * self.ny)],
+        }
+    }
+
     /// Grilles partielles des bords, une ligne par boîte (diagnostic) :
     /// origine, étendue et domaine propre en mailles de la veine.
     pub fn edge_box_report(&self) -> Vec<String> {
@@ -3482,6 +3681,7 @@ impl Gpu3D {
             m: f64,
             /// Grille partielle : domaine propre (mailles de la veine).
             core: Option<[[f64; 3]; 2]>,
+            map: Option<std::sync::Arc<SparseMap>>,
         }
         let mut levs: Vec<Lev> = Vec::new();
         match self.refine.as_mut() {
@@ -3500,6 +3700,7 @@ impl Gpu3D {
                         mesh,
                         m: if k == r.full { 0.0 } else { (2 * crate::refine3d::MARGIN3 + 2) as f64 },
                         core: r.core[k - 1],
+                        map: g.sparse.clone(),
                     });
                 }
             }
@@ -3515,6 +3716,7 @@ impl Gpu3D {
                     mesh,
                     m: 0.0,
                     core: None,
+                    map: None,
                 });
             }
         }
@@ -3545,7 +3747,10 @@ impl Gpu3D {
                 if outside(l, q) {
                     return None;
                 }
-                let c = q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize);
+                let c = match l.map.as_ref() {
+                    Some(m) => m.id(q[0] as usize, q[1] as usize, q[2] as usize),
+                    None => q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize),
+                };
                 if l.solid[c] {
                     return None;
                 }
@@ -3579,7 +3784,10 @@ impl Gpu3D {
                 if outside(l, q) {
                     return None;
                 }
-                let cell = q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize);
+                let cell = match l.map.as_ref() {
+                    Some(m) => m.id(q[0] as usize, q[1] as usize, q[2] as usize),
+                    None => q[0] as usize + l.d[0] * (q[1] as usize + l.d[1] * q[2] as usize),
+                };
                 let side: f64 = (0..3).map(|a| (q[a] as f64 - c[a]) * n[a]).sum();
                 if l.solid[cell] || side <= 0.0 {
                     continue;
@@ -3745,11 +3953,10 @@ impl Gpu3D {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.clear_buffer(&self.force, 0, None);
         self.queue.submit([enc.finish()]);
-        let (nx, ny) = (self.nx, self.ny);
         let mut f = [0.0f64; 3];
         for (k, c) in v.chunks_exact(4).enumerate() {
-            let cell = self.wall_cells[k] as usize;
-            if keep([(cell % nx) as f64, ((cell / nx) % ny) as f64, (cell / (nx * ny)) as f64]) {
+            let p = self.cell_xyz(self.wall_cells[k] as usize);
+            if keep(p.map(|v| v as f64)) {
                 for a in 0..3 {
                     f[a] += c[a] as f64;
                 }

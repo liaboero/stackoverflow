@@ -1184,10 +1184,34 @@ La moyenne sur le placement converge (0,276 à ×2, 0,271 à ×4, 0,269 à ×8,
 vers environ 0,267 ; VSPAERO en panneaux épais : 0,265), et l'écart diminue
 (±8 %, ±3 %, ±2,6 % sur quatre placements seulement).
 
-Limite de cette première étape : la mémoire reste celle de la boîte
-entière (16 M mailles pour la couche ×8 de TR-1208). La deuxième étape
-(stockage creux par blocs, mémoire proportionnelle à la surface) est
-nécessaire pour aller à ×16.
+**Stockage creux par blocs.** La couche est rangée par blocs de 8³
+mailles : seuls les blocs qui contiennent une maille active ou une
+fantôme à remplir sont gardés (`SparseMap`), plus un bloc vide de mailles
+fantômes qui reçoit toute lecture hors des blocs. Les shaders trouvent le
+rang d'une maille par une table des blocs (`id_of`) et la position d'un
+rang par les coordonnées du bloc (`pos_of`) ; le raccord des grilles lit la
+position des fantômes dans une liste et la grille fine par la même table ;
+les relevés sur le processeur (surface, échange, sillage) passent par la
+même correspondance. Mêmes résultats que la boîte : aile AR 4, Cz 0,2733
+(boîte : 0,2732), 1,34 M mailles gardées au lieu de 2,88 M ; TR-1208, 8°,
+couche ×8, Cz 0,5582 (0,5583), 2,6 M mailles au lieu de 16 M, 3,6 min.
+
+La couche ×16 devient possible (8,3 M mailles ; la boîte en ferait plus
+de 50 M) :
+
+| TR-1208, 8° | Cz boîte | Cz échange | Cx surface |
+| --- | --- | --- | --- |
+| ×4 | 0,545 | 0,550 | 0,044 |
+| ×8 complet | 0,5545 | 0,561 | 0,039 |
+| ×4 + couche ×8 | 0,558 | 0,564 | 0,039 |
+| ×8 + couche ×16 (26 min) | 0,562 | 0,568 | 0,0375 |
+| mesure / VSPAERO | 0,499 / 0,531 | | 0,021 / 0,026 |
+
+La traînée continue de baisser en affinant ; la portance converge vers
+environ 0,565, 13 % au-dessus de la mesure et 6 % au-dessus de VSPAERO
+non visqueux. Sur TR-1208, l'excès de portance ne se résorbe donc pas
+avec la résolution près de la paroi, contrairement à l'aile AR 4 où la
+moyenne sur le placement rejoint VSPAERO.
 
 ### Programmes de diagnostic
 
