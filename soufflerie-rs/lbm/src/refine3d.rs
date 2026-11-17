@@ -966,9 +966,7 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
         if let Some(w) = &lev.wall_pass {
             w.encode(pass, slot);
         }
-        pass.set_pipeline(&lev.step_pipe);
-        pass.set_bind_group(0, &lev.bind[lev.cur], &[slot]);
-        pass.dispatch_workgroups(lev.disp.0, lev.disp.1, 1);
+        lev.encode_step(pass, slot);
         if lev.sa {
             pass.set_pipeline(&lev.sa_pipe);
             pass.set_bind_group(0, &lev.sa_bind[lev.cur], &[slot]);

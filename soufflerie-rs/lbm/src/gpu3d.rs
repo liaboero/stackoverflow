@@ -227,15 +227,6 @@ const NU_TILDE_MAX = 0.15;
 
 @group(0) @binding(9) var<storage, read> blk: array<u32>;
 SPARSE_FNS
-fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
-  let ny = i32(P.ny);
-  let nz = i32(P.nz);
-  let yy = (yi + ny) % ny;
-  var zz = (zi + nz) % nz;
-  if ((P.rows & 2u) != 0u) { zz = clamp(zi, 0, nz - 1); }
-  let xx = clamp(xi, 0, i32(P.nx) - 1);
-  return id_of(u32(xx), u32(yy), u32(zz));
-}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -265,12 +256,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
   } else {
-    let ixm = cell(x - 1, y, z);
-    let ixp = cell(x + 1, y, z);
-    let iym = cell(x, y - 1, z);
-    let iyp = cell(x, y + 1, z);
-    let izm = cell(x, y, z - 1);
-    let izp = cell(x, y, z + 1);
+    // Voisins (comme `cell`, sans modulo ; ici 0 < x < nx − 1) : y
+    // périodique, z périodique ou borné (sol).
+    let xc = u32(x);
+    let yc = u32(y);
+    let zc = u32(z);
+    let ground = (P.rows & 2u) != 0u;
+    let ym = select(yc - 1u, P.ny - 1u, y == 0);
+    let yp = select(yc + 1u, 0u, yc + 1u == P.ny);
+    let zm = select(zc - 1u, select(P.nz - 1u, 0u, ground), z == 0);
+    let zp = select(zc + 1u, select(0u, zc, ground), zc + 1u == P.nz);
+    let ixm = id_of(xc - 1u, yc, zc);
+    let ixp = id_of(xc + 1u, yc, zc);
+    let iym = id_of(xc, ym, zc);
+    let iyp = id_of(xc, yp, zc);
+    let izm = id_of(xc, yc, zm);
+    let izp = id_of(xc, yc, zp);
     let v = nutIn[idx];
     let vxm = nutIn[ixm];
     let vxp = nutIn[ixp];
@@ -509,7 +510,11 @@ fn ground_code(i: usize) -> String {
     }
 }
 
-fn wgsl_step(fp16: bool) -> String {
+/// Collision. `walls` : passe des seules mailles pariétales (liste `wcell`),
+/// avec les liens de paroi ; sinon passe des autres mailles, sans le code
+/// des liens, recopié dans chacune des 18 directions, qui demandait des
+/// registres à toutes les mailles (−24 % de durée sans lui).
+fn wgsl_step(fp16: bool, walls: bool) -> String {
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
     let load = if fp16 {
@@ -548,11 +553,9 @@ fn wgsl_step(fp16: bool) -> String {
     for i in 1..19 {
         let [cx, cy, cz] = C3[i];
         let j = opp3(i);
-        let _ = write!(
-            pull,
-            "  {{
-    var v: f32;
-    var q = 0.0;
+        let wallpart = if walls {
+            format!(
+                "    var q = 0.0;
     if (hasWall) {{ q = qbuf[wk * 18u + {im1}u]; }}
     if (q > 0.0) {{
       let fj = pop({j}u, idx);
@@ -579,29 +582,43 @@ fn wgsl_step(fp16: bool) -> String {
       }}
       let mom = fj + v + {w2};
       fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uwl * (fj - v);
-    }}{ground} else if (x - {cx} < 0) {{
+",
+                im1 = i - 1,
+                jm1 = j - 1,
+                i = i,
+                j = j,
+                cx = cx,
+                cy = cy,
+                cz = cz,
+                w2 = f(2.0 * w3(i)),
+                w6 = f(6.0 * w3(i)),
+                ccx = f(cx as f64),
+                ccy = f(cy as f64),
+                ccz = f(cz as f64),
+                mcx = f(-cx as f64),
+                mcy = f(-cy as f64),
+                mcz = f(-cz as f64),
+            )
+        } else {
+            "    if (false) {\n".to_string()
+        };
+        let _ = write!(
+            pull,
+            "  {{
+    var v: f32;
+{wallpart}    }}{ground} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
       v = pop({i}u, idx);
     }} else {{
-      v = pop({i}u, id_of(u32(x - {cx}), {yv}, {zv}));
+      v = pop({i}u, nbr(u32(x - {cx}), {yv}, {zv}, r_{yv}_{zv}));
     }}
     g[{i}] = v;
   }}
 ",
             yv = ["ym", "yc", "yp"][(1 - cy) as usize],
             zv = ["zm", "zc", "zp"][(1 - cz) as usize],
-            im1 = i - 1,
-            jm1 = j - 1,
             ground = ground_code(i),
-            w2 = f(2.0 * w3(i)),
-            w6 = f(6.0 * w3(i)),
-            ccx = f(cx as f64),
-            ccy = f(cy as f64),
-            ccz = f(cz as f64),
-            mcx = f(-cx as f64),
-            mcy = f(-cy as f64),
-            mcz = f(-cz as f64),
         );
     }
     let dotc = |i: usize, a: usize, b: usize| C3[i][a] * C3[i][b];
@@ -619,15 +636,27 @@ fn wgsl_step(fp16: bool) -> String {
             comps.join(" + ").replace("+ -", "- ")
         };
         let (cxf, cyf, czf) = (cx as f64, cy as f64, cz as f64);
-        let qp = format!(
-            "{} * pxx + {} * pyy + {} * pzz + {} * pxy + {} * pxz + {} * pyz",
-            f(cxf * cxf - 1.0 / 3.0),
-            f(cyf * cyf - 1.0 / 3.0),
-            f(czf * czf - 1.0 / 3.0),
-            f(2.0 * cxf * cyf),
-            f(2.0 * cxf * czf),
-            f(2.0 * cyf * czf)
-        );
+        // Termes de coefficient nul omis : 0 · x n'est pas simplifiable par le
+        // compilateur (IEEE) et coûtait une multiplication et une addition
+        // chacun ; a + 0 · x = a, la valeur est inchangée.
+        let qp = [
+            (cxf * cxf - 1.0 / 3.0, "pxx"),
+            (cyf * cyf - 1.0 / 3.0, "pyy"),
+            (czf * czf - 1.0 / 3.0, "pzz"),
+            (2.0 * cxf * cyf, "pxy"),
+            (2.0 * cxf * czf, "pxz"),
+            (2.0 * cyf * czf, "pyz"),
+        ]
+        .iter()
+        .filter(|(c, _)| *c != 0.0)
+        .map(|(c, v)| format!("{} * {v}", f(*c)))
+        .collect::<Vec<_>>()
+        .join(" + ");
+        let accel = match cx {
+            0 => String::new(),
+            1 => format!(" + {} * rho * (P.accel)", f(3.0 * w3(i))),
+            _ => format!(" + {} * rho * (-P.accel)", f(3.0 * w3(i))),
+        };
         let w = w3(i);
         // Hermite d'ordre 3 (composantes portées par D3Q19, sans xyz).
         let h = |a: f64, b: f64| a * (b * b - 1.0 / 3.0);
@@ -649,7 +678,7 @@ fn wgsl_step(fp16: bool) -> String {
             "  {{
     let cu = {cu};
     let feq = {wf} * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq);
-    let fnew = feq + k * {w45} * ({qp}) + {w135} * ({h3}) + {w3f} * rho * ({cxs} * P.accel);
+    let fnew = feq + k * {w45} * ({qp}) + {w135} * ({h3}){accel};
     o[{i}] = fnew - {wf};
     if (sig > 0.0) {{
       let ci = {cxs} * P.uIn;
@@ -660,7 +689,6 @@ fn wgsl_step(fp16: bool) -> String {
             wf = f(w),
             w45 = f(4.5 * w),
             w135 = f(13.5 * w),
-            w3f = f(3.0 * w),
             cxs = f(cxf),
         );
     }
@@ -703,6 +731,8 @@ fn wgsl_step(fp16: bool) -> String {
 // Étendue en x du corps par tranche y (zone laminaire).
 @group(0) @binding(13) var<storage, read> slab: array<vec2<f32>>;
 @group(0) @binding(14) var<storage, read> blk: array<u32>;
+// Rang de chaque maille pariétale (passe des mailles pariétales).
+@group(0) @binding(15) var<storage, read> wcell: array<u32>;
 {SPARSE_FNS}
 {lam_fns}
 {sa_fns}
@@ -716,6 +746,13 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {{
   let zz = (zi + nz) % nz;
   let xx = clamp(xi, 0, i32(P.nx) - 1);
   return id_of(u32(xx), u32(yy), u32(zz));
+}}
+
+// Rang d'un voisin : grille boîte, x plus le début de sa rangée ; stockage
+// par blocs, table des blocs.
+fn nbr(xx: u32, yy: u32, zz: u32, row: u32) -> u32 {{
+  if (P.bnx == 0u) {{ return xx + row; }}
+  return id_of(xx, yy, zz);
 }}
 
 fn oct_decode(k: f32) -> vec3<f32> {{
@@ -764,11 +801,11 @@ fn feqIn(i: u32) -> f32 {{
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
-  let idx = gid.x + gid.y * nwg.x * 64u;
-  if (idx >= P.N) {{ return; }}
+{head}
   let wk0 = wall[idx];
   // Solide, ou maille fantôme d'une grille fine (remplie par refine3d).
   if (wk0 >= 0xfffffffeu) {{ return; }}
+{skip}
   let wk = select(wk0 - 1u, 0xffffffffu, wk0 == 0u);
   let hasWall = wk != 0xffffffffu;
   let pp = pos_of(idx);
@@ -782,6 +819,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let yp = select(yc + 1u, 0u, yc + 1u == P.ny);
   let zm = select(zc - 1u, P.nz - 1u, z == 0);
   let zp = select(zc + 1u, 0u, zc + 1u == P.nz);
+  // Grille boîte : début de chaque rangée voisine (rang = x + début).
+  let sxy = P.nx * P.ny;
+  let oym = ym * P.nx;
+  let oyc = yc * P.nx;
+  let oyp = yp * P.nx;
+  let ozm = zm * sxy;
+  let ozc = zc * sxy;
+  let ozp = zp * sxy;
+  let r_ym_zm = oym + ozm;
+  let r_ym_zc = oym + ozc;
+  let r_ym_zp = oym + ozp;
+  let r_yc_zm = oyc + ozm;
+  let r_yc_zc = oyc + ozc;
+  let r_yc_zp = oyc + ozp;
+  let r_yp_zm = oyp + ozm;
+  let r_yp_zc = oyp + ozc;
+  let r_yp_zp = oyp + ozp;
   var g: array<f32, 19>;
   var fsum = vec3<f32>(0.0);
   // Loi de paroi (passe `wall3d`, juste avant ce pas, sur le champ du pas
@@ -873,6 +927,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 ",
         sa_fns = SA_FNS,
         lam_fns = LAM_FNS,
+        head = if walls {
+            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= arrayLength(&wcell)) { return; }\n  let idx = wcell[kw];"
+        } else {
+            "  let idx = gid.x + gid.y * nwg.x * 64u;\n  if (idx >= P.N) { return; }"
+        },
+        skip = if walls { "" } else { "  // Maille pariétale : passe à part.\n  if (wk0 != 0u) { return; }" },
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
         jy = sum_expr(|i| C3[i][1]),
@@ -1562,6 +1622,10 @@ pub struct Gpu3D {
     pub(crate) params: wgpu::Buffer,
     pub(crate) macro_buf: wgpu::Buffer,
     pub(crate) step_pipe: wgpu::ComputePipeline,
+    /// Collision des mailles pariétales (None sans paroi), et ses groupes.
+    pub(crate) step_wall_pipe: Option<wgpu::ComputePipeline>,
+    pub(crate) wall_disp: (u32, u32),
+    _wcell: wgpu::Buffer,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
     derive_pipe: wgpu::ComputePipeline,
@@ -1629,7 +1693,20 @@ pub(crate) struct WallPass {
     pipe: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
     disp: (u32, u32),
-    _cells: wgpu::Buffer,
+}
+
+impl Gpu3D {
+    /// Un pas de collision (cœur, puis mailles pariétales), état `cur`,
+    /// paramètres du créneau `slot`.
+    pub(crate) fn encode_step(&self, pass: &mut wgpu::ComputePass, slot: u32) {
+        pass.set_pipeline(&self.step_pipe);
+        pass.set_bind_group(0, &self.bind[self.cur], &[slot]);
+        pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+        if let Some(p) = &self.step_wall_pipe {
+            pass.set_pipeline(p);
+            pass.dispatch_workgroups(self.wall_disp.0, self.wall_disp.1, 1);
+        }
+    }
 }
 
 impl WallPass {
@@ -2663,7 +2740,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(14);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(15);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -2901,6 +2978,7 @@ impl Gpu3D {
                 storage(12, true),
                 storage(13, true),
                 storage(14, true),
+                storage(15, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2962,9 +3040,16 @@ impl Gpu3D {
             })
         };
         temps("tampons", tt);
-        let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16), true);
+        let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16, false), true);
+        let step_wall_pipe = (wall_count > 0).then(|| pipe("d3q19_paroi", &layout, wgsl_step(fp16, true), true));
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
         let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true);
+        // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
+        let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("wall_cells3d"),
+            contents: bytemuck::cast_slice(if wall_cells.is_empty() { &[0u32][..] } else { &wall_cells[..] }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         // Loi de paroi : passe sur les mailles pariétales (avec Spalart–Allmaras).
         let wall_pass = (sa && wall_count > 0).then(|| {
             let code = format!(
@@ -2972,12 +3057,7 @@ impl Gpu3D {
                 WALL3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS).replace("SA_FNS", SA_FNS)
             );
             let pipe_w = pipe("wall3d", &wall_layout, code, true);
-            let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("wall_cells3d"),
-                contents: bytemuck::cast_slice(&wall_cells),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            (pipe_w, wcell)
+            pipe_w
         });
         let slice_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("slice"),
@@ -3029,6 +3109,7 @@ impl Gpu3D {
                         buf_entry(12, &dist_buf, None),
                         buf_entry(13, &slab_buf, None),
                         buf_entry(14, &blk_buf, None),
+                        buf_entry(15, &wcell, None),
                     ],
                 })
             })
@@ -3053,7 +3134,12 @@ impl Gpu3D {
                 })
             })
             .collect();
-        let wall_pass = wall_pass.map(|(pipe_w, wcell)| {
+        let wall_disp = {
+            let groups = (wall_count as u32).div_ceil(64).max(1);
+            let dx = groups.min(65535);
+            (dx, groups.div_ceil(dx))
+        };
+        let wall_pass = wall_pass.map(|pipe_w| {
             let b = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("wall3d"),
                 layout: &wall_layout,
@@ -3069,9 +3155,7 @@ impl Gpu3D {
                     buf_entry(8, &wcell, None),
                 ],
             });
-            let groups = (wall_count as u32).div_ceil(64);
-            let dx = groups.min(65535);
-            WallPass { pipe: pipe_w, bind: b, disp: (dx, groups.div_ceil(dx)), _cells: wcell }
+            WallPass { pipe: pipe_w, bind: b, disp: wall_disp }
         });
         let init_bind = (0..2)
             .map(|s| {
@@ -3129,6 +3213,9 @@ impl Gpu3D {
             params,
             macro_buf,
             step_pipe,
+            step_wall_pipe,
+            wall_disp,
+            _wcell: wcell,
             init_pipe,
             slice_pipe,
             derive_pipe,
@@ -3317,20 +3404,16 @@ impl Gpu3D {
             let mut enc = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.step_pipe);
                 for s in 0..k {
                     let off = (s as u64 * SLOT) as u32;
                     if let Some(w) = &self.wall_pass {
                         w.encode(&mut pass, off);
-                        pass.set_pipeline(&self.step_pipe);
                     }
-                    pass.set_bind_group(0, &self.bind[self.cur], &[off]);
-                    pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+                    self.encode_step(&mut pass, off);
                     if self.sa {
                         pass.set_pipeline(&self.sa_pipe);
                         pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
                         pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
-                        pass.set_pipeline(&self.step_pipe);
                     }
                     self.cur = 1 - self.cur;
                 }
@@ -4027,11 +4110,7 @@ impl Gpu3D {
             out.push((
                 format!("{name} collision"),
                 g.n,
-                time(g, &|p| {
-                    p.set_pipeline(&g.step_pipe);
-                    p.set_bind_group(0, &g.bind[g.cur], &[0]);
-                    p.dispatch_workgroups(g.disp.0, g.disp.1, 1);
-                }),
+                time(g, &|p| g.encode_step(p, 0)),
             ));
             if g.sa {
                 out.push((
@@ -4608,7 +4687,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        wgsl_step(fp16)
+        wgsl_step(fp16, false)
     }
 }
 
