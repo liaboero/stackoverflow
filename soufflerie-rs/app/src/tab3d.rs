@@ -111,6 +111,9 @@ struct Settings {
     body_view: BodyView,
     /// Grilles imbriquées autour de la maquette (0 à 2).
     refine: usize,
+    /// Couches pariétales fines (maquette maillée, au-dessus d'au moins une
+    /// grille boîte) : 0 aucune, 1 à 3 couches, 4 automatique (`--bande auto`).
+    bands: u8,
     /// Paroi : 0 auto (loi de paroi dès Re = 5·10⁴), 1 loi de paroi, 2 sans.
     wall: u8,
     /// Transition imposée (fraction de la corde locale ; 0 : turbulent).
@@ -195,6 +198,7 @@ impl Tab3D {
             iso: true,
             body_view: BodyView::Smooth,
             refine: 0,
+            bands: 0,
             wall: 0,
             xtr: 0.0,
             iso_level: 0.4,
@@ -450,6 +454,28 @@ impl Tab3D {
             );
             ui.selectable_value(&mut s.refine, 3, format!("×8 ({})", 8 * s.l))
                 .on_hover_text("Trois grilles imbriquées : calcul plus long, mémoire GPU à surveiller");
+        });
+        // Couches pariétales : grilles deux fois plus fines chacune, limitées
+        // à 16 mailles de la paroi (stockage creux), sur une maquette STL.
+        ui.add_enabled_ui(s.shape == Shape3D::Mesh && s.refine >= 1, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Couches pariétales").on_disabled_hover_text(
+                    "Maquette STL et au moins une grille fine (×2) autour de la maquette",
+                );
+                ui.selectable_value(&mut s.bands, 0, "aucune");
+                for k in 1..=3u8 {
+                    let f = 1usize << (s.refine + k as usize);
+                    ui.selectable_value(&mut s.bands, k, format!("{k} (×{f})")).on_hover_text(
+                        "Couches de 16 mailles autour de la paroi, chacune deux fois plus fine : \
+                         la résolution d'une grille entière près de la surface pour une fraction \
+                         des mailles",
+                    );
+                }
+                ui.selectable_value(&mut s.bands, 4, "auto").on_hover_text(
+                    "Assez de couches pour mettre 2 mailles dans le plus petit rayon de bord \
+                     d'attaque (au plus 4), comme --bande auto",
+                );
+            });
         });
         ui.horizontal(|ui| {
             let label = if s.running { "Pause" } else { "Reprendre" };
@@ -1036,6 +1062,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     || b.fp16 != st.fp16
                     || b.reset != st.reset
                     || b.refine != st.refine
+                    || b.bands != st.bands
                     || wall_model(b) != wall_model(&st)
                     || (st.shape == Shape3D::Mesh && (b.stl != st.stl || b.setup != st.setup))
             }
@@ -1065,7 +1092,22 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             };
             let nu = U as f64 * st.l as f64 / st.re;
             let sa = wall_model(&st);
-            match b.and_then(|b| Gpu3D::with_refinement(&b, nu, U, st.fp16, sa, st.refine).map(|g| (g, b))) {
+            // Couches pariétales (maquette maillée, au-dessus d'une grille
+            // boîte) : 16 mailles chacune, imbrication garantie.
+            let bands_of = |b: &Body3D| -> Vec<f64> {
+                if b.mesh.is_none() || st.refine == 0 {
+                    return Vec::new();
+                }
+                let n = match st.bands {
+                    4 => lbm::gpu3d::auto_band_count(b, st.refine).0,
+                    k => k as usize,
+                };
+                lbm::gpu3d::nested_bands(&vec![16.0; n])
+            };
+            match b.and_then(|b| {
+                let bands = bands_of(&b);
+                Gpu3D::with_refinement_edges(&b, nu, U, st.fp16, sa, st.refine, false, false, &bands).map(|g| (g, b))
+            }) {
                 Ok((mut g, b)) => {
                     g.set_transition(st.xtr);
                     let lost = mesh_info.as_ref().and_then(|i: &lbm::stl::MeshInfo| i.volume_lost(g.solid_count, st.l));
@@ -1227,7 +1269,9 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
         };
         let el = perf.0.elapsed().as_secs_f64();
         if el > 1.0 {
-            perf.2 = perf.1 as f64 * g.n as f64 / el / 1e6;
+            // Toutes les grilles : n_k mailles, 2^niveau pas par pas de la veine.
+            let per_step: f64 = g.grid_cells().iter().map(|&(n, d)| n as f64 * (1u64 << d) as f64).sum();
+            perf.2 = perf.1 as f64 * per_step / el / 1e6;
             perf = (Instant::now(), 0, perf.2);
         }
         {
@@ -1248,7 +1292,7 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             fr.status = status.into();
             fr.mlups = perf.2;
             fr.info = format!(
-                "Grille {}×{}×{} ({:.2} M mailles) · {} mailles pariétales · τ = {:.4} · sous-maille {}{} · {} · {} · {:.0} M mailles/s",
+                "Grille {}×{}×{} ({:.2} M mailles) · {} mailles pariétales · τ = {:.4} · sous-maille {}{}{} · {} · {} · {:.0} M mailles/s",
                 g.nx,
                 g.ny,
                 g.nz,
@@ -1266,6 +1310,22 @@ fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     ),
                     (true, None) => " · Spalart–Allmaras + loi de paroi".to_string(),
                     _ => String::new(),
+                },
+                {
+                    // Couches pariétales : grilles au-delà des grilles boîtes.
+                    let cells = g.grid_cells();
+                    let boxes = st.refine.min(cells.len() - 1);
+                    let layers = &cells[1 + boxes..];
+                    if layers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " · {} couche(s) pariétale(s) jusqu'à ×{}, {:.2} M mailles",
+                            layers.len(),
+                            1u64 << layers.last().map_or(0, |c| c.1),
+                            layers.iter().map(|c| c.0).sum::<usize>() as f64 / 1e6
+                        )
+                    }
                 },
                 if g.fp16 { "demi-précision" } else { "simple précision" },
                 g.adapter_name(),

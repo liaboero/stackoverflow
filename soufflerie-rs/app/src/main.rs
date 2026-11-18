@@ -785,19 +785,13 @@ fn cmd_run3d(a: &Args) {
         // au moins 2 mailles dans le plus petit rayon de bord d'attaque des
         // coupes (hors saumons), au plus 4 couches de 16 mailles.
         let thick = bande.strip_prefix("auto:").and_then(|v| v.parse::<f64>().ok()).unwrap_or(16.0);
-        let secs = body.mesh.as_ref().map(|m| lbm::geom3d::sections(&m.tris, 20)).unwrap_or_default();
-        let r = secs.iter().map(|s| s.le_radius).filter(|r| r.is_finite() && *r > 0.0).fold(f64::INFINITY, f64::min);
         // Bord d'attaque à facettes : un coin de plus de 60° entre facettes
         // successives, le rayon ajusté est celui du coin, pas de l'aile.
-        let corner = secs.iter().map(|s| s.le_corner_deg).fold(0.0f64, f64::max);
+        let (n, r, corner) = lbm::gpu3d::auto_band_count(&body, depth);
         if corner > 60.0 {
             eprintln!(
                 "Attention : bord d'attaque à facettes (coin de {corner:.0}° entre facettes) : le rayon mesuré est celui des facettes ; --lisser 1 rend la surface lisse."
             );
-        }
-        let mut n = 0;
-        while n < 4 && r * ((1u64 << (depth + n)) as f64) < 2.0 {
-            n += 1;
         }
         bands = vec![thick; n];
         eprintln!(

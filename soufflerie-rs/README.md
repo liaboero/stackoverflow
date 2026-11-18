@@ -1442,6 +1442,11 @@ mêmes réglages qu'en ligne de commande y figurent (axes, unité, incidence,
 dérapage, références), avec les dimensions, le maître-couple et le blocage ;
 « Échelle physique » fixe le Reynolds par la vitesse et donne les efforts
 en newtons.
+« Couches pariétales » (avec au moins une grille ×2 « Près de la
+maquette ») ajoute 1 à 3 couches de 16 mailles, chacune deux fois plus
+fine, ou « auto » comme `--bande auto` : les mêmes couches creuses et les
+mêmes optimisations qu'en ligne de commande ; la ligne d'information donne
+le nombre de couches, leurs mailles et la vitesse sur toutes les grilles.
 
 En ligne de commande :
 `soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette

@@ -2136,6 +2136,23 @@ fn edge_boxes(tris: &[crate::stl::Tri], l: f64, dims: [usize; 3], le: bool, te: 
 /// parente doit donc s'étendre au-delà : D_parent ≥ D/2 + 2 MARGIN + 3.
 /// Sinon les fantômes de la couche fine sont remplis depuis des mailles que
 /// la couche parente ne calcule pas (écoulement faux).
+/// `--bande auto` : assez de couches pariétales pour mettre au moins 2
+/// mailles dans le plus petit rayon de bord d'attaque des coupes (hors
+/// saumons), au plus 4, au-dessus de `depth` grilles boîtes. Rend le nombre
+/// de couches, ce rayon (mailles de la veine) et le plus grand coin entre
+/// facettes au bord d'attaque (au-delà de 60°, le rayon mesuré est celui des
+/// facettes). (0, ∞, 0) sans maillage.
+pub fn auto_band_count(body: &Body3D, depth: usize) -> (usize, f64, f64) {
+    let secs = body.mesh.as_ref().map(|m| crate::geom3d::sections(&m.tris, 20)).unwrap_or_default();
+    let r = secs.iter().map(|s| s.le_radius).filter(|r| r.is_finite() && *r > 0.0).fold(f64::INFINITY, f64::min);
+    let corner = secs.iter().map(|s| s.le_corner_deg).fold(0.0f64, f64::max);
+    let mut n = 0;
+    while r.is_finite() && n < 4 && r * ((1u64 << (depth + n)) as f64) < 2.0 {
+        n += 1;
+    }
+    (n, r, corner)
+}
+
 pub fn nested_bands(bands: &[f64]) -> Vec<f64> {
     let mut b = bands.to_vec();
     let m = (2 * crate::refine3d::MARGIN3 + 3) as f64;
