@@ -337,7 +337,10 @@ Ce que cela montre :
   glissement de Spalding devient presque total et le bord de fuite tient mal
   la condition de Kutta (déjà +7 % sur le NACA 2412 en 2D). Piste : une loi
   de paroi qui impose la contrainte pariétale sans laisser glisser la paroi
-  au bord de fuite.
+  au bord de fuite. *Dépassé* : ces chiffres datent d'avant le calage du
+  bord de fuite sur le réseau ; avec le code actuel, ni la veine ni la loi
+  de paroi n'expliquent l'excès (voir « Comparaison aux références : état
+  actuel »).
 - La traînée est 2 à 4 fois trop forte et dépend de la taille de la veine
   (0,042 ou 0,062 selon la marge) : en 3D, seule la portance se compare
   aujourd'hui, et la traînée reste qualitative.
@@ -844,7 +847,9 @@ Trois pistes écartées, une confirmée.
   croître. *Correction :* les profils de vitesse relevés depuis montrent
   une couche déficitaire résolue au-dessus de WM_H, de déplacement plus
   fort que celui d'une couche limite réelle (section suivante) ; cette
-  explication ne tient pas.
+  explication ne tient pas. Avec la couche pariétale cohérente, la loi de
+  paroi retire désormais 6 à 8 % de portance au glissement libre (voir
+  « Comparaison aux références : état actuel »).
 
 Il faudrait un couplage visqueux–non visqueux : épaisseur de déplacement
 tirée d'une couche limite intégrale le long de la surface, imposée par
@@ -1318,6 +1323,71 @@ surface réelle et non la facette. Sur l'aile AR 4 à ×2 (32 mailles par
 corde), la surface reste 7 % au-dessus de la boîte : le bord de fuite y
 tient dans une à deux mailles. Le STL lissé de TR-1208 porte 3 % de plus
 (rayon du bord d'attaque rendu).
+
+### Comparaison aux références : état actuel
+
+Recalculé avec le code actuel (normales lisses, couches pariétales), les
+références vérifiées à leur source.
+
+**2D, NACA 0012, couplage Newton** (Re = 6·10⁶) :
+
+| | Soufflerie | Référence | Écart |
+| --- | --- | --- | --- |
+| CL à 10° | 1,0924 | TMR, Spalart–Allmaras extrapolé : 1,0912 à 1,0913 | +0,1 % |
+| CD à 10° | 0,01222 | TMR : 0,01221 à 0,01222 | 0 % |
+| Cm à 10° | 0,0025 | TMR : 0,00677 à 0,00679 | faux, à corriger |
+| CD à 0° | 0,00826 | Ladson, transition déclenchée : 0,0080 à 0,0081 | +2 à 3 % |
+| CL à 15° | 1,5526 | Ladson (15,25°) : 1,513 à 1,528 | +2 à 3 % |
+
+**3D** (Cz du bilan sur boîte, Cx intégré sur la surface ; L = 16 pour
+l'aile AR 4, L = 8 pour TR-1208 ; mesure de TR-1208 lue sur la figure à
+±0,01 près) :
+
+| Cas | Cz | Cx | Mesure Cz / Cx | VSPAERO Cz / Cx |
+| --- | --- | --- | --- | --- |
+| AR 4, 4°, ×4 | 0,2723 | 0,0237 | — | 0,251 à 0,265 / 0,021 à 0,022 |
+| AR 4, 8°, ×4 | 0,5699 | 0,0516 | — | 0,501 à 0,529 / 0,039 à 0,045 |
+| TR-1208, 4°, ×4 | 0,2856 | 0,0114 | 0,257 / 0,011 | 0,266 / 0,015 |
+| TR-1208, 4°, ×4, STL lissé | 0,2909 | 0,0140 | id. | id. |
+| TR-1208, 4°, ×4 + couche ×8, lissé | 0,2944 | 0,0156 | id. | id. |
+| TR-1208, 8°, ×4 | 0,5394 | 0,0387 | 0,499 / 0,021 | 0,531 / 0,026 |
+| TR-1208, 8°, ×4, STL lissé | 0,5550 | 0,0431 | id. | id. |
+| TR-1208, 8°, ×4 + couche ×8, lissé | 0,5656 | 0,0372 | id. | id. |
+
+La portance dépasse la mesure de 8 à 15 % et VSPAERO de 2 à 11 %, et
+l'écart croît en affinant : ce n'est pas un défaut de résolution. La
+traînée est juste à 4° (×4) mais trop forte de 40 à 80 % à 8°, en partie
+traînée induite d'une portance trop forte. L'erreur de placement du bord de
+fuite (±3 % à ×4) ne couvre pas l'écart.
+
+**Deux causes écartées** (contrôles refaits avec le code actuel) :
+
+| Contrôle | Cz boîte | Cz surface | Cz échange |
+| --- | --- | --- | --- |
+| TR-1208, 4°, ×4, `--marge 0.4` | 0,2856 | 0,2841 | 0,2910 |
+| id., veine 2,5 fois plus large (`--marge 1.0`) | 0,2868 | 0,2846 | 0,2915 |
+| AR 4, 4°, ×2, loi de paroi | — | 0,2865 | 0,2686 |
+| id., glissement libre (`--essai 16`) | — | 0,3043 | 0,2921 |
+
+- *Blocage de la veine : non* (+0,4 % dans la veine large). Le bord de
+  fuite étant calé sur le réseau, changer la marge ne déplace plus la
+  maquette dans la maille, contrairement à l'essai de la comparaison
+  VSPAERO plus haut.
+- *Loi de paroi : non.* Elle retire 6 à 8 % de portance au glissement
+  libre, l'ordre du décambrage visqueux réel (Ladson contre non visqueux :
+  6 à 10 %) ; ce n'était pas le cas avant la couche pariétale cohérente
+  (0,301 contre 0,299). Sans couche limite du tout, l'aile porte déjà
+  environ 15 % de plus que VSPAERO : l'excès est dans l'écoulement non
+  visqueux lui-même. Restent la résolution du bord d'attaque et du bord de
+  fuite, le placement du bord de fuite (±8 % à ×2) et le nombre de Mach du
+  réseau (+1 %). Un couplage visqueux–non visqueux 3D ne le corrigerait pas.
+  Le glissement libre diverge à ×4 (vitesse non bornée aux arêtes) : le
+  contrôle n'existe qu'à ×2.
+
+Sources : [TMR, NACA 0012 Spalart–Allmaras avec tourbillon
+ponctuel](https://tmbwg.github.io/turbmodels/naca0012numerics_val_sa_withpv.html),
+[TMR, validation NACA 0012](https://tmbwg.github.io/turbmodels/naca0012_val.html),
+[données de Ladson](https://tmbwg.github.io/turbmodels/NACA0012_validation/CLCD_Ladson_expdata.dat).
 
 ### Programmes de diagnostic
 
