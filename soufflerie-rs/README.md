@@ -1389,6 +1389,62 @@ ponctuel](https://tmbwg.github.io/turbmodels/naca0012numerics_val_sa_withpv.html
 [TMR, validation NACA 0012](https://tmbwg.github.io/turbmodels/naca0012_val.html),
 [données de Ladson](https://tmbwg.github.io/turbmodels/NACA0012_validation/CLCD_Ladson_expdata.dat).
 
+### Traînée : où est l'excès
+
+**Décomposition dans le sillage** (TR-1208, 8°, STL lissé, `--sillage 1`) :
+la traînée induite vaut 0,011 à 0,012 à toutes les résolutions, soit
+CL²/(πA) pour un allongement 8 : juste. Le frottement (0,005 à 0,006) a
+l'ordre d'une plaque plane turbulente. Tout l'excès est une traînée de
+pression de profil, qui décroît avec la résolution près de la paroi :
+
+| Grilles | 32 mailles par corde (×4) | + couche ×8 | + couches ×8, ×16 |
+| --- | --- | --- | --- |
+| Cx pression (surface) | 0,0377 | 0,0312 | 0,0276 |
+| Cz (boîte) | 0,555 | 0,566 | 0,569 |
+
+**Aile d'envergure infinie** (`aile_infinie`, NACA 0012, Re = 6·10⁶, veine
+périodique en y, sans traînée induite) : même excès qu'en 3D, et même
+excès dans la soufflerie 2D (`cp2d`, 64 mailles par corde, 8° : Cx 0,048,
+Cz 0,95 ; panneaux et couche limite : 0,011). Ce n'est donc ni la traînée
+induite ni le passage au 3D. La hauteur de veine (6, 12 ou 24 cordes) ne
+change Cx que de 10 %. Efforts relevés sur la tranche centrale de 4 mailles :
+les bords en envergure des grilles fines, non périodiques, faussent les
+tranches voisines (de là un faux écart entre couche pariétale et grille
+entière ; au centre, les deux donnent le même Cx à 0,0002 près).
+
+| α | Ladson (80 à 180 grit) Cz / Cx | 64 mailles Cz / Cx | 128 | 256 |
+| --- | --- | --- | --- | --- |
+| 0° | 0 / 0,0081 | −0,024 / 0,0027 | −0,021 / 0,0122 | −0,032 / 0,0153 |
+| 4° | 0,43 à 0,44 / 0,0081 à 0,0088 | 0,404 / 0,0192 | 0,429 / 0,0119 | 0,495 / 0,0140 |
+| 8° | 0,87 à 0,89 (8,1° à 8,3°) / 0,0099 à 0,0105 | 0,955 / 0,0463 | 0,904 / 0,0309 | 0,923 / 0,0250 |
+| 10° | 1,07 à 1,08 / 0,0117 à 0,0120 | 1,028 / 0,0493 | 1,031 / 0,0440 | 1,085 / 0,0251 |
+
+(Grilles entières : L = 16 + ×4, 16 + ×8, 32 + ×8. Le placement de la
+maquette dans la maille fait varier Cx de ±0,002 et Cz de ±3 % à 128
+mailles. À 256 mailles, l'écoulement près de la paroi devient
+instationnaire et tridimensionnel : Cx varie de 0,019 à 0,039 d'une tranche
+à l'autre, et un seul passage de corde ne suffit pas à le moyenner.)
+
+**Mécanisme.** Les profils de couche limite de la soufflerie 2D (64 mailles,
+8°) montrent une épaisseur de quantité de mouvement θ/c de 0,0025 dès 5 %
+de corde sur l'extrados (environ dix fois une couche limite réelle), puis
+0,006, 0,011 et 0,019 à 30, 60 et 90 % : l'excès est acquis au bord
+d'attaque (la perte de pression totale numérique du nez, voir « Couche
+limite de la plaque plane ») et amplifié par le gradient de pression
+adverse, θ variant comme u_e^−(H+2). Plus la succion du bord d'attaque est
+forte, plus l'amplification l'est : la traînée de pression croît avec
+l'incidence. En affinant toute la grille, θ/c à 5 % de corde passe à
+0,0009 puis 0,0005 (128 et 192 mailles).
+
+**Bilan.** À 8°, la traînée converge en affinant, à l'ordre un environ
+(0,046, 0,031, 0,025), mais lentement : encore 2,5 fois la mesure à 256
+mailles par corde. À 0° et 4°, elle ne converge pas de façon monotone, et
+la portance à 4° croît de 0,40 à 0,49 (+14 % sur la mesure) comme sur les
+ailes 3D. Aucune correction n'est retenue. Imposer la contrainte pariétale
+directement au premier nœud (populations reconstruites) est la piste déjà
+signalée par la plaque plane ; sa première tentative n'était pas
+conservative avec le rebond de Bouzidi.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -1414,6 +1470,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite, Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
