@@ -993,6 +993,8 @@ fn cmd_run3d(a: &Args) {
     // positif à cabrer.
     // Maquette maillée : efforts par triangle de l'intégration sur la surface,
     // mis bout à bout sur les relevés (chaque relevé pèse 1/n).
+    // Étendue en envergure de chaque triangle (même ordre que les efforts).
+    let mut spans: Vec<[f64; 3]> = Vec::new();
     let wf = if !surf.is_empty() {
         let n = surf.len() as f64;
         let mut w = lbm::gpu3d::WallForces { pos: Vec::new(), force: Vec::new() };
@@ -1001,6 +1003,7 @@ fn cmd_run3d(a: &Args) {
                 w.pos.push(*p);
                 w.force.push(f.map(|v| v / n));
             }
+            spans.extend_from_slice(&s.spans);
         }
         Some(w)
     } else if a.opts.contains_key("envergure") || a.opts.contains_key("xref") {
@@ -1032,10 +1035,19 @@ fn cmd_run3d(a: &Args) {
         let nb = ((bb.y1 - bb.y0) / dy).ceil() as usize + 2;
         let mut fz = vec![0.0f64; nb];
         let mut fx = vec![0.0f64; nb];
-        for (p, f) in w.pos.iter().zip(&w.force) {
-            let k = (((p[1] - bb.y0) / dy).floor().max(0.0) as usize).min(nb - 1);
-            fz[k] += f[2];
-            fx[k] += f[0];
+        if spans.len() == w.force.len() {
+            // Maquette maillée : effort de chaque triangle réparti sur son
+            // étendue en envergure.
+            for (k, v) in lbm::gpu3d::span_distribution(&spans, &w.force, bb.y0, dy, nb).iter().enumerate() {
+                fz[k] = v[2];
+                fx[k] = v[0];
+            }
+        } else {
+            for (p, f) in w.pos.iter().zip(&w.force) {
+                let k = (((p[1] - bb.y0) / dy).floor().max(0.0) as usize).min(nb - 1);
+                fz[k] += f[2];
+                fx[k] += f[0];
+            }
         }
         // c·cl/c_ref = (dL/dy) / (q c_ref), c_ref = L mailles.
         let qc = 0.5 * (U as f64).powi(2) * l as f64;

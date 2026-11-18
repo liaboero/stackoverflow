@@ -1967,6 +1967,55 @@ pub struct SurfaceForces {
     /// Par triangle (même ordre que `loads`) : normale sortante et pression
     /// à la paroi (unités du réseau, p = (ρ − 1)/3).
     pub walls: Vec<([f64; 3], f64)>,
+    /// Par triangle (même ordre que `loads`) : ordonnées y de ses trois
+    /// sommets, rangées (mailles de la veine), pour répartir son effort sur
+    /// son étendue en envergure (`span_distribution`).
+    pub spans: Vec<[f64; 3]>,
+}
+
+/// Répartition en envergure d'efforts portés par des triangles : chaque
+/// effort est réparti sur l'étendue en y de son triangle selon la densité
+/// d'aire du triangle le long de y (en chapeau : croissante du sommet le plus
+/// bas au sommet médian, décroissante ensuite), et non posé en son centre.
+/// Posé au centre, un maillage à stations d'envergure régulières met une ou
+/// deux rangées de triangles dans chaque tranche selon où tombent leurs
+/// centres : creux et bosses parasites (aile AR 4 à stations de 0,087 m,
+/// tranches de 1/32 m : aire par tranche variant de 1 à 1,5). Tranches
+/// [y0 + k dy, y0 + (k + 1) dy), k < nb ; rend la somme par tranche.
+pub fn span_distribution(spans: &[[f64; 3]], values: &[[f64; 3]], y0: f64, dy: f64, nb: usize) -> Vec<[f64; 3]> {
+    let mut out = vec![[0.0f64; 3]; nb];
+    // Part de l'aire du triangle (sommets en y : a ≤ b ≤ c) sous l'ordonnée y.
+    let cdf = |t: &[f64; 3], y: f64| -> f64 {
+        let [a, b, c] = *t;
+        if y <= a {
+            0.0
+        } else if y >= c {
+            1.0
+        } else if y <= b {
+            (y - a) * (y - a) / ((b - a) * (c - a))
+        } else {
+            1.0 - (c - y) * (c - y) / ((c - b) * (c - a))
+        }
+    };
+    let bin = |y: f64| (((y - y0) / dy).floor().max(0.0) as usize).min(nb - 1);
+    for (t, v) in spans.iter().zip(values) {
+        if t[2] - t[0] < 1e-9 * dy {
+            let k = bin(t[0]);
+            for a in 0..3 {
+                out[k][a] += v[a];
+            }
+            continue;
+        }
+        let (k0, k1) = (bin(t[0]), bin(t[2]));
+        for k in k0..=k1 {
+            let lo = y0 + k as f64 * dy;
+            let f = cdf(t, lo + dy) - cdf(t, lo);
+            for a in 0..3 {
+                out[k][a] += f * v[a];
+            }
+        }
+    }
+    out
 }
 
 impl SurfaceForces {
@@ -4777,6 +4826,9 @@ impl Gpu3D {
             }
             out.loads.push(([0, 1, 2].map(|k| l.org[k] + c[k] / l.s), fl));
             out.walls.push((n, pw));
+            let mut ys = l.mesh.tris[ti].map(|v| l.org[1] + v[1] / l.s);
+            ys.sort_by(f64::total_cmp);
+            out.spans.push(ys);
         }
         out.missed /= area.max(1e-12);
         Some(out)
@@ -5143,5 +5195,35 @@ mod tests {
             worst = worst.min(n[0] * m[0] + n[1] * m[1] + n[2] * m[2]);
         }
         assert!(worst > (0.2f64).to_radians().cos(), "cos = {worst}");
+    }
+}
+
+#[cfg(test)]
+mod tests_envergure {
+    use super::span_distribution;
+
+    /// Bande rectangulaire découpée en stations de 0,087 (deux triangles
+    /// par station), chargement uniforme par unité d'aire : la répartition
+    /// par tranches de 1/32 doit être plate (au centre de centre posé, elle
+    /// oscillait du simple au double).
+    #[test]
+    fn repartition_plate() {
+        let (h, n) = (0.087, 46);
+        let mut spans = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            let (a, b) = (i as f64 * h, (i + 1) as f64 * h);
+            // Deux triangles d'aire h/2 (corde 1) : sommets en y (a, a, b) et (a, b, b).
+            spans.push([a, a, b]);
+            spans.push([a, b, b]);
+            vals.push([0.0, 0.0, 0.5 * h]);
+            vals.push([0.0, 0.0, 0.5 * h]);
+        }
+        let dy = 1.0 / 32.0;
+        let nb = ((n as f64 * h) / dy).floor() as usize;
+        let d = span_distribution(&spans, &vals, 0.0, dy, nb + 1);
+        for (k, v) in d.iter().take(nb).enumerate() {
+            assert!((v[2] / dy - 1.0).abs() < 1e-9, "tranche {k} : {}", v[2] / dy);
+        }
     }
 }
