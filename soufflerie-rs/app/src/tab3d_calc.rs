@@ -529,19 +529,20 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                     let lf = st.l as f64;
                     let zr = 0.5 * (bb.z0 + bb.z1);
                     let (mut a, mut fz) = (0.0, 0.0);
-                    let (y0, half) = (bb.y0, 0.5 * (bb.y1 - bb.y0));
-                    let dy = 2.0 * half / SPAN_BINS as f64;
-                    let mut bins = vec![0.0f64; SPAN_BINS];
                     for (p, f) in &s.loads {
                         a += (p[2] - zr) * f[0] - (p[0] - bb.x0) * f[2];
                         fz += f[2];
-                        let k = (((p[1] - y0) / dy).floor().max(0.0) as usize).min(SPAN_BINS - 1);
-                        bins[k] += f[2];
                     }
+                    // Effort de chaque triangle réparti sur son étendue en
+                    // envergure (densité d'aire le long de y), comme
+                    // `run3d --envergure`.
+                    let dy = (bb.y1 - bb.y0) / SPAN_BINS as f64;
+                    let forces: Vec<[f64; 3]> = s.loads.iter().map(|l| l.1).collect();
+                    let bins = lbm::gpu3d::span_distribution(&s.spans, &forces, bb.y0, dy, SPAN_BINS);
                     moment.push([t_star, a / (q * lf), fz / q]);
                     // c·cl/c_ref = (dL/dy) / (q∞ c_ref), c_ref = L mailles.
                     let qc = 0.5 * (U as f64).powi(2) * lf;
-                    span.push((t_star, bins.iter().map(|v| v / dy / qc).collect()));
+                    span.push((t_star, bins.iter().map(|v| v[2] / dy / qc).collect()));
                     if span.len() > 200 {
                         span.drain(..50);
                     }
