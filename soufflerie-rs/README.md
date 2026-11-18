@@ -1708,18 +1708,19 @@ essais sans recompiler).
 cargo run --release -p lbm --example banc3d -- ar4b --t 6 --profil 1
 ```
 
-**Gains** (GTX 1070, t* = 6, 960 pas de la veine ; mesures alternées
-ancienne et nouvelle version, GPU partagé avec un autre calcul pendant
-toute la mise au point : les durées absolues sont environ deux fois trop
-longues, les rapports restent valables) :
+**Gains** (GTX 1070 seule sur le GPU, t* = 6, 960 pas de la veine ;
+ancienne et nouvelle version lancées en alternance) :
 
-| cas | mailles (mises à jour par pas) | calcul avant | après | gain | mise en place avant | après |
+| cas | mailles (mises à jour par pas de la veine) | calcul avant | après | gain | mise en place avant | après |
 | --- | --- | --- | --- | --- | --- | --- |
-| `sphere` | 1,77 M (1,77 M) | 8,5–8,8 s | 4,2–4,4 s | ×2,0 | 1,2 s | 1,1 s |
-| `ar4` | 2,91 M (3,68 M) | 23–24 s | 9,8–10,1 s | ×2,4 | 1,9–2,1 s | 1,7–1,9 s |
-| `ar4b` | 4,27 M (9,10 M) | 78 s | 26 s | ×3,0 | 6,7 s | 3,1–3,6 s |
+| `sphere` | 1,77 M (1,77 M) | 3,18 s | 1,08 s | ×2,9 | 0,75 s | 0,73 s |
+| `ar4` | 2,91 M (3,68 M) | 7,65 s | 3,47 s | ×2,2 | 1,3 s | 1,2 s |
+| `ar4b` | 4,27 M (9,10 M) | 29,4 s | 9,4 s | ×3,1 | 4,2 s | 2,2 s |
+| `ar4r2` (×2 puis ×4) | 5,52 M (14,1 M) | 35 s | 15,7 s | ×2,2 | 2,5 s | 2,4 s |
 
-Sur un calcul plus long (`ar4`, t* = 20) : 60–65 s avant, 16 s après.
+Mises à jour de maille par seconde, toutes grilles : 270 à 530 M avant,
+860 à 1 580 M après. Sur un calcul de validation (t* = 20) : `ar4b`
+108 s → 31 s, `ar4` ≈ 25 s → 11,6 s.
 
 Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 
@@ -1732,9 +1733,11 @@ Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 | voisins de ν̃ sans modulo | ν̃ | 1,2 ms | 0,9 ms | identique au bit |
 | shaders de calcul sans les contrôles d'exécution de wgpu (bornes, divisions protégées, compteurs de boucle ; `SOUFFLERIE_CONTROLES=1` les rétablit) | toutes | | faible | identique au bit |
 | loi de paroi dans une passe à part (voir ci-dessous) | collision | | faible | reproductible |
+| collision par paires de directions opposées : parties paire et impaire calculées une fois pour f_i et f_−i | collision | 1,70 ms | 1,54 ms | arrondi (voir ci-dessous) |
+| mailles des grilles parentes recopiées de la grille fine, et dont les six voisins le sont aussi : collision et ν̃ sautés (`SOUFFLERIE_RECOUVERT=0` pour comparer) | toutes, grilles parentes | | 28 % de la grille ×2 sautés sur `ar4r2` (−2 % au total) | identique au bit |
 | distance à la surface par coques croissantes (même minimum que le parcours complet, test `distance_par_coques_exacte`) | mise en place des couches | 4,3 s | 1,4 s | identique au bit |
 
-**Précision.** Toutes les optimisations sauf une rendent des champs et des
+**Précision.** Toutes les optimisations sauf deux rendent des champs et des
 efforts identiques au bit (comparaison maille par maille des champs de
 `ar4`, `ar4b` et `sphere`). L'exception corrige un défaut : la collision
 appliquait la loi de paroi en lisant la vitesse des nœuds voisins (relevé à
@@ -1744,21 +1747,28 @@ groupes. Les calculs avec loi de paroi n'étaient pas reproductibles :
 d'un lancement à l'autre, 10⁻⁵ à 10⁻³ d'écart relatif sur les efforts à
 t* = 6 (`banc/ref`). La loi de paroi est maintenant une passe sur les
 mailles pariétales, avant la collision, sur le champ du pas précédent :
-le calcul est reproductible au bit, et ses efforts restent dans la
-dispersion de l'ancienne version :
+le calcul est reproductible au bit. La seconde, la collision par paires,
+calcule la même formule dans un autre ordre : l'arrondi de chaque
+population change d'environ 10⁻⁷, ce qui suffit pour que les champs
+instantanés divergent ensuite comme d'un lancement à l'autre de l'ancienne
+version. Les efforts moyens restent à moins d'une largeur de dispersion
+de la moyenne de l'ancienne version (nouvelle version complète,
+`banc/long/new2_*`) ; Cz échange et Cz boîte dépassent le plus grand des
+six tirages de 3 et 5·10⁻⁵ (10⁻⁴ et 2·10⁻⁴ en relatif) :
 
 | `ar4`, t* = 20, moyenne sur 8 | ancienne version, 6 calculs (min – max) | nouvelle |
 | --- | --- | --- |
-| Cx échange | 0,05712 – 0,05714 | 0,05711 |
-| Cz échange | 0,27212 – 0,27223 | 0,27223 |
+| Cx échange | 0,05712 – 0,05714 | 0,05713 |
+| Cz échange | 0,27212 – 0,27223 | 0,27226 |
 | Cx surface | 0,02435 – 0,02435 | 0,02435 |
-| Cz surface | 0,28962 – 0,28979 | 0,28972 |
+| Cz surface | 0,28962 – 0,28979 | 0,28969 |
 | Cx frottement | 0,00749 – 0,00749 | 0,00749 |
-| Cx boîte | 0,07193 – 0,07342 | 0,07301 |
-| Cz boîte | 0,26892 – 0,26903 | 0,26905 |
+| Cx boîte | 0,07193 – 0,07342 | 0,07332 |
+| Cz boîte | 0,26892 – 0,26903 | 0,26908 |
 
-Même constat sur `ar4b` et à t* = 6 (`banc/ref`, trois calculs) : la
-nouvelle version est un tirage de plus dans la dispersion de l'ancienne.
+Même constat sur `ar4b` (t* = 20, trois calculs de l'ancienne version,
+`banc/long/orig_ar4b_*`) : moyennes à moins d'une dispersion ; seule une
+valeur instantanée (Cx au dernier relevé) en sort, de 6·10⁻⁴ en relatif.
 
 **Essais écartés.**
 
@@ -1772,16 +1782,22 @@ nouvelle version est un tirage de plus dans la dispersion de l'ancienne.
   +60 % sur un fil, rien sur 12 fils (limité par la mémoire) ; écarté
   (binaire non portable).
 - Taille des groupes de travail de la collision (`SOUFFLERIE_WG`, 32 à
-  256) : pas de différence mesurable sur le GPU partagé ; 64 gardé.
+  256), GPU libre : 64 à 256 équivalents, 32 plus lent ; 64 gardé.
+- Parcours de la veine par tranches de quelques rangées y sur toute la
+  hauteur z (voisins en z relus pendant qu'ils sont dans le cache) :
+  ≤ 5 %, dans le bruit ; écarté.
+- Mailles fantômes des raccords triées par parité de position (pochoirs de
+  même taille dans un groupe) : deux fois plus lent (accès dispersés) ;
+  écarté.
 
-**Ce qui reste.** Sans tirage des voisins ni calcul de collision, le cœur
-de la collision ne coûterait que la moitié de sa durée actuelle : le pas
-est encore limité par les instructions (calcul de la collision, index des
-voisins) plus que par la mémoire. Les pistes suivantes changeraient
-l'arrondi (réécriture algébrique de la collision régularisée, populations
-opposées calculées ensemble) ou demandent un GPU libre pour être mesurées
-(taille des groupes, voisins dans un même bloc de la couche creuse sans
-passer par la table des blocs).
+**Ce qui reste.** GPU libre, la collision de la veine prend 1,54 ms ;
+sans calcul ni tirage des voisins (mêmes lectures et écritures), elle
+prendrait 1,11 ms (≈ 200 Go/s, 80 % de la bande passante de la carte) :
+au plus 30 % de plus à gagner sur la passe principale. Pistes non
+retenues : transport de ν̃ dans la collision (−5 % environ, mais un
+second champ de vitesses, 16 octets de plus par maille) ; vitesses
+rangées sans ρ (−4 % d'octets). Les petites passes (loi de paroi,
+raccords) pèsent 14 % du pas sur `ar4`, surtout en latence de lancement.
 
 
 ## Installation
