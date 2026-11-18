@@ -465,7 +465,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var f: array<f32, 19>;
   var p: array<f32, 19>;
   var m: Mom;
-  if (cwall[cidx] == 0u) {
+  // Maille fluide, ou recouverte par une grille plus fine (même traitement).
+  if (cwall[cidx] == 0u || cwall[cidx] == 0xfffffffdu) {
     // Populations avant collision au temps t + 1, tirées du demi-pas t + ½.
     for (var i = 0u; i < 19u; i++) {
       let s = vec3<i32>(i32(cx) - CX[i], i32(cy) - CY[i], i32(cz) - CZ[i]);
@@ -512,8 +513,9 @@ pub(crate) struct Link3 {
     oy: usize,
     oz: usize,
     ng: u32,
-    /// Nœuds parents recopiés depuis la grille fine.
+    /// Nœuds parents recopiés depuis la grille fine (et leurs positions).
     nr: u32,
+    rl_pos: Vec<u32>,
     rlist: wgpu::Buffer,
     params: [wgpu::Buffer; 2],
     gm: wgpu::Buffer,
@@ -545,6 +547,11 @@ fn disp(n: u32) -> (u32, u32) {
 }
 
 impl Link3 {
+    /// Positions (boîte parente) des nœuds recopiés depuis la grille fine.
+    pub(crate) fn restrict_list(&self) -> &[u32] {
+        &self.rl_pos
+    }
+
     pub(crate) fn new(parent: &Gpu3D, child: &Gpu3D, o: [usize; 3]) -> Link3 {
         let d = &parent.device;
         let fp16 = parent.fp16;
@@ -697,10 +704,12 @@ impl Link3 {
             }
         }
         let nr = rl.len() as u32;
+        let rl_pos = rl.clone();
         if rl.is_empty() {
             rl.push(0);
         }
         Link3 {
+            rl_pos,
             ox: o[0],
             oy: o[1],
             oz: o[2],
@@ -887,7 +896,26 @@ impl Link3 {
         let (dx, dy) = disp(self.ng);
         let (rx, ry) = disp(self.nr);
         vec![
-            ("tirage".into(), self.ng as usize, time(p, &|pass| self.gather(pass, p.cur))),
+            (
+                "tirage, moments des nœuds".into(),
+                self.nn as usize,
+                time(p, &|pass| {
+                    let (dx, dy) = disp(self.nn);
+                    pass.set_pipeline(&self.pre);
+                    pass.set_bind_group(0, &self.pre_bind[p.cur], &[]);
+                    pass.dispatch_workgroups(dx, dy, 1);
+                }),
+            ),
+            (
+                "tirage, interpolation".into(),
+                self.ng as usize,
+                time(p, &|pass| {
+                    let (dx, dy) = disp(self.ng);
+                    pass.set_pipeline(&self.gather);
+                    pass.set_bind_group(0, &self.gather_bind[0], &[]);
+                    pass.dispatch_workgroups(dx, dy, 1);
+                }),
+            ),
             (
                 "remplissage".into(),
                 self.ng as usize,

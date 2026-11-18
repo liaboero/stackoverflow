@@ -57,6 +57,9 @@ fn opp3(i: usize) -> usize {
 }
 
 pub(crate) const SOLID: u32 = 0xffff_ffff;
+/// Maille d'une grille parente recouverte par une grille fine (voir
+/// `Gpu3D::mark_covered`).
+pub(crate) const COVERED: u32 = 0xffff_fffd;
 
 /// Mise au point (SOUFFLERIE_TEMPS=1) : durée d'une étape de la mise en place.
 pub(crate) fn temps(label: &str, t0: std::time::Instant) {
@@ -237,6 +240,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let y = pp.y;
   let z = pp.z;
   let wk0 = wall[idx];
+  // Maille recouverte par une grille fine : ν̃ recopié de celle-ci après ses pas.
+  if (wk0 == 0xfffffffdu) { return; }
   let nu = P.nu;
   var out: f32;
   if (wk0 == 0xffffffffu) {
@@ -627,9 +632,31 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
         );
     }
     let dotc = |i: usize, a: usize, b: usize| C3[i][a] * C3[i][b];
+    // Collision par paires de directions opposées (i, −i) : partie paire
+    // (équilibre en ρ, u², et partie hors équilibre d'ordre 2) et impaire
+    // (terme en c·u, ordre 3 de Hermite, force) calculées une fois pour les
+    // deux, f_i = paire + impaire, f_−i = paire − impaire. Même formule ;
+    // l'arrondi change (≈ 10⁻⁷ par pas), collision 10 % plus rapide.
     let mut coll = String::new();
+    let mut absorb_code = String::new();
     for i in 0..19 {
+        let j = opp3(i);
         let [cx, cy, cz] = C3[i];
+        let (cxf, cyf, czf) = (cx as f64, cy as f64, cz as f64);
+        let w = w3(i);
+        let _ = write!(
+            absorb_code,
+            "    {{
+      let ci = {cxs} * P.uIn;
+      o[{i}] -= sig * (o[{i}] - {wf} * (3.0 * ci + 4.5 * ci * ci - 1.5 * P.uIn * P.uIn));
+    }}
+",
+            wf = f(w),
+            cxs = f(cxf),
+        );
+        if j < i {
+            continue;
+        }
         let comps: Vec<String> = [(cx, "u.x"), (cy, "u.y"), (cz, "u.z")]
             .iter()
             .filter(|(c, _)| *c != 0)
@@ -640,10 +667,7 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
         } else {
             comps.join(" + ").replace("+ -", "- ")
         };
-        let (cxf, cyf, czf) = (cx as f64, cy as f64, cz as f64);
-        // Termes de coefficient nul omis : 0 · x n'est pas simplifiable par le
-        // compilateur (IEEE) et coûtait une multiplication et une addition
-        // chacun ; a + 0 · x = a, la valeur est inchangée.
+        // Termes de coefficient nul omis (0 · x n'est pas simplifiable en IEEE).
         let qp = [
             (cxf * cxf - 1.0 / 3.0, "pxx"),
             (cyf * cyf - 1.0 / 3.0, "pyy"),
@@ -657,12 +681,15 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
         .map(|(c, v)| format!("{} * {v}", f(*c)))
         .collect::<Vec<_>>()
         .join(" + ");
+        if j == i {
+            let _ = writeln!(coll, "  o[{i}] = {wf} * rho * (1.0 - usq) + k * {w45} * ({qp}) - {wf};", wf = f(w), w45 = f(4.5 * w));
+            continue;
+        }
         let accel = match cx {
             0 => String::new(),
-            1 => format!(" + {} * rho * (P.accel)", f(3.0 * w3(i))),
-            _ => format!(" + {} * rho * (-P.accel)", f(3.0 * w3(i))),
+            1 => format!(" + {} * rho * (P.accel)", f(3.0 * w)),
+            _ => format!(" + {} * rho * (-P.accel)", f(3.0 * w)),
         };
-        let w = w3(i);
         // Hermite d'ordre 3 (composantes portées par D3Q19, sans xyz).
         let h = |a: f64, b: f64| a * (b * b - 1.0 / 3.0);
         let h3: Vec<String> = [
@@ -682,19 +709,16 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
             coll,
             "  {{
     let cu = {cu};
-    let feq = {wf} * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq);
-    let fnew = feq + k * {w45} * ({qp}) + {w135} * ({h3}){accel};
-    o[{i}] = fnew - {wf};
-    if (sig > 0.0) {{
-      let ci = {cxs} * P.uIn;
-      o[{i}] -= sig * (o[{i}] - {wf} * (3.0 * ci + 4.5 * ci * ci - 1.5 * P.uIn * P.uIn));
-    }}
+    let ev = {wf} * rho * (1.0 + 4.5 * cu * cu - usq) + k * {w45} * ({qp});
+    let od = {w3f} * rho * cu + {w135} * ({h3}){accel};
+    o[{i}] = ev + od - {wf};
+    o[{j}] = ev - od - {wf};
   }}
 ",
             wf = f(w),
+            w3f = f(3.0 * w),
             w45 = f(4.5 * w),
             w135 = f(13.5 * w),
-            cxs = f(cxf),
         );
     }
     let out: String = if fp16 {
@@ -808,8 +832,9 @@ fn feqIn(i: u32) -> f32 {{
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
 {head}
   let wk0 = wall[idx];
-  // Solide, ou maille fantôme d'une grille fine (remplie par refine3d).
-  if (wk0 >= 0xfffffffeu) {{ return; }}
+  // Solide, maille fantôme d'une grille fine (remplie par refine3d), ou
+  // maille recouverte (recopiée de la grille fine, voir `mark_covered`).
+  if (wk0 >= 0xfffffffdu) {{ return; }}
 {skip}
   let wk = select(wk0 - 1u, 0xffffffffu, wk0 == 0u);
   let hasWall = wk != 0xffffffffu;
@@ -921,6 +946,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let sig = absorb(x, y, z);
   var o: array<f32, 19>;
 {coll}
+  // Bandes absorbantes : rappel vers l'écoulement amont près des bords.
+  if (sig > 0.0) {{
+{absorb_code}  }}
 {out}
   if (hasWall) {{
     force[wk] += vec4<f32>(fsum, 0.0);
@@ -2699,6 +2727,18 @@ impl Gpu3D {
                 core.push(Some([[0, 1, 2].map(|a| porg[a] + cr[0][a] / sp), [0, 1, 2].map(|a| porg[a] + cr[1][a] / sp)]));
             }
         }
+        // Mailles des grilles parentes recopiées des grilles fines et dont
+        // tous les voisins le sont aussi : jamais lues avant d'être écrasées.
+        if std::env::var("SOUFFLERIE_RECOUVERT").map_or(true, |v| v != "0") {
+            for g in 0..=levels.len() {
+                let lists: Vec<&[u32]> = links.iter().zip(&parent).filter(|(_, &p)| p == g).map(|(l, _)| l.restrict_list()).collect();
+                if lists.is_empty() {
+                    continue;
+                }
+                let grid = if g == 0 { &top } else { &levels[g - 1] };
+                grid.mark_covered(&lists);
+            }
+        }
         top.refine = Some(Box::new(crate::refine3d::Refinement {
             levels,
             links,
@@ -2902,7 +2942,7 @@ impl Gpu3D {
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),
             contents: bytemuck::cast_slice(&wall_gpu),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
         let qbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("q3d"),
@@ -3265,6 +3305,65 @@ impl Gpu3D {
         s.reset(0.0);
         temps("fin", tt);
         Ok(s)
+    }
+
+    /// Marque « recouvertes » (0xfffffffd) les mailles fluides de cette
+    /// grille que les grilles fines recopient (listes de positions `lists`)
+    /// et dont les six voisins sont aussi recopiés : la collision et le
+    /// transport de ν̃ les sautent. Leur nouvel état n'était lu par
+    /// personne avant la recopie qui l'écrase (le transport de ν̃ et la loi
+    /// de paroi ne lisent que les six voisins et le champ d'avant le pas ;
+    /// le tirage, l'état d'avant le pas) : résultats identiques au bit.
+    pub(crate) fn mark_covered(&self, lists: &[&[u32]]) {
+        let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        let rank = |x: usize, y: usize, z: usize| match self.sparse.as_ref() {
+            Some(m) => m.id(x, y, z),
+            None => x + nx * (y + ny * z),
+        };
+        let mut inr = vec![false; self.n];
+        for l in lists {
+            for &p in l.iter() {
+                let p = p as usize;
+                inr[rank(p % nx, (p / nx) % ny, p / (nx * ny))] = true;
+            }
+        }
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wall3d_read"),
+            size: 4 * self.n as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut wall: Vec<u32> = self.read(&self.wall, &staging, 4 * self.n as u64).iter().map(|v| v.to_bits()).collect();
+        if wall.len() != self.n {
+            return;
+        }
+        let mut count = 0usize;
+        for l in lists {
+            for &p in l.iter() {
+                let p = p as usize;
+                let (x, y, z) = (p % nx, (p / nx) % ny, p / (nx * ny));
+                let r = rank(x, y, z);
+                if wall[r] != 0 || x == 0 || y == 0 || z == 0 || x + 1 >= nx || y + 1 >= ny || z + 1 >= nz {
+                    continue;
+                }
+                let nb = [
+                    rank(x - 1, y, z),
+                    rank(x + 1, y, z),
+                    rank(x, y - 1, z),
+                    rank(x, y + 1, z),
+                    rank(x, y, z - 1),
+                    rank(x, y, z + 1),
+                ];
+                if nb.iter().all(|&c| inr[c]) {
+                    wall[r] = COVERED;
+                    count += 1;
+                }
+            }
+        }
+        if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
+            eprintln!("  [mise en place] {count} mailles recouvertes sur {}", self.n);
+        }
+        self.queue.write_buffer(&self.wall, 0, bytemuck::cast_slice(&wall));
     }
 
     /// Variantes de diagnostic (enquête sur l'épaisseur de la couche limite,
