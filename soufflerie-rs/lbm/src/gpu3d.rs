@@ -238,6 +238,7 @@ const CV1_3 = 357.911;
 const NU_TILDE_MAX = 0.15;
 
 @group(0) @binding(9) var<storage, read> blk: array<u32>;
+@group(0) @binding(10) var<storage, read> plain: array<u32>;
 SPARSE_FNS
 
 @compute @workgroup_size(64)
@@ -248,7 +249,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let x = pp.x;
   let y = pp.y;
   let z = pp.z;
-  let wk0 = wall[idx];
+  // Masque des mailles fluides ordinaires (un bit) : le type complet
+  // (4 octets) n'est lu que pour les autres.
+  var wk0 = 0u;
+  if (((plain[idx >> 5u] >> (idx & 31u)) & 1u) == 0u) { wk0 = wall[idx]; }
   // Maille recouverte par une grille fine : ν̃ recopié de celle-ci après ses pas.
   if (wk0 == 0xfffffffdu) { return; }
   let nu = P.nu;
@@ -772,6 +776,8 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
 // Rang de chaque maille pariétale (passe des mailles pariétales), puis,
 // sur une grille creuse, de chaque maille à calculer du cœur.
 @group(0) @binding(15) var<storage, read> wcell: array<u32>;
+// Mailles fluides ordinaires (un bit par maille ; voir `plain_mask`).
+@group(0) @binding(16) var<storage, read> plain: array<u32>;
 {SPARSE_FNS}
 {lam_fns}
 {sa_fns}
@@ -972,7 +978,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         head = if walls {
             "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];\n  let wk0 = wall[idx];"
         } else {
-            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }\n  // Liste : mailles fluides sans lien de paroi, type connu sans le lire.\n  var wk0 = 0u;\n  if (ACTN_C == 0u) { wk0 = wall[idx]; }"
+            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }\n  // Liste : mailles fluides sans lien de paroi, type connu sans le lire.\n  var wk0 = 0u;\n  if (ACTN_C == 0u && ((plain[idx >> 5u] >> (idx & 31u)) & 1u) == 0u) { wk0 = wall[idx]; }"
         },
         wg = if walls { 64 } else { step_wg() },
         // Mailles pariétales : fractions q et codes des normales des 18 liens
@@ -1720,6 +1726,8 @@ pub struct Gpu3D {
     /// Grille creuse : mailles du cœur de la collision (liste), 0 : toutes.
     n_active: u32,
     _step_list: wgpu::Buffer,
+    /// Mailles fluides ordinaires, un bit par maille.
+    plain: wgpu::Buffer,
     _wcell: wgpu::Buffer,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
@@ -1788,6 +1796,20 @@ pub(crate) struct WallPass {
     pipe: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
     disp: (u32, u32),
+}
+
+/// Masque des mailles fluides ordinaires (type 0 : ni paroi, ni solide, ni
+/// fantôme, ni recouverte), un bit par maille : la collision des grilles
+/// boîtes et le transport de ν̃ ne lisent le type complet (4 octets) que
+/// pour les autres (ν̃ −10 %).
+fn plain_mask(wall: &[u32]) -> Vec<u32> {
+    let mut m = vec![0u32; wall.len().div_ceil(32).max(1)];
+    for (i, &w) in wall.iter().enumerate() {
+        if w == 0 {
+            m[i >> 5] |= 1 << (i & 31);
+        }
+    }
+    m
 }
 
 /// Code de la collision où les paramètres fixes d'une grille deviennent des
@@ -2945,7 +2967,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(15);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(16);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -3097,6 +3119,11 @@ impl Gpu3D {
             // pour que leurs parois plus minces que la grille restent visibles.
             [g.dims[0] as f32, g.dims[1] as f32, g.dims[2] as f32, if body.mesh.is_some() { 0.6 * g.h as f32 } else { 0.0 }],
         );
+        let plain_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("plain3d"),
+            contents: bytemuck::cast_slice(&plain_mask(&wall_gpu)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),
             contents: bytemuck::cast_slice(&wall_gpu),
@@ -3184,6 +3211,7 @@ impl Gpu3D {
                 storage(13, true),
                 storage(14, true),
                 storage(15, true),
+                storage(16, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3199,6 +3227,7 @@ impl Gpu3D {
                 storage(7, false),
                 storage(8, true),
                 storage(9, true),
+                storage(10, true),
             ],
         });
         let wall_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3345,6 +3374,7 @@ impl Gpu3D {
                         buf_entry(13, &slab_buf, None),
                         buf_entry(14, &blk_buf, None),
                         buf_entry(15, &step_list_buf, None),
+                        buf_entry(16, &plain_buf, None),
                     ],
                 })
             })
@@ -3365,6 +3395,7 @@ impl Gpu3D {
                         buf_entry(7, &nut[1 - s], None),
                         buf_entry(8, &slab_buf, None),
                         buf_entry(9, &blk_buf, None),
+                        buf_entry(10, &plain_buf, None),
                     ],
                 })
             })
@@ -3454,6 +3485,7 @@ impl Gpu3D {
             wall_disp,
             n_active,
             _step_list: step_list_buf,
+            plain: plain_buf,
             disp_step: {
                 let groups = (if n_active > 0 { n_active } else { ns as u32 }).div_ceil(step_wg());
                 let dx = groups.min(65535);
@@ -3556,6 +3588,7 @@ impl Gpu3D {
             eprintln!("  [mise en place] {count} mailles recouvertes sur {}", self.n);
         }
         self.queue.write_buffer(&self.wall, 0, bytemuck::cast_slice(&wall));
+        self.queue.write_buffer(&self.plain, 0, bytemuck::cast_slice(&plain_mask(&wall)));
     }
 
     /// Variantes de diagnostic (enquête sur l'épaisseur de la couche limite,
