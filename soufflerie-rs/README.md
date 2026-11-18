@@ -1713,14 +1713,18 @@ ancienne et nouvelle version lancées en alternance) :
 
 | cas | mailles (mises à jour par pas de la veine) | calcul avant | après | gain | mise en place avant | après |
 | --- | --- | --- | --- | --- | --- | --- |
-| `sphere` | 1,77 M (1,77 M) | 3,18 s | 1,08 s | ×2,9 | 0,75 s | 0,73 s |
-| `ar4` | 2,91 M (3,68 M) | 7,65 s | 3,47 s | ×2,2 | 1,3 s | 1,2 s |
-| `ar4b` | 4,27 M (9,10 M) | 29,4 s | 9,4 s | ×3,1 | 4,2 s | 2,2 s |
-| `ar4r2` (×2 puis ×4) | 5,52 M (14,1 M) | 35 s | 15,7 s | ×2,2 | 2,5 s | 2,4 s |
+| `sphere` | 1,77 M (1,77 M) | 3,18 s | 1,01 s | ×3,1 | 0,75 s | 0,75 s |
+| `ar4` | 2,91 M (3,68 M) | 7,65 s | 3,35 s | ×2,3 | 1,3 s | 1,2 s |
+| `ar4b` | 4,27 M (9,10 M) | 29,4 s | 8,6 s | ×3,4 | 4,2 s | 2,2 s |
+| `ar4r2` (×2 puis ×4) | 5,52 M (14,1 M) | 35 s | 15,2 s | ×2,3 | 2,5 s | 2,5 s |
+| `ar4c3` (×2, couches ×4, ×8, ×16), 40 pas | 24,1 M (292 M) | 43,0 s | 11,2 s | ×3,8 | 18 s | 14 s |
 
-Mises à jour de maille par seconde, toutes grilles : 270 à 530 M avant,
-860 à 1 580 M après. Sur un calcul de validation (t* = 20) : `ar4b`
-108 s → 31 s, `ar4` ≈ 25 s → 11,6 s.
+`ar4c3` reproduit `--bande auto` sur l'aile AR 4 (trois couches de 16
+mailles) : c'est le cas qui ressemble le plus aux gros calculs, et celui
+qui gagne le plus (la couche la plus fine y fait les deux tiers du pas).
+Mises à jour de maille par seconde, toutes grilles : 60 à 530 M avant,
+890 à 1 690 M après. Sur un calcul de validation (t* = 20) : `ar4b`
+108 s → 31 s, `ar4` ≈ 25 s → 11,6 s (avant les dernières optimisations).
 
 Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 
@@ -1735,6 +1739,10 @@ Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 | loi de paroi dans une passe à part (voir ci-dessous) | collision | | faible | reproductible |
 | collision par paires de directions opposées : parties paire et impaire calculées une fois pour f_i et f_−i | collision | 1,70 ms | 1,54 ms | arrondi (voir ci-dessous) |
 | mailles des grilles parentes recopiées de la grille fine, et dont les six voisins le sont aussi : collision et ν̃ sautés (`SOUFFLERIE_RECOUVERT=0` pour comparer) | toutes, grilles parentes | | 28 % de la grille ×2 sautés sur `ar4r2` (−2 % au total) | identique au bit |
+| collision spécialisée par grille : paramètres fixes (SA, sous-maille, bords, diagnostics, stockage) en constantes du shader, pipelines recompilés s'ils changent | collision | | −2 à −7 % selon le cas | identique au bit |
+| tirage des raccords et remplissage du premier demi-pas de la grille fine en une passe | raccords | | −1,5 % | identique au bit |
+| couches creuses : le cœur de la collision ne lance que les mailles à calculer (un tiers des mailles stockées sont fantômes ou solides) | collision, couche ×16 | 7,2 ms | 6,9 ms | identique au bit |
+| collision pariétale : fractions q et codes des normales des 18 liens lus d'un coup au lieu d'un par direction derrière ses branches | collision pariétale, couche ×16 | 2,6 ms | 1,7 ms | identique au bit |
 | distance à la surface par coques croissantes (même minimum que le parcours complet, test `distance_par_coques_exacte`) | mise en place des couches | 4,3 s | 1,4 s | identique au bit |
 
 **Précision.** Toutes les optimisations sauf deux rendent des champs et des
@@ -1789,15 +1797,38 @@ valeur instantanée (Cx au dernier relevé) en sort, de 6·10⁻⁴ en relatif.
 - Mailles fantômes des raccords triées par parité de position (pochoirs de
   même taille dans un groupe) : deux fois plus lent (accès dispersés) ;
   écarté.
+- Mêmes fantômes rangés par bloc de 8³ puis par parité : plus lent
+  aussi. L'interpolation des fantômes (10 % du pas de `ar4c3`) est limitée
+  par ses lectures, environ 800 octets par fantôme ; seul un regroupement
+  des fantômes d'une même maille parente en mémoire partagée les
+  réduirait (de moitié environ), refonte lourde non faite.
+- Divisions entières de `pos_of` remplacées par une estimation flottante
+  corrigée (quotient exact) : identique au bit, aucun gain.
+- Écriture des seules vitesses (sans ρ) dans le champ à chaque pas :
+  aucun gain, une écriture partielle de 16 octets coûte autant qu'une
+  complète ; il faudrait des tableaux séparés (≈ 1,5 %).
+- Voisins dans le même bloc de 8³ sans passer par la table des blocs
+  (collision et recopie des couches) : plus lent (branche), la table est
+  dans le cache.
+- Normales des liens décodées une fois à la mise en place : plus lent
+  (lectures dépendantes au lieu de calcul).
+- Populations de la maille préchargées dans la collision pariétale : plus
+  lent.
+- Transport de ν̃ et collision limités aux mailles lues sur les couches
+  (sans solides ni fantômes jamais lus) : aucun gain pour ν̃, limité par
+  la mémoire des mailles actives.
 
-**Ce qui reste.** GPU libre, la collision de la veine prend 1,54 ms ;
+**Ce qui reste.** GPU libre, la collision de la veine prend 1,40 ms ;
 sans calcul ni tirage des voisins (mêmes lectures et écritures), elle
-prendrait 1,11 ms (≈ 200 Go/s, 80 % de la bande passante de la carte) :
-au plus 30 % de plus à gagner sur la passe principale. Pistes non
-retenues : transport de ν̃ dans la collision (−5 % environ, mais un
-second champ de vitesses, 16 octets de plus par maille) ; vitesses
-rangées sans ρ (−4 % d'octets). Les petites passes (loi de paroi,
-raccords) pèsent 14 % du pas sur `ar4`, surtout en latence de lancement.
+prendrait 1,11 ms (≈ 200 Go/s, 80 % de la bande passante de la carte).
+Sur `ar4c3`, le pas se répartit en collision de la couche ×16 (cœur et
+mailles pariétales, 54 %), transport de ν̃ (14 %), raccord ×8 → ×16
+(19 %, dont l'interpolation des fantômes 10 %) et le reste. Pistes non
+faites : interpolation des fantômes par maille parente en mémoire
+partagée (≈ 5 %) ; transport de ν̃ dans la collision du pas suivant
+(≈ 5 %, mais un second champ de vitesses, 16 octets de plus par maille,
+et un décalage d'un pas à reporter dans les raccords) ; vitesses rangées
+en tableaux séparés (≈ 2 %).
 
 
 ## Installation
