@@ -1434,19 +1434,115 @@ portance ne vient donc pas de la couche lente : en l'amincissant, on ne le
 réduit pas. La part de la traînée qu'elle porte (perte de quantité de
 mouvement au bord d'attaque) n'en explique qu'une petite fraction.
 
+## Interface de la soufflerie 3D
+
+![Soufflerie 3D : aile AR 4 à 4°, Re = 10⁶, préréglage Précis terminé (30 t* en 100 s)](capture-3d.png)
+
+L'onglet suit le déroulement d'un essai, de gauche à droite :
+
+- **Barre du haut** : ouvrir une maquette (« Ouvrir… », Ctrl+O, ou glisser
+  un `.stl` / `.sgeo` sur la fenêtre), **préréglages** du maillage et de la
+  durée, ▶ Lancer / ⏸ Pause / Prolonger (Espace), Recommencer (Ctrl+R),
+  état du calcul (point coloré) et **progression** en temps convectifs avec
+  le **temps restant**.
+- **Réglages** (à gauche), en trois groupes repliables : *1 · Maquette*
+  (forme ou STL, incidence, dimensions, blocage, diagnostic du maillage ;
+  « Mise en place du fichier » : axes, unité, dérapage, références, **marge
+  de la veine**, lissage, arêtes vives), *2 · Écoulement* (Reynolds ou
+  échelle physique, paroi, transition ; une ligne dit si la couche limite est
+  résolue ou modélisée), *3 · Maillage et durée* (résolution, grilles ×2 à
+  ×8, couches pariétales avec l'épaisseur minimale d'1/8 de corde, précision,
+  durée) et le **coût estimé** : mailles de chaque grille, mémoire du GPU,
+  durée. Les infobulles disent l'effet physique de chaque réglage.
+- **Vue** (au centre) : vue 3D ou coupe à plat (V), vorticité, vitesse ou
+  critère Q, plan et position, maquette lisse, avec la grille ou en mailles
+  du calcul, isosurfaces Q (touche Q) ; **vues prédéfinies** 3/4, face, côté,
+  dessus, arrière (touches 1 à 5, 0 ou double clic : vue par défaut), avec
+  un glissement de la caméra ; **échelles de couleur** de la coupe et des
+  isosurfaces, trièdre des axes, flèche du vent.
+- **Résultats** (à droite) : coefficients Cx, Cz, Cy, Cm selon chaque
+  mesure, comme `run3d` : intégration sur la surface (pression et
+  frottement), échange de quantité de mouvement aux parois, bilan sur deux
+  boîtes (Cx extrapolé à volume nul, Cz : référence de portance), écart
+  surface / boîtes ; Cm autour d'un point réglable (quart de corde par
+  défaut) ; **répartition en envergure** (c·cl/c_ref, 16 tranches) ;
+  comparaison à des valeurs saisies (mesure, VSPAERO) ; efforts en newtons
+  à l'échelle physique ; **exports** CSV (historique et résumé des mesures,
+  Ctrl+E) et PNG de la vue avec son échelle (Ctrl+S) ; « Détails du calcul »
+  (mailles de chaque grille, τ, modèles, débit, durées).
+- **Convergence** (en bas) : Cx, Cz, Cm et Cz de l'échange en direct, fenêtre
+  de moyenne (zone verte) et moyennes (tirets), fin du calcul.
+
+| Préréglage | Maillage | Durée | Coût (aile AR 4 du banc, GTX 1070) |
+| --- | --- | --- | --- |
+| Aperçu | L = 12, uniforme | 15 t* | quelques secondes |
+| Rapide | L = 16, grille ×2 | 25 t* | 2,9 M mailles, 24 s |
+| Précis | L = 16, ×2 et une couche ×4 (1/8 de corde au moins) | 30 t* | 4,0 M mailles estimées (4,3 M réelles), 100 s |
+| Validation | L = 16, ×2 et couches automatiques (1/8 de corde au moins), comme `--raff 1 --bande auto --bande-corde 0.125` | 40 t* | 36 M mailles, une heure et plus |
+
+**Réglages et calcul.** Le calcul ne démarre pas tout seul : le GPU est
+souvent partagé. Les réglages de l'affichage s'appliquent tout de suite ;
+ceux de la physique (maquette, écoulement, maillage) s'appliquent d'eux-mêmes
+tant que rien n'a été calculé et que la mise en place reste légère (moins de
+8 M mailles). Sinon un bandeau « Réglages modifiés » propose Appliquer
+(Ctrl+Entrée) ou Annuler, et le bouton principal devient « Appliquer et
+lancer » : un résultat n'est jamais perdu par un clic. Le calcul s'arrête à
+la durée choisie (« sans fin » possible) ; « Prolonger » ajoute la moitié de
+la durée.
+
+**Coût estimé.** Les grilles boîtes reprennent l'emprise de
+`Gpu3D::with_refinement_edges` (2,93 M mailles estimées pour l'aile AR 4 à
+L = 16 et ×2, 2,91 M réelles ; test `estimation_des_grilles`) ; les couches
+pariétales, creuses, sont estimées par la surface mouillée (±25 % ; 35,6 M
+pour le préréglage Validation, 36 M réelles). La durée vient du débit mesuré
+au dernier calcul de l'interface (environ 500 M mises à jour de maille par
+seconde avant toute mesure). Au-delà de 40 M mailles en demi-précision
+(20 M en simple), limite du calcul, ou de 6,5 Go, le lancement demande
+« Lancer quand même ». Quand la veine fait l'essentiel des mailles d'une
+maquette allongée, l'estimation conseille de réduire la marge de la veine.
+
+**Vitesse.** Pendant le calcul, l'image n'est refaite qu'environ 8 fois par
+seconde (tout de suite si la vue change) et les lots de pas visent 40 à
+70 ms : l'aile AR 4 en préréglage Rapide (25 t*) prend 24 s dans l'interface
+contre plus d'une minute auparavant, et 15 s en ligne de commande.
+
+**Ligne de commande.** Les options de mise en place de `run3d` (`--unite`,
+`--ecoulement`, `--haut`, `--alpha`, `--beta`, `--lref`, `--sref`,
+`--marge`, `--lisser`) et `--re` règlent aussi l'interface, avec
+`--prereglage apercu|rapide|precis|validation` et `--lancer 1` :
+
+```bash
+cargo run --release -- --stl banc/wing_ar4.stl --unite m --lref 1 --sref 4 --marge 0.4 --alpha 4 --re 1e6 --prereglage rapide --lancer 1
+```
+
+**Raccourcis** (F1 ou « ? ») : Espace lancer / pause, Ctrl+R recommencer,
+Ctrl+Entrée appliquer, Ctrl+O ouvrir, Ctrl+E CSV, Ctrl+S image de la vue,
+F12 capture de la fenêtre, V vue 3D / coupe, Q isosurfaces, 1 à 5 vues, 0
+vue par défaut.
+
+**Captures et essais sans souris.** `SOUFFLERIE_CAPTURE=f.png` (avec
+`SOUFFLERIE_CAPTURE_T=secondes`) enregistre la fenêtre puis la ferme,
+`SOUFFLERIE_TOUCHES="3:espace;8:v;9:2"` presse des touches à ces instants,
+`SOUFFLERIE_THEME=clair|sombre` impose le thème : les captures de ce README
+en viennent.
+
+![Préréglage Précis en cours, thème sombre, vue arrière (touche 5) : coupe longitudinale et isosurfaces Q](capture-3d-sombre.png)
+
 ## Maquettes STL (3D)
 
-Dans l'interface, onglet Soufflerie 3D : « Charger un STL… » (ou glisser le
-fichier sur la fenêtre, ou `soufflerie --stl fichier.stl` au lancement). Les
-mêmes réglages qu'en ligne de commande y figurent (axes, unité, incidence,
-dérapage, références), avec les dimensions, le maître-couple et le blocage ;
-« Échelle physique » fixe le Reynolds par la vitesse et donne les efforts
-en newtons.
+Dans l'interface, onglet Soufflerie 3D (voir ci-dessus) : « Ouvrir… » (ou
+glisser le fichier sur la fenêtre, ou `soufflerie --stl fichier.stl` au
+lancement). Les mêmes réglages qu'en ligne de commande y figurent (axes,
+unité, incidence, dérapage, références, marge de la veine), avec les
+dimensions, le maître-couple et le blocage ; « Échelle physique » fixe le
+Reynolds par la vitesse et donne les efforts en newtons.
 « Couches pariétales » (avec au moins une grille ×2 « Près de la
 maquette ») ajoute 1 à 3 couches de 16 mailles, chacune deux fois plus
-fine, ou « auto » comme `--bande auto` : les mêmes couches creuses et les
-mêmes optimisations qu'en ligne de commande ; la ligne d'information donne
-le nombre de couches, leurs mailles et la vitesse sur toutes les grilles.
+fine, ou « auto » comme `--bande auto`, d'au moins 1/8 de la longueur de
+référence (`--bande-corde 0.125`) si la case est cochée : les mêmes couches
+creuses et les mêmes optimisations qu'en ligne de commande ; « Détails du
+calcul » donne les mailles de chaque grille et la vitesse sur toutes les
+grilles.
 
 En ligne de commande :
 `soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette
@@ -1990,7 +2086,9 @@ soufflerie-rs/
     ├── src/main.rs     ligne de commande (run, polar, panel, wing, run3d, geom, bench)
     ├── src/gui.rs      interface graphique, onglets
     ├── src/wing_tab.rs onglet aile finie (vue 3D, envergure, polaire)
-    ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, vue 3D, coupe, efforts)
+    ├── src/tab3d.rs    onglet soufflerie 3D (réglages, coût estimé, vue 3D, coupe, résultats, exports)
+    ├── src/tab3d_calc.rs  fil de calcul GPU de l'onglet 3D (efforts, boîtes, Cm, envergure)
+    ├── src/capture.rs  captures PNG de la fenêtre, essais au clavier sans souris
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
