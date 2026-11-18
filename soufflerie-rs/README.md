@@ -1256,7 +1256,22 @@ l'épaisseur de sa couche parente (16 mailles ×8) : ses fantômes étaient
 remplies depuis des mailles que la couche parente ne calcule pas.
 `nested_bands` impose désormais D_parent ≥ D/2 + 2 MARGIN + 3 (16, 16, 32
 devient 19, 23, 32) ; l'essai à trois couches de 16 mailles respectait
-déjà cette règle, son incohérence a une autre cause. Essai à refaire.
+déjà cette règle, son incohérence a une autre cause.
+
+Essai refait avec la règle (19, 23 et 32 mailles, 36 M mailles, 86 min) :
+
+| Aile AR 4, 4°, ×2 + couches ×4, ×8, ×16 | Cz boîte | Cz échange | Cz surface | Cx boîte | Cx surface |
+| --- | --- | --- | --- | --- | --- |
+| 16, 16, 16 mailles (×16 : 6 % de corde) | 0,2797 | 0,2820 | 0,2712 | 0,033 | 0,030 |
+| 19, 23, 32 mailles (×16 : 12,5 % de corde) | 0,2724 | 0,2809 | 0,2702 | 0,023 | 0,030 |
+
+Avec la couche la plus fine épaisse de 12,5 % de corde, la boîte et la
+surface s'accordent à 0,8 % près (3 % avec 16 mailles) ; l'échange reste
+3 % au-dessus. La portance (0,270 à 0,272, un seul placement du bord de
+fuite) prolonge la suite 0,276, 0,271, 0,269 des moyennes à ×2, ×4, ×8 ;
+VSPAERO en panneaux épais donne 0,265, la ligne portante à polaires
+visqueuses 0,251. La traînée de surface descend à 0,030 (0,042 à ×4 ;
+VSPAERO 0,021 à 0,022). Règle retenue : `--bande auto --bande-corde 0.125`.
 
 Le rangement des triangles pour la distance au maillage utilisait des
 cases d'une maille quelle que soit la grille : sur une couche ×16, chaque
