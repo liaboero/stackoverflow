@@ -1242,7 +1242,8 @@ fn cmd_run3d(a: &Args) {
     }
     println!(
         "{:.0} millions de mailles par seconde · {:.1} s (dont préparation {:.1} s)",
-        sim.n as f64 * sim.time as f64 / secs / 1e6,
+        // Toutes les grilles : n_k mailles, 2^niveau pas par pas de la veine.
+        sim.grid_cells().iter().map(|&(n, d)| (n as f64) * (1u64 << d) as f64).sum::<f64>() * sim.time as f64 / secs / 1e6,
         t0.elapsed().as_secs_f64(),
         t0.elapsed().as_secs_f64() - secs
     );

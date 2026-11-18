@@ -1,0 +1,13 @@
+cx_echange 6.0516919055e-1
+cz_echange -4.4679572755e-3
+cx_dernier 5.7592680359e-1
+cy_dernier -5.6212356995e-3
+cz_dernier -6.2280227837e-3
+champ_somme_ux 1.7667832226e5
+champ_carres_ux 1.7697277658e4
+champ_somme_uy 5.6669214373e-1
+champ_carres_uy 3.7451577596e0
+champ_somme_uz 1.1441547728e0
+champ_carres_uz 3.7450165239e0
+champ_somme_rho 1.7673528749e6
+champ_carres_rho 1.7673912066e6

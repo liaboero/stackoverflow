@@ -57,6 +57,59 @@ fn opp3(i: usize) -> usize {
 }
 
 pub(crate) const SOLID: u32 = 0xffff_ffff;
+/// Maille d'une grille parente recouverte par une grille fine (voir
+/// `Gpu3D::mark_covered`).
+pub(crate) const COVERED: u32 = 0xffff_fffd;
+
+/// Mise au point (SOUFFLERIE_TEMPS=1) : durée d'une étape de la mise en place.
+pub(crate) fn temps(label: &str, t0: std::time::Instant) {
+    if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
+        eprintln!("  [mise en place] {label} : {:.3} s", t0.elapsed().as_secs_f64());
+    }
+}
+
+/// Module de calcul sans les contrôles que wgpu ajoute par défaut au code
+/// engendré : bornes de chaque accès aux tampons (index ramené dans le
+/// tableau), divisions entières protégées (fonctions d'enrobage pour chaque
+/// `%` et `/`) et compteurs de boucle. Les shaders de la soufflerie
+/// n'indexent que dans leurs tableaux (index calculés sur les dimensions des
+/// grilles) et ne divisent que par des dimensions non nulles : mêmes
+/// résultats, au bit près, pour bien moins d'instructions par maille.
+/// SOUFFLERIE_CONTROLES=1 rétablit les contrôles (diagnostic).
+pub(crate) fn compute_module(device: &wgpu::Device, label: &str, code: String) -> wgpu::ShaderModule {
+    compute_module_raw(device, label, wgsl_hook(label, code))
+}
+
+/// Mise au point : SOUFFLERIE_WGSL=dossier écrit chaque shader dans
+/// `dossier/label.wgsl`, ou le relit s'il y est déjà (essais sans recompiler).
+/// Collision : code d'avant la spécialisation par grille.
+fn wgsl_hook(label: &str, code: String) -> String {
+    let mut code = code;
+    if let Ok(dir) = std::env::var("SOUFFLERIE_WGSL") {
+        let path = std::path::Path::new(&dir).join(format!("{label}.wgsl"));
+        match std::fs::read_to_string(&path) {
+            Ok(c) => code = c,
+            Err(_) => {
+                let _ = std::fs::write(&path, &code);
+            }
+        }
+    }
+    code
+}
+
+fn compute_module_raw(device: &wgpu::Device, label: &str, code: String) -> wgpu::ShaderModule {
+    let desc = wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(code.into()),
+    };
+    if std::env::var("SOUFFLERIE_CONTROLES").is_ok_and(|v| v == "1") {
+        return device.create_shader_module(desc);
+    }
+    // SAFETY : voir ci-dessus ; les index et diviseurs sont valides par
+    // construction (dimensions des grilles, tables de blocs et listes
+    // calculées sur le processeur).
+    unsafe { device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked()) }
+}
 
 /// Littéral flottant WGSL.
 pub(crate) fn f(v: f64) -> String {
@@ -186,15 +239,6 @@ const NU_TILDE_MAX = 0.15;
 
 @group(0) @binding(9) var<storage, read> blk: array<u32>;
 SPARSE_FNS
-fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
-  let ny = i32(P.ny);
-  let nz = i32(P.nz);
-  let yy = (yi + ny) % ny;
-  var zz = (zi + nz) % nz;
-  if ((P.rows & 2u) != 0u) { zz = clamp(zi, 0, nz - 1); }
-  let xx = clamp(xi, 0, i32(P.nx) - 1);
-  return id_of(u32(xx), u32(yy), u32(zz));
-}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -205,6 +249,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let y = pp.y;
   let z = pp.z;
   let wk0 = wall[idx];
+  // Maille recouverte par une grille fine : ν̃ recopié de celle-ci après ses pas.
+  if (wk0 == 0xfffffffdu) { return; }
   let nu = P.nu;
   var out: f32;
   if (wk0 == 0xffffffffu) {
@@ -224,12 +270,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
   } else {
-    let ixm = cell(x - 1, y, z);
-    let ixp = cell(x + 1, y, z);
-    let iym = cell(x, y - 1, z);
-    let iyp = cell(x, y + 1, z);
-    let izm = cell(x, y, z - 1);
-    let izp = cell(x, y, z + 1);
+    // Voisins (comme `cell`, sans modulo ; ici 0 < x < nx − 1) : y
+    // périodique, z périodique ou borné (sol).
+    let xc = u32(x);
+    let yc = u32(y);
+    let zc = u32(z);
+    let ground = (P.rows & 2u) != 0u;
+    let ym = select(yc - 1u, P.ny - 1u, y == 0);
+    let yp = select(yc + 1u, 0u, yc + 1u == P.ny);
+    let zm = select(zc - 1u, select(P.nz - 1u, 0u, ground), z == 0);
+    let zp = select(zc + 1u, select(0u, zc, ground), zc + 1u == P.nz);
+    let ixm = id_of(xc - 1u, yc, zc);
+    let ixp = id_of(xc + 1u, yc, zc);
+    let iym = id_of(xc, ym, zc);
+    let iyp = id_of(xc, yp, zc);
+    let izm = id_of(xc, yc, zm);
+    let izp = id_of(xc, yc, zp);
     let v = nutIn[idx];
     let vxm = nutIn[ixm];
     let vxp = nutIn[ixp];
@@ -284,6 +340,164 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ";
 
+/// Loi de paroi (Spalart–Allmaras) : une passe sur les seules mailles
+/// pariétales, avant chaque pas de collision. Tout ce qu'elle lit vient du
+/// pas précédent (vitesse des nœuds, u_τ et glissement relaxé) : la
+/// collision lisait autrefois la vitesse des nœuds voisins pendant que la
+/// même passe la réécrivait (relevé à WM_H), tantôt au pas précédent,
+/// tantôt au pas courant selon l'ordre d'exécution des groupes ; résultats
+/// non reproductibles d'un calcul à l'autre (≈ 10⁻³ sur les efforts
+/// instantanés en régime transitoire). Elle écrit u_τ, le glissement relaxé
+/// et la viscosité de la couche pariétale (< 0 : pas de loi de paroi), que
+/// la collision relit ; le Newton de Spalding n'y fait plus attendre les
+/// autres fils des groupes de la collision.
+const WALL3_WGSL: &str = "
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> wall: array<u32>;
+@group(0) @binding(3) var<storage, read> wallGeo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> utau: array<f32>;
+@group(0) @binding(5) var<storage, read> wdist: array<f32>;
+@group(0) @binding(6) var<storage, read> slab: array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read> blk: array<u32>;
+// Rang de chaque maille pariétale (dans l'ordre de leur numéro).
+@group(0) @binding(8) var<storage, read> wcell: array<u32>;
+SPARSE_FNS
+LAM_FNS
+SA_FNS
+fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
+  let ny = i32(P.ny);
+  let nz = i32(P.nz);
+  let yy = (yi + ny) % ny;
+  let zz = (zi + nz) % nz;
+  let xx = clamp(xi, 0, i32(P.nx) - 1);
+  return id_of(u32(xx), u32(yy), u32(zz));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let wk = gid.x + gid.y * nwg.x * 64u;
+  if (wk >= arrayLength(&wcell)) { return; }
+  let idx = wcell[wk];
+  let hasWall = true;
+  let pp = pos_of(idx);
+  let x = pp.x;
+  let y = pp.y;
+  let z = pp.z;
+  // Loi de paroi : glissement tangentiel tiré de la vitesse du pas précédent.
+  var uw = vec3<f32>(0.0);
+  // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
+  var nuw = -1.0;
+  if (P.sa == 1u && hasWall) {
+    let gw0 = wallGeo[wk];
+    // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
+    let edge = gw0.w < 0.0;
+    let gw = vec4<f32>(gw0.xyz, abs(gw0.w));
+    let u0 = macroBuf[idx].xyz;
+    // Vitesse tangentielle du nœud et sa distance à la paroi.
+    let tv0 = u0 - dot(u0, gw.xyz) * gw.xyz;
+    let ut0 = length(tv0);
+    let y0 = max(0.1, gw.w);
+    var ut = ut0;
+    var yw = y0;
+    {
+      // Loi de paroi alimentée à une hauteur fixe h = WM_H au-dessus du pied
+      // de la normale (Kawai et Larsson 2012) : au premier nœud, l'erreur
+      // numérique et de sous-maille décale le profil logarithmique, et la
+      // distance du nœud à la paroi saute d'une maille quand la paroi
+      // traverse une rangée de nœuds. Repli sur le nœud si un voisin de
+      // l'interpolation est solide, ou si le point relevé n'est pas à la
+      // hauteur h de la paroi la plus proche (bord mince, coin : le relevé
+      // tomberait près d'une autre paroi).
+      let ps = vec3<f32>(f32(x), f32(y), f32(z)) + (WM_H - gw.w) * gw.xyz;
+      let i0 = vec3<i32>(floor(ps));
+      let fr = ps - vec3<f32>(i0);
+      var us3 = vec3<f32>(0.0);
+      var ds = 0.0;
+      var ok = true;
+      for (var c = 0u; c < 8u; c++) {
+        let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
+        let q3 = i0 + o;
+        if (q3.x < 0 || q3.x >= i32(P.nx) || q3.z < 0 || q3.z >= i32(P.nz)) { ok = false; break; }
+        let ci = cell(q3.x, q3.y, q3.z);
+        if (wall[ci] >= 0xfffffffeu) { ok = false; break; }
+        let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
+        us3 += wv.x * wv.y * wv.z * macroBuf[ci].xyz;
+        ds += wv.x * wv.y * wv.z * wdist[ci];
+      }
+      if (ok && abs(ds - WM_H) < 0.5) {
+        ut = length(us3 - dot(us3, gw.xyz) * gw.xyz);
+        yw = WM_H;
+      }
+    }
+    var ut2 = spalding_utau(ut, yw);
+    if (P.xtr > 0.0) {
+      // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
+      let xl = lam_xl(x, y);
+      if (xl.y > 0.0 && xl.x < P.xtr * xl.y) {
+        let rex = max(1.0, P.uIn * max(xl.x, 0.5) / P.nu);
+        let cf = min(0.02, 0.664 / sqrt(rex));
+        ut2 = ut * sqrt(0.5 * cf);
+      }
+    }
+    utau[4u * wk] = ut2;
+    // Couche pariétale [0, h] de viscosité uniforme ν_t = κ u_τ h (celle de
+    // la loi de paroi à la hauteur de raccord) : profil linéaire de pente
+    // τ_p / (ν + ν_t), et la paroi glisse à la vitesse que ce profil donne en
+    // y = 0 depuis le nœud, u_n − pente · y_n. La vitesse extrapolée à la
+    // paroi ne dépend plus de la place du nœud dans la maille (avec
+    // u_n − u_τ²y_n/(ν + κu_τy_n), elle sautait d'environ u_τ ln(y)/κ d'un
+    // nœud à l'autre quand la paroi traverse une rangée : marches de
+    // pression, volets Gurney parasites, portance qui croît en affinant).
+    nuw = KAPPA * ut2 * yw;
+    // Diagnostic : viscosité de la couche pariétale κ u_τ y_n (distance du nœud).
+    if ((P.essai & 256u) != 0u) { nuw = KAPPA * ut2 * y0; }
+    if ((P.essai & 1024u) != 0u) { nuw = min(nuw, P.essaiNu); }
+    var usv = vec3<f32>(0.0);
+    if (edge) {
+      // Arête vive : l'écoulement y décolle et la loi de paroi (couche
+      // limite attachée le long d'une face) ne s'applique pas ; sans elle,
+      // la paroi presque glissante laisse croître la vitesse de contournement
+      // de l'arête (singulière en non visqueux) jusqu'à la divergence.
+      nuw = -1.0;
+    } else if (ut0 >= 1e-12) {
+      // Profil monotone entre le nœud et la hauteur h : le profil de la
+      // couche pariétale, évalué à la hauteur du nœud, ne dépasse pas la
+      // vitesse relevée à h (u_s ≤ u_h − pente · y_n). La borne arrête un
+      // nœud qui s'emballerait (un nœud presque à la paroi glisse presque
+      // librement et rien d'autre ne le retient). Elle ne suppose pas que la
+      // couche pariétale linéaire atteint h : quand la couche limite est plus
+      // mince que h (bord d'attaque, et partout aux résolutions courantes),
+      // ou sur une paroi convexe où la vitesse potentielle décroît en
+      // s'éloignant de la paroi, la borne u_h − pente · h freinait le premier
+      // nœud sans frottement correspondant et épaississait la couche lente
+      // (plaque plane, `plaque3d` : θ −12 %, perte de pression totale du nez
+      // −30 %).
+      var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
+      // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
+      if ((P.essai & 4096u) != 0u) { us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }
+      if ((P.essai & 8192u) != 0u) { us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw))); }
+      usv = tv0 * (us / ut0);
+    }
+    if ((P.essai & 16u) != 0u || ((P.essai & 512u) != 0u && abs(gw.z) < 0.999)) {
+      // Diagnostic : glissement libre (paroi non visqueuse).
+      usv = tv0;
+      nuw = 0.0;
+    }
+    // Relaxation sur une dizaine de pas : une paroi qui suit à chaque pas la
+    // vitesse de son propre nœud (glissement presque libre près de la paroi)
+    // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
+    // 0,02 : mêmes efforts à 0,3 % près).
+    let prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+    uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
+    utau[4u * wk + 1u] = uw.x;
+    utau[4u * wk + 2u] = uw.y;
+    utau[4u * wk + 3u] = uw.z;
+  }
+  utau[arrayLength(&utau) / 6u * 5u + wk] = nuw;
+}
+";
+
 /// Sol (bit 2 de `rows`) : population venant de sous le plancher (z = −½),
 /// renvoyée par une paroi qui défile à la vitesse amont ; venant d'au-dessus
 /// du plafond, réfléchie (paroi glissante).
@@ -310,7 +524,16 @@ fn ground_code(i: usize) -> String {
     }
 }
 
-fn wgsl_step(fp16: bool) -> String {
+/// Collision. `walls` : passe des seules mailles pariétales (liste `wcell`),
+/// avec les liens de paroi ; sinon passe des autres mailles, sans le code
+/// des liens, recopié dans chacune des 18 directions, qui demandait des
+/// registres à toutes les mailles (−24 % de durée sans lui).
+/// Taille des groupes de la collision (cœur).
+pub(crate) fn step_wg() -> u32 {
+    std::env::var("SOUFFLERIE_WG").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
+}
+
+fn wgsl_step(fp16: bool, walls: bool) -> String {
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
     let load = if fp16 {
@@ -349,22 +572,20 @@ fn wgsl_step(fp16: bool) -> String {
     for i in 1..19 {
         let [cx, cy, cz] = C3[i];
         let j = opp3(i);
-        let _ = write!(
-            pull,
-            "  {{
-    var v: f32;
-    var q = 0.0;
-    if (hasWall) {{ q = qbuf[wk * 18u + {im1}u]; }}
+        let wallpart = if walls {
+            format!(
+                "    var q = 0.0;
+    q = qa[{im1}];
     if (q > 0.0) {{
       let fj = pop({j}u, idx);
-      let qo = qbuf[wk * 18u + {jm1}u];
+      let qo = qa[{jm1}];
       // Paroi mobile (glissement de la loi de paroi) : 6 w_i ρ (c_i · u_w),
       // u_w ramenée dans le plan de la face que touche le lien (aux arêtes,
       // la normale de la maille n'est celle d'aucune face : sa composante
       // normale ferait souffler la paroi).
       var uwl = uw;
       if (P.sa == 1u) {{
-        let nf = oct_decode(qbuf[arrayLength(&qbuf) / 2u + wk * 18u + {im1}u]);
+        let nf = oct_decode(ca[{im1}]);
         // Transpiration : vitesse normale de la face (déplacement de la
         // couche limite) ; la paroi mobile de Bouzidi injecte ce débit.
         uwl = uw - dot(uw, nf) * nf + vn * nf;
@@ -380,33 +601,71 @@ fn wgsl_step(fp16: bool) -> String {
       }}
       let mom = fj + v + {w2};
       fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uwl * (fj - v);
-    }}{ground} else if (x - {cx} < 0) {{
+",
+                im1 = i - 1,
+                jm1 = j - 1,
+                i = i,
+                j = j,
+                cx = cx,
+                cy = cy,
+                cz = cz,
+                w2 = f(2.0 * w3(i)),
+                w6 = f(6.0 * w3(i)),
+                ccx = f(cx as f64),
+                ccy = f(cy as f64),
+                ccz = f(cz as f64),
+                mcx = f(-cx as f64),
+                mcy = f(-cy as f64),
+                mcz = f(-cz as f64),
+            )
+        } else {
+            "    if (false) {\n".to_string()
+        };
+        let _ = write!(
+            pull,
+            "  {{
+    var v: f32;
+{wallpart}    }}{ground} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
       v = pop({i}u, idx);
     }} else {{
-      v = pop({i}u, cell(x - {cx}, y - {cy}, z - {cz}));
+      v = pop({i}u, nbr(u32(x - {cx}), {yv}, {zv}, r_{yv}_{zv}));
     }}
     g[{i}] = v;
   }}
 ",
-            im1 = i - 1,
-            jm1 = j - 1,
+            yv = ["ym", "yc", "yp"][(1 - cy) as usize],
+            zv = ["zm", "zc", "zp"][(1 - cz) as usize],
             ground = ground_code(i),
-            w2 = f(2.0 * w3(i)),
-            w6 = f(6.0 * w3(i)),
-            ccx = f(cx as f64),
-            ccy = f(cy as f64),
-            ccz = f(cz as f64),
-            mcx = f(-cx as f64),
-            mcy = f(-cy as f64),
-            mcz = f(-cz as f64),
         );
     }
     let dotc = |i: usize, a: usize, b: usize| C3[i][a] * C3[i][b];
+    // Collision par paires de directions opposées (i, −i) : partie paire
+    // (équilibre en ρ, u², et partie hors équilibre d'ordre 2) et impaire
+    // (terme en c·u, ordre 3 de Hermite, force) calculées une fois pour les
+    // deux, f_i = paire + impaire, f_−i = paire − impaire. Même formule ;
+    // l'arrondi change (≈ 10⁻⁷ par pas), collision 10 % plus rapide.
     let mut coll = String::new();
+    let mut absorb_code = String::new();
     for i in 0..19 {
+        let j = opp3(i);
         let [cx, cy, cz] = C3[i];
+        let (cxf, cyf, czf) = (cx as f64, cy as f64, cz as f64);
+        let w = w3(i);
+        let _ = write!(
+            absorb_code,
+            "    {{
+      let ci = {cxs} * P.uIn;
+      o[{i}] -= sig * (o[{i}] - {wf} * (3.0 * ci + 4.5 * ci * ci - 1.5 * P.uIn * P.uIn));
+    }}
+",
+            wf = f(w),
+            cxs = f(cxf),
+        );
+        if j < i {
+            continue;
+        }
         let comps: Vec<String> = [(cx, "u.x"), (cy, "u.y"), (cz, "u.z")]
             .iter()
             .filter(|(c, _)| *c != 0)
@@ -417,17 +676,29 @@ fn wgsl_step(fp16: bool) -> String {
         } else {
             comps.join(" + ").replace("+ -", "- ")
         };
-        let (cxf, cyf, czf) = (cx as f64, cy as f64, cz as f64);
-        let qp = format!(
-            "{} * pxx + {} * pyy + {} * pzz + {} * pxy + {} * pxz + {} * pyz",
-            f(cxf * cxf - 1.0 / 3.0),
-            f(cyf * cyf - 1.0 / 3.0),
-            f(czf * czf - 1.0 / 3.0),
-            f(2.0 * cxf * cyf),
-            f(2.0 * cxf * czf),
-            f(2.0 * cyf * czf)
-        );
-        let w = w3(i);
+        // Termes de coefficient nul omis (0 · x n'est pas simplifiable en IEEE).
+        let qp = [
+            (cxf * cxf - 1.0 / 3.0, "pxx"),
+            (cyf * cyf - 1.0 / 3.0, "pyy"),
+            (czf * czf - 1.0 / 3.0, "pzz"),
+            (2.0 * cxf * cyf, "pxy"),
+            (2.0 * cxf * czf, "pxz"),
+            (2.0 * cyf * czf, "pyz"),
+        ]
+        .iter()
+        .filter(|(c, _)| *c != 0.0)
+        .map(|(c, v)| format!("{} * {v}", f(*c)))
+        .collect::<Vec<_>>()
+        .join(" + ");
+        if j == i {
+            let _ = writeln!(coll, "  o[{i}] = {wf} * rho * (1.0 - usq) + k * {w45} * ({qp}) - {wf};", wf = f(w), w45 = f(4.5 * w));
+            continue;
+        }
+        let accel = match cx {
+            0 => String::new(),
+            1 => format!(" + {} * rho * (P.accel)", f(3.0 * w)),
+            _ => format!(" + {} * rho * (-P.accel)", f(3.0 * w)),
+        };
         // Hermite d'ordre 3 (composantes portées par D3Q19, sans xyz).
         let h = |a: f64, b: f64| a * (b * b - 1.0 / 3.0);
         let h3: Vec<String> = [
@@ -447,20 +718,16 @@ fn wgsl_step(fp16: bool) -> String {
             coll,
             "  {{
     let cu = {cu};
-    let feq = {wf} * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq);
-    let fnew = feq + k * {w45} * ({qp}) + {w135} * ({h3}) + {w3f} * rho * ({cxs} * P.accel);
-    o[{i}] = fnew - {wf};
-    if (sig > 0.0) {{
-      let ci = {cxs} * P.uIn;
-      o[{i}] -= sig * (o[{i}] - {wf} * (3.0 * ci + 4.5 * ci * ci - 1.5 * P.uIn * P.uIn));
-    }}
+    let ev = {wf} * rho * (1.0 + 4.5 * cu * cu - usq) + k * {w45} * ({qp});
+    let od = {w3f} * rho * cu + {w135} * ({h3}){accel};
+    o[{i}] = ev + od - {wf};
+    o[{j}] = ev - od - {wf};
   }}
 ",
             wf = f(w),
+            w3f = f(3.0 * w),
             w45 = f(4.5 * w),
             w135 = f(13.5 * w),
-            w3f = f(3.0 * w),
-            cxs = f(cxf),
         );
     }
     let out: String = if fp16 {
@@ -496,12 +763,15 @@ fn wgsl_step(fp16: bool) -> String {
 // du nœud à la paroi (x, y, z, d), et u_τ écrit pour la passe de transport.
 @group(0) @binding(9) var<storage, read> nut: array<f32>;
 @group(0) @binding(10) var<storage, read> wallGeo: array<vec4<f32>>;
-@group(0) @binding(11) var<storage, read_write> utau: array<f32>;
+@group(0) @binding(11) var<storage, read> utau: array<f32>;
 // Distance à la paroi de chaque maille (amortissement de la sous-maille).
 @group(0) @binding(12) var<storage, read> wdist: array<f32>;
 // Étendue en x du corps par tranche y (zone laminaire).
 @group(0) @binding(13) var<storage, read> slab: array<vec2<f32>>;
 @group(0) @binding(14) var<storage, read> blk: array<u32>;
+// Rang de chaque maille pariétale (passe des mailles pariétales), puis,
+// sur une grille creuse, de chaque maille à calculer du cœur.
+@group(0) @binding(15) var<storage, read> wcell: array<u32>;
 {SPARSE_FNS}
 {lam_fns}
 {sa_fns}
@@ -515,6 +785,13 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {{
   let zz = (zi + nz) % nz;
   let xx = clamp(xi, 0, i32(P.nx) - 1);
   return id_of(u32(xx), u32(yy), u32(zz));
+}}
+
+// Rang d'un voisin : grille boîte, x plus le début de sa rangée ; stockage
+// par blocs, table des blocs.
+fn nbr(xx: u32, yy: u32, zz: u32, row: u32) -> u32 {{
+  if (P.bnx == 0u) {{ return xx + row; }}
+  return id_of(xx, yy, zz);
 }}
 
 fn oct_decode(k: f32) -> vec3<f32> {{
@@ -561,138 +838,62 @@ fn feqIn(i: u32) -> f32 {{
   return w * (3.0 * cu + 4.5 * cu * cu - 1.5 * P.uIn * P.uIn);
 }}
 
-@compute @workgroup_size(64)
+@compute @workgroup_size({wg})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
-  let idx = gid.x + gid.y * nwg.x * 64u;
-  if (idx >= P.N) {{ return; }}
+{head}
   let wk0 = wall[idx];
-  // Solide, ou maille fantôme d'une grille fine (remplie par refine3d).
-  if (wk0 >= 0xfffffffeu) {{ return; }}
+  // Solide, maille fantôme d'une grille fine (remplie par refine3d), ou
+  // maille recouverte (recopiée de la grille fine, voir `mark_covered`).
+  if (wk0 >= 0xfffffffdu) {{ return; }}
+{skip}
   let wk = select(wk0 - 1u, 0xffffffffu, wk0 == 0u);
   let hasWall = wk != 0xffffffffu;
   let pp = pos_of(idx);
   let x = pp.x;
   let y = pp.y;
   let z = pp.z;
+  // Rangées voisines, bords y et z périodiques (comme `cell`, sans modulo).
+  let yc = u32(y);
+  let zc = u32(z);
+  let ym = select(yc - 1u, P.ny - 1u, y == 0);
+  let yp = select(yc + 1u, 0u, yc + 1u == P.ny);
+  let zm = select(zc - 1u, P.nz - 1u, z == 0);
+  let zp = select(zc + 1u, 0u, zc + 1u == P.nz);
+  // Grille boîte : début de chaque rangée voisine (rang = x + début).
+  let sxy = P.nx * P.ny;
+  let oym = ym * P.nx;
+  let oyc = yc * P.nx;
+  let oyp = yp * P.nx;
+  let ozm = zm * sxy;
+  let ozc = zc * sxy;
+  let ozp = zp * sxy;
+  let r_ym_zm = oym + ozm;
+  let r_ym_zc = oym + ozc;
+  let r_ym_zp = oym + ozp;
+  let r_yc_zm = oyc + ozm;
+  let r_yc_zc = oyc + ozc;
+  let r_yc_zp = oyc + ozp;
+  let r_yp_zm = oyp + ozm;
+  let r_yp_zc = oyp + ozc;
+  let r_yp_zp = oyp + ozp;
   var g: array<f32, 19>;
   var fsum = vec3<f32>(0.0);
-  // Loi de paroi : glissement tangentiel tiré de la vitesse du pas précédent.
+  // Loi de paroi (passe `wall3d`, juste avant ce pas, sur le champ du pas
+  // précédent) : glissement de la paroi et viscosité de la couche pariétale.
   var uw = vec3<f32>(0.0);
   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
   var nuw = -1.0;
   if (P.sa == 1u && hasWall) {{
-    let gw0 = wallGeo[wk];
-    // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
-    let edge = gw0.w < 0.0;
-    let gw = vec4<f32>(gw0.xyz, abs(gw0.w));
-    let u0 = macroBuf[idx].xyz;
-    // Vitesse tangentielle du nœud et sa distance à la paroi.
-    let tv0 = u0 - dot(u0, gw.xyz) * gw.xyz;
-    let ut0 = length(tv0);
-    let y0 = max(0.1, gw.w);
-    var ut = ut0;
-    var yw = y0;
-    {{
-      // Loi de paroi alimentée à une hauteur fixe h = WM_H au-dessus du pied
-      // de la normale (Kawai et Larsson 2012) : au premier nœud, l'erreur
-      // numérique et de sous-maille décale le profil logarithmique, et la
-      // distance du nœud à la paroi saute d'une maille quand la paroi
-      // traverse une rangée de nœuds. Repli sur le nœud si un voisin de
-      // l'interpolation est solide, ou si le point relevé n'est pas à la
-      // hauteur h de la paroi la plus proche (bord mince, coin : le relevé
-      // tomberait près d'une autre paroi).
-      let ps = vec3<f32>(f32(x), f32(y), f32(z)) + (WM_H - gw.w) * gw.xyz;
-      let i0 = vec3<i32>(floor(ps));
-      let fr = ps - vec3<f32>(i0);
-      var us3 = vec3<f32>(0.0);
-      var ds = 0.0;
-      var ok = true;
-      for (var c = 0u; c < 8u; c++) {{
-        let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
-        let q3 = i0 + o;
-        if (q3.x < 0 || q3.x >= i32(P.nx) || q3.z < 0 || q3.z >= i32(P.nz)) {{ ok = false; break; }}
-        let ci = cell(q3.x, q3.y, q3.z);
-        if (wall[ci] >= 0xfffffffeu) {{ ok = false; break; }}
-        let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
-        us3 += wv.x * wv.y * wv.z * macroBuf[ci].xyz;
-        ds += wv.x * wv.y * wv.z * wdist[ci];
-      }}
-      if (ok && abs(ds - WM_H) < 0.5) {{
-        ut = length(us3 - dot(us3, gw.xyz) * gw.xyz);
-        yw = WM_H;
-      }}
-    }}
-    var ut2 = spalding_utau(ut, yw);
-    if (P.xtr > 0.0) {{
-      // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
-      let xl = lam_xl(x, y);
-      if (xl.y > 0.0 && xl.x < P.xtr * xl.y) {{
-        let rex = max(1.0, P.uIn * max(xl.x, 0.5) / P.nu);
-        let cf = min(0.02, 0.664 / sqrt(rex));
-        ut2 = ut * sqrt(0.5 * cf);
-      }}
-    }}
-    utau[4u * wk] = ut2;
-    // Couche pariétale [0, h] de viscosité uniforme ν_t = κ u_τ h (celle de
-    // la loi de paroi à la hauteur de raccord) : profil linéaire de pente
-    // τ_p / (ν + ν_t), et la paroi glisse à la vitesse que ce profil donne en
-    // y = 0 depuis le nœud, u_n − pente · y_n. La vitesse extrapolée à la
-    // paroi ne dépend plus de la place du nœud dans la maille (avec
-    // u_n − u_τ²y_n/(ν + κu_τy_n), elle sautait d'environ u_τ ln(y)/κ d'un
-    // nœud à l'autre quand la paroi traverse une rangée : marches de
-    // pression, volets Gurney parasites, portance qui croît en affinant).
-    nuw = KAPPA * ut2 * yw;
-    // Diagnostic : viscosité de la couche pariétale κ u_τ y_n (distance du nœud).
-    if ((P.essai & 256u) != 0u) {{ nuw = KAPPA * ut2 * y0; }}
-    if ((P.essai & 1024u) != 0u) {{ nuw = min(nuw, P.essaiNu); }}
-    var usv = vec3<f32>(0.0);
-    if (edge) {{
-      // Arête vive : l'écoulement y décolle et la loi de paroi (couche
-      // limite attachée le long d'une face) ne s'applique pas ; sans elle,
-      // la paroi presque glissante laisse croître la vitesse de contournement
-      // de l'arête (singulière en non visqueux) jusqu'à la divergence.
-      nuw = -1.0;
-    }} else if (ut0 >= 1e-12) {{
-      // Profil monotone entre le nœud et la hauteur h : le profil de la
-      // couche pariétale, évalué à la hauteur du nœud, ne dépasse pas la
-      // vitesse relevée à h (u_s ≤ u_h − pente · y_n). La borne arrête un
-      // nœud qui s'emballerait (un nœud presque à la paroi glisse presque
-      // librement et rien d'autre ne le retient). Elle ne suppose pas que la
-      // couche pariétale linéaire atteint h : quand la couche limite est plus
-      // mince que h (bord d'attaque, et partout aux résolutions courantes),
-      // ou sur une paroi convexe où la vitesse potentielle décroît en
-      // s'éloignant de la paroi, la borne u_h − pente · h freinait le premier
-      // nœud sans frottement correspondant et épaississait la couche lente
-      // (plaque plane, `plaque3d` : θ −12 %, perte de pression totale du nez
-      // −30 %).
-      var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
-      // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
-      if ((P.essai & 4096u) != 0u) {{ us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }}
-      if ((P.essai & 8192u) != 0u) {{ us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw))); }}
-      usv = tv0 * (us / ut0);
-    }}
-    if ((P.essai & 16u) != 0u || ((P.essai & 512u) != 0u && abs(gw.z) < 0.999)) {{
-      // Diagnostic : glissement libre (paroi non visqueuse).
-      usv = tv0;
-      nuw = 0.0;
-    }}
-    // Relaxation sur une dizaine de pas : une paroi qui suit à chaque pas la
-    // vitesse de son propre nœud (glissement presque libre près de la paroi)
-    // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
-    // 0,02 : mêmes efforts à 0,3 % près).
-    let prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
-    uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
-    utau[4u * wk + 1u] = uw.x;
-    utau[4u * wk + 2u] = uw.y;
-    utau[4u * wk + 3u] = uw.z;
+    uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+    nuw = utau[arrayLength(&utau) / 6u * 5u + wk];
   }}
   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
   var vn = 0.0;
   if (P.sa == 1u && hasWall) {{
-    vn = utau[arrayLength(&utau) / 5u * 4u + wk];
+    vn = utau[arrayLength(&utau) / 6u * 4u + wk];
   }}
-  g[0] = pop(0u, idx);
+{prefetch}  g[0] = pop(0u, idx);
 {pull}
   var fv: array<f32, 19>;
   {fv}
@@ -755,6 +956,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let sig = absorb(x, y, z);
   var o: array<f32, 19>;
 {coll}
+  // Bandes absorbantes : rappel vers l'écoulement amont près des bords.
+  if (sig > 0.0) {{
+{absorb_code}  }}
 {out}
   if (hasWall) {{
     force[wk] += vec4<f32>(fsum, 0.0);
@@ -766,6 +970,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 ",
         sa_fns = SA_FNS,
         lam_fns = LAM_FNS,
+        head = if walls {
+            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];"
+        } else {
+            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }"
+        },
+        wg = if walls { 64 } else { step_wg() },
+        // Mailles pariétales : fractions q et codes des normales des 18 liens
+        // lus d'un coup (contigus), au lieu d'un par direction derrière ses
+        // branches (−27 % sur la collision pariétale).
+        prefetch = if walls {
+            format!(
+                "  let qa = array<f32, 18>({});
+  let ch = arrayLength(&qbuf) / 2u + wk * 18u;
+  let ca = array<f32, 18>({});
+",
+                (0..18).map(|k| format!("qbuf[wk * 18u + {k}u]")).collect::<Vec<_>>().join(", "),
+                (0..18).map(|k| format!("qbuf[ch + {k}u]")).collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            String::new()
+        },
+        skip = if walls { "" } else { "  // Maille pariétale : passe à part.\n  if (wk0 != 0u) { return; }" },
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
         jy = sum_expr(|i| C3[i][1]),
@@ -1475,6 +1701,8 @@ pub struct Gpu3D {
     _utau: wgpu::Buffer,
     pub(crate) sa_pipe: wgpu::ComputePipeline,
     pub(crate) sa_bind: Vec<wgpu::BindGroup>,
+    /// Loi de paroi : passe sur les mailles pariétales (None sans SA).
+    pub(crate) wall_pass: Option<WallPass>,
     /// ν̃ initial (3ν dans le fluide, 0 dans le corps), pour `reset`.
     nut0: Vec<f32>,
     force: wgpu::Buffer,
@@ -1482,6 +1710,18 @@ pub struct Gpu3D {
     pub(crate) params: wgpu::Buffer,
     pub(crate) macro_buf: wgpu::Buffer,
     pub(crate) step_pipe: wgpu::ComputePipeline,
+    /// Collision des mailles pariétales (None sans paroi), et ses groupes.
+    pub(crate) step_wall_pipe: Option<wgpu::ComputePipeline>,
+    /// Disposition des pipelines de collision, et (sous-maille, bords,
+    /// diagnostics) pour lesquels ils sont spécialisés.
+    step_layout: wgpu::PipelineLayout,
+    spec: [u32; 3],
+    pub(crate) wall_disp: (u32, u32),
+    pub(crate) disp_step: (u32, u32),
+    /// Grille creuse : mailles du cœur de la collision (liste), 0 : toutes.
+    n_active: u32,
+    _step_list: wgpu::Buffer,
+    _wcell: wgpu::Buffer,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
     derive_pipe: wgpu::ComputePipeline,
@@ -1498,8 +1738,8 @@ pub struct Gpu3D {
     pub(crate) force_steps: u64,
     pub wall_count: usize,
     pub solid_count: usize,
-    /// Mailles solides (pour l'affichage).
-    solid: Vec<bool>,
+    /// Mailles solides (affichage, pochoirs des raccords).
+    pub(crate) solid: Vec<bool>,
     /// Le GPU ne répond plus (lecture impossible, pilote réinitialisé).
     pub lost: bool,
     /// Grille fine imbriquée : enveloppe de mailles fantômes, ni entrée, ni
@@ -1542,6 +1782,101 @@ pub struct Gpu3D {
     surface: Option<std::sync::Arc<crate::stl::MeshBody>>,
     /// Décambrage visqueux par transpiration (voir `enable_transpiration`).
     transp: Option<Box<Transpiration>>,
+}
+
+/// Passe de la loi de paroi (voir `WALL3_WGSL`).
+pub(crate) struct WallPass {
+    pipe: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    disp: (u32, u32),
+}
+
+/// Code de la collision où les paramètres fixes d'une grille deviennent des
+/// constantes (SA, sous-maille, type de bords, diagnostics, stockage) : le
+/// compilateur retire leurs branches (collision 4 % plus rapide).
+fn specialize(code: &str, c: [u32; 7]) -> String {
+    let body = code
+        .replace("P.lesA", "P.\u{1}A")
+        .replace("P.essaiNu", "P.\u{2}Nu")
+        .replace("P.sa", "SA_C")
+        .replace("P.les", "LES_C")
+        .replace("P.rows", "ROWS_C")
+        .replace("P.essai", "ESSAI_C")
+        .replace("P.bnx", "BNX_C")
+        .replace("P.\u{1}A", "P.lesA")
+        .replace("P.\u{2}Nu", "P.essaiNu");
+    format!(
+        "const SA_C = {}u;\nconst LES_C = {}u;\nconst ROWS_C = {}u;\nconst ESSAI_C = {}u;\nconst BNX_C = {}u;\nconst WALLN_C = {}u;\nconst ACTN_C = {}u;\n{body}",
+        c[0], c[1], c[2], c[3], c[4], c[5], c[6]
+    )
+}
+
+/// Pipelines de la collision (cœur, et mailles pariétales s'il y en a) pour
+/// les constantes `c` (voir `specialize`).
+fn step_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    fp16: bool,
+    walls: bool,
+    c: [u32; 7],
+) -> (wgpu::ComputePipeline, Option<wgpu::ComputePipeline>) {
+    let mk = |label: &str, code: String| {
+        let module = compute_module_raw(device, label, specialize(&wgsl_hook(label, code), c));
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    let bulk = mk("d3q19", wgsl_step(fp16, false).replace("WGu", &format!("{}u", step_wg())));
+    let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, true)));
+    (bulk, wall)
+}
+
+impl Gpu3D {
+    /// Pipelines de collision à jour des paramètres (sous-maille après
+    /// `set_viscosity`, bords, diagnostics `set_essai`) : recompilés s'ils
+    /// ont changé depuis.
+    pub(crate) fn ensure_spec(&mut self) {
+        let p = self.params(0.0, 0.0, false);
+        let k = [p.les, p.rows, p.essai];
+        if k == self.spec {
+            return;
+        }
+        let (a, b) = step_pipelines(
+            &self.device,
+            &self.step_layout,
+            self.fp16,
+            self.step_wall_pipe.is_some(),
+            [p.sa, k[0], k[1], k[2], p.bnx, self.wall_count as u32, self.n_active],
+        );
+        self.step_pipe = a;
+        self.step_wall_pipe = b;
+        self.spec = k;
+    }
+
+    /// Un pas de collision (cœur, puis mailles pariétales), état `cur`,
+    /// paramètres du créneau `slot`.
+    pub(crate) fn encode_step(&self, pass: &mut wgpu::ComputePass, slot: u32) {
+        pass.set_pipeline(&self.step_pipe);
+        pass.set_bind_group(0, &self.bind[self.cur], &[slot]);
+        pass.dispatch_workgroups(self.disp_step.0, self.disp_step.1, 1);
+        if let Some(p) = &self.step_wall_pipe {
+            pass.set_pipeline(p);
+            pass.dispatch_workgroups(self.wall_disp.0, self.wall_disp.1, 1);
+        }
+    }
+}
+
+impl WallPass {
+    pub(crate) fn encode(&self, pass: &mut wgpu::ComputePass, slot: u32) {
+        pass.set_pipeline(&self.pipe);
+        pass.set_bind_group(0, &self.bind, &[slot]);
+        pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+    }
 }
 
 /// Couche limite intégrale sur le maillage de la grille entière la plus
@@ -2434,7 +2769,7 @@ impl Gpu3D {
             child.les = top.les;
             {
                 let parent = if k == 1 { &top } else { &levels[k - 2] };
-                links.push(crate::refine3d::Link3::new(parent, &child, lo));
+                links.push({ let tl = std::time::Instant::now(); let l = crate::refine3d::Link3::new(parent, &child, lo); temps("raccord", tl); l });
             }
             levels.push(child);
             parent_body = cb;
@@ -2488,7 +2823,7 @@ impl Gpu3D {
                 let pi = levels.len();
                 {
                     let par = if pi == 0 { &top } else { &levels[pi - 1] };
-                    links.push(crate::refine3d::Link3::new(par, &child, lo));
+                    links.push({ let tl = std::time::Instant::now(); let l = crate::refine3d::Link3::new(par, &child, lo); temps("raccord", tl); l });
                 }
                 levels.push(child);
                 let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
@@ -2526,7 +2861,7 @@ impl Gpu3D {
                 child.les = top.les;
                 {
                     let par = if full == 0 { &top } else { &levels[full - 1] };
-                    links.push(crate::refine3d::Link3::new(par, &child, lo));
+                    links.push({ let tl = std::time::Instant::now(); let l = crate::refine3d::Link3::new(par, &child, lo); temps("raccord", tl); l });
                 }
                 levels.push(child);
                 origin.push([0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp));
@@ -2534,6 +2869,18 @@ impl Gpu3D {
                 lev_depth.push(k as u32);
                 // Domaine propre en mailles de la veine.
                 core.push(Some([[0, 1, 2].map(|a| porg[a] + cr[0][a] / sp), [0, 1, 2].map(|a| porg[a] + cr[1][a] / sp)]));
+            }
+        }
+        // Mailles des grilles parentes recopiées des grilles fines et dont
+        // tous les voisins le sont aussi : jamais lues avant d'être écrasées.
+        if std::env::var("SOUFFLERIE_RECOUVERT").map_or(true, |v| v != "0") {
+            for g in 0..=levels.len() {
+                let lists: Vec<&[u32]> = links.iter().zip(&parent).filter(|(_, &p)| p == g).map(|(l, _)| l.restrict_list()).collect();
+                if lists.is_empty() {
+                    continue;
+                }
+                let grid = if g == 0 { &top } else { &levels[g - 1] };
+                grid.mark_covered(&lists);
             }
         }
         top.refine = Some(Box::new(crate::refine3d::Refinement {
@@ -2584,7 +2931,7 @@ impl Gpu3D {
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
-        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(14);
+        limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(15);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
@@ -2630,11 +2977,13 @@ impl Gpu3D {
 
         // Voxelisation, liens de paroi et couche pariétale : tableaux par
         // maille rangés comme sur le GPU (boîte, ou blocs près de la surface).
+        let tt = std::time::Instant::now();
         let cs = if nested && band > 0.0 {
             band_setup(body, band)?
         } else {
             dense_setup(body, nested)
         };
+        temps("mailles", tt);
         let CellSetup {
             sparse,
             ns,
@@ -2737,7 +3086,7 @@ impl Gpu3D {
         let wall_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall3d"),
             contents: bytemuck::cast_slice(&wall_gpu),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
         let qbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("q3d"),
@@ -2786,8 +3135,9 @@ impl Gpu3D {
         let wall_geo = init_or("wallgeo3d", bytemuck::cast_slice(&geo));
         let dist_buf = init_or("dist3d", bytemuck::cast_slice(&dist_gpu));
         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
-        // (à la suite, une valeur par maille) la vitesse de transpiration.
-        let utau_buf = mk("utau3d", (20 * wall_count) as u64, st);
+        // (à la suite, une valeur par maille) la vitesse de transpiration,
+        // puis la viscosité de la couche pariétale (passe `wall3d`).
+        let utau_buf = mk("utau3d", (24 * wall_count) as u64, st);
         let nsa = if sa { 4 * ns as u64 } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if sa {
@@ -2815,10 +3165,11 @@ impl Gpu3D {
                 storage(8, false),
                 storage(9, true),
                 storage(10, true),
-                storage(11, false),
+                storage(11, true),
                 storage(12, true),
                 storage(13, true),
                 storage(14, true),
+                storage(15, true),
             ],
         });
         let sa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2836,20 +3187,40 @@ impl Gpu3D {
                 storage(9, true),
             ],
         });
+        let wall_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wall3d"),
+            entries: &[
+                uniform(0, true, psize),
+                storage(1, true),
+                storage(2, true),
+                storage(3, true),
+                storage(4, false),
+                storage(5, true),
+                storage(6, true),
+                storage(7, true),
+                storage(8, true),
+            ],
+        });
         let init_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("d3q19_init"),
             entries: &[uniform(0, true, psize), storage(1, false), storage(2, false)],
         });
-        let pipe = |label: &str, layout: &wgpu::BindGroupLayout, code: String| {
+        // Passes du calcul : sans contrôles d'exécution (`compute_module`) ;
+        // affichage (coupe, rendu) : contrôles gardés.
+        let pipe = |label: &str, layout: &wgpu::BindGroupLayout, code: String, trusted: bool| {
             let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(code.into()),
-            });
+            let module = if trusted {
+                compute_module(&device, label, code)
+            } else {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(code.into()),
+                })
+            };
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pl),
@@ -2859,9 +3230,56 @@ impl Gpu3D {
                 cache: None,
             })
         };
-        let step_pipe = pipe("d3q19", &layout, wgsl_step(fp16));
-        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16));
-        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)));
+        temps("tampons", tt);
+        let step_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("d3q19"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        // Collision spécialisée : paramètres fixes de la grille en constantes
+        // (sous-maille selon la viscosité, comme `set_viscosity`).
+        let spec = [((0.5 + 3.0 * nu) < 0.51) as u32, nested as u32 | (((body.ground && !nested) as u32) << 1), 0];
+        let sparse_bnx = sparse.as_ref().map_or(0, |m| m.bd[0] as u32);
+        // Grille creuse : le cœur de la collision ne lance que ses mailles à
+        // calculer (fluides sans lien de paroi), rangées après les mailles
+        // pariétales ; dans une couche, un tiers des mailles stockées sont
+        // fantômes ou solides et occupaient des fils pour rien.
+        let active: Vec<u32> = if sparse.is_some() {
+            (0..ns as u32).filter(|&i| wall_gpu[i as usize] == 0).collect()
+        } else {
+            Vec::new()
+        };
+        let n_active = active.len() as u32;
+        let step_list: Vec<u32> = wall_cells.iter().chain(&active).copied().chain(std::iter::once(0)).collect();
+        let step_list_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("step_list3d"),
+            contents: bytemuck::cast_slice(&step_list),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let (step_pipe, step_wall_pipe) = step_pipelines(
+            &device,
+            &step_layout,
+            fp16,
+            wall_count > 0,
+            [sa as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
+        );
+        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
+        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true);
+        // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
+        let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("wall_cells3d"),
+            contents: bytemuck::cast_slice(if wall_cells.is_empty() { &[0u32][..] } else { &wall_cells[..] }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        // Loi de paroi : passe sur les mailles pariétales (avec Spalart–Allmaras).
+        let wall_pass = (sa && wall_count > 0).then(|| {
+            let code = format!(
+                "{PARAMS_WGSL}{}",
+                WALL3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS).replace("SA_FNS", SA_FNS)
+            );
+            let pipe_w = pipe("wall3d", &wall_layout, code, true);
+            pipe_w
+        });
         let slice_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("slice"),
             entries: &[
@@ -2871,7 +3289,7 @@ impl Gpu3D {
                 storage(3, false),
             ],
         });
-        let slice_pipe = pipe("slice", &slice_layout, SLICE_WGSL.to_string());
+        let slice_pipe = pipe("slice", &slice_layout, SLICE_WGSL.to_string(), false);
         let auto = |label: &str, code: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -2886,8 +3304,10 @@ impl Gpu3D {
                 cache: None,
             })
         };
+        temps("pipelines calcul", tt);
         let derive_pipe = auto("derive3d", DERIVE_WGSL);
         let render_pipe = auto("render3d", RENDER_WGSL);
+        temps("pipelines affichage", tt);
         let pb = Some(psize);
         let bind = (0..2)
             .map(|s| {
@@ -2910,6 +3330,7 @@ impl Gpu3D {
                         buf_entry(12, &dist_buf, None),
                         buf_entry(13, &slab_buf, None),
                         buf_entry(14, &blk_buf, None),
+                        buf_entry(15, &step_list_buf, None),
                     ],
                 })
             })
@@ -2934,6 +3355,29 @@ impl Gpu3D {
                 })
             })
             .collect();
+        let wall_disp = {
+            let groups = (wall_count as u32).div_ceil(64).max(1);
+            let dx = groups.min(65535);
+            (dx, groups.div_ceil(dx))
+        };
+        let wall_pass = wall_pass.map(|pipe_w| {
+            let b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("wall3d"),
+                layout: &wall_layout,
+                entries: &[
+                    buf_entry(0, &params, pb),
+                    buf_entry(1, &macro_buf, None),
+                    buf_entry(2, &wall_buf, None),
+                    buf_entry(3, &wall_geo, None),
+                    buf_entry(4, &utau_buf, None),
+                    buf_entry(5, &dist_buf, None),
+                    buf_entry(6, &slab_buf, None),
+                    buf_entry(7, &blk_buf, None),
+                    buf_entry(8, &wcell, None),
+                ],
+            });
+            WallPass { pipe: pipe_w, bind: b, disp: wall_disp }
+        });
         let init_bind = (0..2)
             .map(|s| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2983,12 +3427,25 @@ impl Gpu3D {
             _utau: utau_buf,
             sa_pipe,
             sa_bind,
+            wall_pass,
             nut0,
             force,
             force_read,
             params,
             macro_buf,
             step_pipe,
+            step_wall_pipe,
+            step_layout,
+            spec,
+            wall_disp,
+            n_active,
+            _step_list: step_list_buf,
+            disp_step: {
+                let groups = (if n_active > 0 { n_active } else { ns as u32 }).div_ceil(step_wg());
+                let dx = groups.min(65535);
+                (dx, groups.div_ceil(dx))
+            },
+            _wcell: wcell,
             init_pipe,
             slice_pipe,
             derive_pipe,
@@ -3024,7 +3481,67 @@ impl Gpu3D {
         };
         s.set_viscosity(nu);
         s.reset(0.0);
+        temps("fin", tt);
         Ok(s)
+    }
+
+    /// Marque « recouvertes » (0xfffffffd) les mailles fluides de cette
+    /// grille que les grilles fines recopient (listes de positions `lists`)
+    /// et dont les six voisins sont aussi recopiés : la collision et le
+    /// transport de ν̃ les sautent. Leur nouvel état n'était lu par
+    /// personne avant la recopie qui l'écrase (le transport de ν̃ et la loi
+    /// de paroi ne lisent que les six voisins et le champ d'avant le pas ;
+    /// le tirage, l'état d'avant le pas) : résultats identiques au bit.
+    pub(crate) fn mark_covered(&self, lists: &[&[u32]]) {
+        let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        let rank = |x: usize, y: usize, z: usize| match self.sparse.as_ref() {
+            Some(m) => m.id(x, y, z),
+            None => x + nx * (y + ny * z),
+        };
+        let mut inr = vec![false; self.n];
+        for l in lists {
+            for &p in l.iter() {
+                let p = p as usize;
+                inr[rank(p % nx, (p / nx) % ny, p / (nx * ny))] = true;
+            }
+        }
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wall3d_read"),
+            size: 4 * self.n as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut wall: Vec<u32> = self.read(&self.wall, &staging, 4 * self.n as u64).iter().map(|v| v.to_bits()).collect();
+        if wall.len() != self.n {
+            return;
+        }
+        let mut count = 0usize;
+        for l in lists {
+            for &p in l.iter() {
+                let p = p as usize;
+                let (x, y, z) = (p % nx, (p / nx) % ny, p / (nx * ny));
+                let r = rank(x, y, z);
+                if wall[r] != 0 || x == 0 || y == 0 || z == 0 || x + 1 >= nx || y + 1 >= ny || z + 1 >= nz {
+                    continue;
+                }
+                let nb = [
+                    rank(x - 1, y, z),
+                    rank(x + 1, y, z),
+                    rank(x, y - 1, z),
+                    rank(x, y + 1, z),
+                    rank(x, y, z - 1),
+                    rank(x, y, z + 1),
+                ];
+                if nb.iter().all(|&c| inr[c]) {
+                    wall[r] = COVERED;
+                    count += 1;
+                }
+            }
+        }
+        if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
+            eprintln!("  [mise en place] {count} mailles recouvertes sur {}", self.n);
+        }
+        self.queue.write_buffer(&self.wall, 0, bytemuck::cast_slice(&wall));
     }
 
     /// Variantes de diagnostic (enquête sur l'épaisseur de la couche limite,
@@ -3153,6 +3670,7 @@ impl Gpu3D {
     /// `n` pas ; la vitesse d'entrée suit `ramp`. Le champ macroscopique est
     /// écrit au dernier pas (pour les coupes).
     pub fn run(&mut self, n: usize, ramp: &Ramp) {
+        self.ensure_spec();
         if let Some(mut r) = self.refine.take() {
             crate::refine3d::run(self, &mut r, n, ramp);
             self.refine = Some(r);
@@ -3176,16 +3694,16 @@ impl Gpu3D {
             let mut enc = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.step_pipe);
                 for s in 0..k {
                     let off = (s as u64 * SLOT) as u32;
-                    pass.set_bind_group(0, &self.bind[self.cur], &[off]);
-                    pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+                    if let Some(w) = &self.wall_pass {
+                        w.encode(&mut pass, off);
+                    }
+                    self.encode_step(&mut pass, off);
                     if self.sa {
                         pass.set_pipeline(&self.sa_pipe);
                         pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
                         pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
-                        pass.set_pipeline(&self.step_pipe);
                     }
                     self.cur = 1 - self.cur;
                 }
@@ -3846,6 +4364,94 @@ impl Gpu3D {
         Some(([g.nx, g.ny, g.nz], g.wall_count, 1 << r.full))
     }
 
+    /// Mailles calculées de chaque grille (veine, puis grilles fines) et
+    /// leur niveau (banc de mesure : mises à jour de maille par pas de la
+    /// veine, Σ n_k 2^niveau).
+    pub fn grid_cells(&self) -> Vec<(usize, u32)> {
+        let mut v = vec![(self.n, 0)];
+        if let Some(r) = self.refine.as_ref() {
+            v.extend(r.levels.iter().zip(&r.depth).map(|(g, &d)| (g.n, d)));
+        }
+        v
+    }
+
+    /// Profilage (banc de mesure) : durée moyenne de chaque passe, mesurée
+    /// isolément sur `reps` lancements (pas de collision, transport de ν̃,
+    /// raccords des grilles). Modifie l'état : à appeler après les relevés.
+    pub fn profile_passes(&mut self, reps: usize) -> Vec<(String, usize, f64)> {
+        let time = |g: &Gpu3D, f: &dyn Fn(&mut wgpu::ComputePass)| {
+            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+            let t0 = std::time::Instant::now();
+            let mut enc = g.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for _ in 0..reps {
+                    f(&mut pass);
+                }
+            }
+            g.queue.submit([enc.finish()]);
+            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+            t0.elapsed().as_secs_f64() * 1e3 / reps as f64
+        };
+        let one = |g: &Gpu3D, name: &str, out: &mut Vec<(String, usize, f64)>| {
+            if let Some(w) = &g.wall_pass {
+                out.push((format!("{name} loi de paroi"), g.wall_count, time(g, &|p| w.encode(p, 0))));
+            }
+            out.push((
+                format!("{name} collision"),
+                g.n,
+                time(g, &|p| {
+                    p.set_pipeline(&g.step_pipe);
+                    p.set_bind_group(0, &g.bind[g.cur], &[0]);
+                    p.dispatch_workgroups(g.disp_step.0, g.disp_step.1, 1);
+                }),
+            ));
+            if let Some(w) = &g.step_wall_pipe {
+                out.push((
+                    format!("{name} collision pariétale"),
+                    g.wall_count,
+                    time(g, &|p| {
+                        p.set_pipeline(w);
+                        p.set_bind_group(0, &g.bind[g.cur], &[0]);
+                        p.dispatch_workgroups(g.wall_disp.0, g.wall_disp.1, 1);
+                    }),
+                ));
+            }
+            if g.sa {
+                out.push((
+                    format!("{name} ν̃"),
+                    g.n,
+                    time(g, &|p| {
+                        p.set_pipeline(&g.sa_pipe);
+                        p.set_bind_group(0, &g.sa_bind[g.cur], &[0]);
+                        p.dispatch_workgroups(g.disp.0, g.disp.1, 1);
+                    }),
+                ));
+            }
+        };
+        self.ensure_spec();
+        if let Some(r) = self.refine.as_mut() {
+            for g in r.levels.iter_mut() {
+                g.ensure_spec();
+            }
+        }
+        let mut out = Vec::new();
+        one(self, "veine", &mut out);
+        if let Some(r) = self.refine.as_ref() {
+            for (k, g) in r.levels.iter().enumerate() {
+                one(g, &format!("grille {} (×{})", k + 1, 1u64 << r.depth[k]), &mut out);
+            }
+            for (k, link) in r.links.iter().enumerate() {
+                let p = if r.parent[k] == 0 { &*self } else { &r.levels[r.parent[k] - 1] };
+                let c = &r.levels[k];
+                for (name, n, ms) in link.profile(p, c, &time) {
+                    out.push((format!("raccord {} {name}", k + 1), n, ms));
+                }
+            }
+        }
+        out
+    }
+
     /// Efforts sur une maquette maillée par intégration sur ses triangles
     /// (champ du dernier pas ; chaque triangle sur la grille la plus fine qui
     /// l'entoure) : −p_p n dA, p_p extrapolée linéairement jusqu'à la paroi
@@ -4418,7 +5024,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        wgsl_step(fp16)
+        specialize(&wgsl_step(fp16, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
     }
 }
 

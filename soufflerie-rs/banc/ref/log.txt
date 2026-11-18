@@ -1,0 +1,135 @@
+sphere : 1 grilles, 1.77 M mailles, 1.77 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+sphere · t* = 6 (960 pas) · préparation 1.09 s · calcul 9.32 s (182 MLUPS) · relevés 0.00 s · boucle 9.32 s
+  cx_echange             0.60516919
+  cz_echange            -0.00446796
+  cx_dernier             0.57592680
+  cy_dernier            -0.00562124
+  cz_dernier            -0.00622802
+  champ_somme_ux     176678.32225957
+  champ_carres_ux    17697.27765803
+  champ_somme_uy         0.56669214
+  champ_carres_uy        3.74515776
+  champ_somme_uz         1.14415477
+  champ_carres_uz        3.74501652
+  champ_somme_rho    1767352.87491810
+  champ_carres_rho   1767391.20657854
+ar4 : 2 grilles, 2.91 M mailles, 3.68 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4 · t* = 6 (960 pas) · préparation 2.30 s · calcul 26.20 s (135 MLUPS) · relevés 0.16 s · boucle 26.36 s
+  cx_echange             0.05730478
+  cz_echange             0.25422462
+  cx_dernier             0.05726082
+  cy_dernier            -0.00000682
+  cz_dernier             0.26334095
+  cx_surface             0.02423883
+  cz_surface             0.27342144
+  cx_frottement          0.00741551
+  cx_boite               0.07020781
+  cz_boite               0.25273134
+  champ_somme_ux     75467.11700625
+  champ_carres_ux     7549.79325898
+  champ_somme_uy        -0.70555895
+  champ_carres_uy        4.13994299
+  champ_somme_uz      -960.10560404
+  champ_carres_uz       14.96523069
+  champ_somme_rho    756971.14454639
+  champ_carres_rho   756846.46073250
+ar4b : 3 grilles, 4.27 M mailles, 9.10 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4b · t* = 6 (960 pas) · préparation 6.91 s · calcul 90.56 s (97 MLUPS) · relevés 0.30 s · boucle 90.85 s
+  cx_echange             0.05138858
+  cz_echange             0.26305301
+  cx_dernier             0.05130043
+  cy_dernier             0.00389334
+  cz_dernier             0.27190300
+  cx_surface             0.03296252
+  cz_surface             0.25880989
+  cx_frottement          0.00786095
+  cx_boite               0.04292586
+  cz_boite               0.25544636
+  champ_somme_ux     75550.58312693
+  champ_carres_ux     7564.19224252
+  champ_somme_uy        -0.95532479
+  champ_carres_uy        4.26038955
+  champ_somme_uz      -962.09124678
+  champ_carres_uz       15.02788956
+  champ_somme_rho    756984.40179241
+  champ_carres_rho   756872.87901748
+ar4 : 2 grilles, 2.91 M mailles, 3.68 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4 · t* = 6 (960 pas) · préparation 1.77 s · calcul 25.33 s (140 MLUPS) · relevés 0.19 s · boucle 25.53 s
+  cx_echange             0.05730236
+  cz_echange             0.25430497
+  cx_dernier             0.05730143
+  cy_dernier            -0.00001668
+  cz_dernier             0.26360802
+  cx_surface             0.02426424
+  cz_surface             0.27333160
+  cx_frottement          0.00741587
+  cx_boite               0.07042252
+  cz_boite               0.25261185
+  champ_somme_ux     75469.17110820
+  champ_carres_ux     7550.19079010
+  champ_somme_uy         0.32994621
+  champ_carres_uy        4.13756841
+  champ_somme_uz      -959.32000738
+  champ_carres_uz       14.96407932
+  champ_somme_rho    756971.08040398
+  champ_carres_rho   756846.33315818
+ar4b : 3 grilles, 4.27 M mailles, 9.10 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4b · t* = 6 (960 pas) · préparation 6.08 s · calcul 85.86 s (102 MLUPS) · relevés 0.26 s · boucle 86.13 s
+  cx_echange             0.05138375
+  cz_echange             0.26318814
+  cx_dernier             0.05127273
+  cy_dernier             0.00390585
+  cz_dernier             0.27204877
+  cx_surface             0.03298407
+  cz_surface             0.25917690
+  cx_frottement          0.00786093
+  cx_boite               0.04276920
+  cz_boite               0.25577797
+  champ_somme_ux     75550.34358372
+  champ_carres_ux     7564.15563249
+  champ_somme_uy         0.10032065
+  champ_carres_uy        4.26387010
+  champ_somme_uz      -959.61048580
+  champ_carres_uz       15.01476270
+  champ_somme_rho    756984.31618369
+  champ_carres_rho   756872.70821193
+ar4 : 2 grilles, 2.91 M mailles, 3.68 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4 · t* = 6 (960 pas) · préparation 1.83 s · calcul 25.08 s (141 MLUPS) · relevés 0.20 s · boucle 25.29 s
+  cx_echange             0.05727544
+  cz_echange             0.25423189
+  cx_dernier             0.05730305
+  cy_dernier            -0.00001091
+  cz_dernier             0.26330154
+  cx_surface             0.02423439
+  cz_surface             0.27327866
+  cx_frottement          0.00741564
+  cx_boite               0.07032816
+  cz_boite               0.25250843
+  champ_somme_ux     75466.93443041
+  champ_carres_ux     7549.74510438
+  champ_somme_uy         0.86512267
+  champ_carres_uy        4.14137555
+  champ_somme_uz      -958.81000032
+  champ_carres_uz       14.96399838
+  champ_somme_rho    756971.71117306
+  champ_carres_rho   756847.59383761
+ar4b : 3 grilles, 4.27 M mailles, 9.10 M mises à jour par pas de la veine · NVIDIA GeForce GTX 1070 (Vulkan)
+ar4b · t* = 6 (960 pas) · préparation 8.98 s · calcul 86.84 s (101 MLUPS) · relevés 0.31 s · boucle 87.15 s
+  cx_echange             0.05139189
+  cz_echange             0.26313690
+  cx_dernier             0.05127416
+  cy_dernier             0.00389918
+  cz_dernier             0.27185541
+  cx_surface             0.03296580
+  cz_surface             0.25896271
+  cx_frottement          0.00786138
+  cx_boite               0.04287896
+  cz_boite               0.25555526
+  champ_somme_ux     75550.42047051
+  champ_carres_ux     7564.15416587
+  champ_somme_uy        -0.10826422
+  champ_carres_uy        4.26915534
+  champ_somme_uz      -961.90395517
+  champ_carres_uz       15.01899319
+  champ_somme_rho    756985.12715721
+  champ_carres_rho   756874.32903484

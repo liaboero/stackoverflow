@@ -633,7 +633,71 @@ impl MeshBody {
     }
 
     /// Distance à la surface, plafonnée à `cap` mailles.
+    ///
+    /// Cases de la grille parcourues par coques de plus en plus larges autour
+    /// du point, jusqu'à ce que la coque suivante soit plus loin que le plus
+    /// proche triangle trouvé ; case sautée si elle est plus loin. Un
+    /// triangle est rangé dans toutes les cases de sa boîte englobante, donc
+    /// dans celle de son point le plus proche du point : même minimum, au
+    /// bit près, que le parcours de toutes les cases à moins de `cap`
+    /// (`distance_scan`), pour bien moins de triangles près de la surface.
     pub fn distance(&self, p: [f64; 3], cap: f64) -> f64 {
+        let mut best = cap * cap;
+        let g0 = [0, 1, 2].map(|a| ((p[a] - cap - self.lo[a]) / self.cell).floor());
+        let g1 = [0, 1, 2].map(|a| ((p[a] + cap - self.lo[a]) / self.cell).floor());
+        let r = |a: usize, v: f64| v.clamp(0.0, (self.gdim[a] - 1) as f64) as usize;
+        if (0..3).any(|a| g1[a] < 0.0 || g0[a] > (self.gdim[a] - 1) as f64) {
+            return cap;
+        }
+        let lo = [0, 1, 2].map(|a| r(a, g0[a]));
+        let hi = [0, 1, 2].map(|a| r(a, g1[a]));
+        let c = [0, 1, 2].map(|a| r(a, ((p[a] - self.lo[a]) / self.cell).floor()).clamp(lo[a], hi[a]));
+        let reach = (0..3).map(|a| (c[a] - lo[a]).max(hi[a] - c[a])).max().unwrap_or(0);
+        // Distance (au carré) du point à une case, un peu minorée (arrondis).
+        let cell_d2 = |g: [usize; 3]| -> f64 {
+            let mut d2 = 0.0;
+            for a in 0..3 {
+                let x0 = self.lo[a] + g[a] as f64 * self.cell;
+                let x1 = x0 + self.cell;
+                let d = if p[a] < x0 { x0 - p[a] } else if p[a] > x1 { p[a] - x1 } else { 0.0 };
+                d2 += d * d;
+            }
+            d2 * (1.0 - 1e-9) - 1e-12
+        };
+        for rad in 0..=reach {
+            if rad >= 2 {
+                let lb = (rad - 1) as f64 * self.cell;
+                if lb * lb * (1.0 - 1e-9) - 1e-12 > best {
+                    break;
+                }
+            }
+            let (zl, zh) = (c[2].saturating_sub(rad).max(lo[2]), (c[2] + rad).min(hi[2]));
+            let (yl, yh) = (c[1].saturating_sub(rad).max(lo[1]), (c[1] + rad).min(hi[1]));
+            let (xl, xh) = (c[0].saturating_sub(rad).max(lo[0]), (c[0] + rad).min(hi[0]));
+            for gz in zl..=zh {
+                for gy in yl..=yh {
+                    let edge = gz.abs_diff(c[2]) == rad || gy.abs_diff(c[1]) == rad;
+                    for gx in xl..=xh {
+                        // Coque seulement : au moins une coordonnée à `rad` de c.
+                        if !edge && gx.abs_diff(c[0]) != rad {
+                            continue;
+                        }
+                        if cell_d2([gx, gy, gz]) > best {
+                            continue;
+                        }
+                        for &k in &self.grid[gx + self.gdim[0] * (gy + self.gdim[1] * gz)] {
+                            best = best.min(tri_dist2(p, &self.tris[k as usize]));
+                        }
+                    }
+                }
+            }
+        }
+        best.sqrt()
+    }
+
+    /// Distance à la surface par le parcours de toutes les cases à moins de
+    /// `cap` (référence de `distance`, essais).
+    pub fn distance_scan(&self, p: [f64; 3], cap: f64) -> f64 {
         let mut best = cap * cap;
         let g0 = [0, 1, 2].map(|a| ((p[a] - cap - self.lo[a]) / self.cell).floor());
         let g1 = [0, 1, 2].map(|a| ((p[a] + cap - self.lo[a]) / self.cell).floor());
@@ -739,6 +803,25 @@ pub fn write_stl(path: &Path, tris: &[Tri]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La recherche par coques rend exactement la distance du parcours complet.
+    #[test]
+    fn distance_par_coques_exacte() {
+        let mut tris = icosphere(10.0, [20.0, 20.0, 20.0], 3);
+        tris.extend(icosphere(3.0, [33.0, 21.0, 18.0], 2));
+        let m = MeshBody::new(tris, false);
+        let mut s = 12345u64;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20000 {
+            let p = [rnd() * 60.0 - 10.0, rnd() * 60.0 - 10.0, rnd() * 60.0 - 10.0];
+            let cap = 0.5 + rnd() * 20.0;
+            let (a, b) = (m.distance(p, cap), m.distance_scan(p, cap));
+            assert_eq!(a.to_bits(), b.to_bits(), "p {p:?} cap {cap} : {a} contre {b}");
+        }
+    }
 
     #[test]
     fn sphere_maillee() {
