@@ -1742,7 +1742,7 @@ ancienne et nouvelle version lancées en alternance) :
 | `ar4` | 2,91 M (3,68 M) | 7,65 s | 3,35 s | ×2,3 | 1,3 s | 1,2 s |
 | `ar4b` | 4,27 M (9,10 M) | 29,4 s | 8,6 s | ×3,4 | 4,2 s | 2,2 s |
 | `ar4r2` (×2 puis ×4) | 5,52 M (14,1 M) | 35 s | 15,2 s | ×2,3 | 2,5 s | 2,5 s |
-| `ar4c3` (×2, couches ×4, ×8, ×16), 40 pas | 24,1 M (292 M) | 43,0 s | 11,1 s | ×3,9 | 18 s | 9,5 s |
+| `ar4c3` (×2, couches ×4, ×8, ×16), 40 pas | 24,1 M (292 M) | 43,0 s | 11,1 s | ×3,9 | 18 s | 9,2 s |
 
 `ar4c3` reproduit `--bande auto` sur l'aile AR 4 (trois couches de 16
 mailles) : c'est le cas qui ressemble le plus aux gros calculs, et celui
@@ -1770,6 +1770,8 @@ Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 | collision pariétale : fractions q et codes des normales des 18 liens lus d'un coup au lieu d'un par direction derrière ses branches | collision pariétale, couche ×16 | 2,6 ms | 1,7 ms | identique au bit |
 | couches creuses : collision du cœur sans lecture du type des mailles de la liste (toutes fluides sans paroi) | collision, couche ×16 | 6,85 ms | 6,64 ms | identique au bit |
 | mise en place des couches : liens de paroi cherchés à moins de 1,5 maille de la surface seulement (un lien de √2 ne peut pas la couper plus loin), fantômes à remplir cherchés en parallèle | mise en place, couche ×16 | 3,9 s | 1,6 s | identique au bit |
+| masque d'un bit des mailles fluides ordinaires : collision des grilles boîtes et transport de ν̃ ne lisent le type complet (4 octets) que pour les autres | collision, ν̃ | 1,37 ms, 0,338 ms | 1,35 ms, 0,320 ms | identique au bit |
+| mise en place : distance de chaque maille bornée par celle du centre de son bloc (au-delà du plafond sans recherche, recherche arrêtée plus tôt ; test `distance_bornee_exacte`) | mise en place, couche ×16 | 2,7 s | 2,4 s | identique au bit |
 | distance à la surface par coques croissantes (même minimum que le parcours complet, test `distance_par_coques_exacte`) | mise en place des couches | 4,3 s | 1,4 s | identique au bit |
 
 **Précision.** Toutes les optimisations sauf deux rendent des champs et des
@@ -1854,6 +1856,18 @@ valeur instantanée (Cx au dernier relevé) en sort, de 6·10⁻⁴ en relatif.
   écarté.
 - Distance à la surface par listes de triangles par bloc de 8³ : plus
   lent (listes trop longues) ; écarté.
+- Conversions demi-précision ↔ simple précision par opérations entières
+  sur les bits (au lieu de l'unité de conversion, lente sur Pascal) :
+  identiques au bit (le matériel arrondit au plus proche pair), mais 3 %
+  plus lentes ; écarté.
+- Accès robuste aux tampons de Vulkan (`robustBufferAccess`, que wgpu
+  active sans option pour le couper) : copie de wgpu-hal sans lui, aucune
+  différence mesurable (< 0,3 %) ; rien à changer.
+- Barrières entre lancements (wgpu en place une à chaque passe qui écrit)
+  et encodage des commandes : moins de 1 % du pas.
+- Listes exactes de triangles par bloc pour la distance (d_centre + deux
+  demi-diagonales) : couche ×16 plus rapide, couches ×4 et ×8 plus
+  lentes ; écarté.
 
 **Ce qui reste.** GPU libre, la collision de la veine prend 1,40 ms ;
 sans calcul ni tirage des voisins (mêmes lectures et écritures), elle
