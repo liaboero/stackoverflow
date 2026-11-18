@@ -806,6 +806,24 @@ fn cmd_run3d(a: &Args) {
             r * (1u64 << (depth + n)) as f64
         );
     }
+    // Épaisseur minimale en fraction de la longueur de référence
+    // (--bande-corde 0.125) : une couche fine de 16 mailles ne fait plus que
+    // quelques pour cent de corde, moins que la région où la couche limite et
+    // l'écoulement du bord de fuite fixent la portance.
+    let frac = a.get("bande-corde", 0.0f64);
+    if frac > 0.0 {
+        for (i, b) in bands.iter_mut().enumerate() {
+            let lk = (l << (depth + 1 + i)) as f64;
+            *b = b.max((frac * lk).round());
+        }
+    }
+    let bands = lbm::gpu3d::nested_bands(&bands);
+    if !bands.is_empty() {
+        eprintln!(
+            "Couches pariétales : épaisseurs {} mailles",
+            bands.iter().map(|b| format!("{b:.0}")).collect::<Vec<_>>().join(", ")
+        );
+    }
     let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, &bands) {
         Ok(s) => s,
         Err(e) => {
