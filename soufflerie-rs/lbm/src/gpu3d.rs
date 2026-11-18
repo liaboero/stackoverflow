@@ -77,8 +77,13 @@ pub(crate) fn temps(label: &str, t0: std::time::Instant) {
 /// résultats, au bit près, pour bien moins d'instructions par maille.
 /// SOUFFLERIE_CONTROLES=1 rétablit les contrôles (diagnostic).
 pub(crate) fn compute_module(device: &wgpu::Device, label: &str, code: String) -> wgpu::ShaderModule {
-    // Mise au point : SOUFFLERIE_WGSL=dossier écrit chaque shader dans
-    // `dossier/label.wgsl`, ou le relit s'il y est déjà (essais sans recompiler).
+    compute_module_raw(device, label, wgsl_hook(label, code))
+}
+
+/// Mise au point : SOUFFLERIE_WGSL=dossier écrit chaque shader dans
+/// `dossier/label.wgsl`, ou le relit s'il y est déjà (essais sans recompiler).
+/// Collision : code d'avant la spécialisation par grille.
+fn wgsl_hook(label: &str, code: String) -> String {
     let mut code = code;
     if let Ok(dir) = std::env::var("SOUFFLERIE_WGSL") {
         let path = std::path::Path::new(&dir).join(format!("{label}.wgsl"));
@@ -89,6 +94,10 @@ pub(crate) fn compute_module(device: &wgpu::Device, label: &str, code: String) -
             }
         }
     }
+    code
+}
+
+fn compute_module_raw(device: &wgpu::Device, label: &str, code: String) -> wgpu::ShaderModule {
     let desc = wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(code.into()),
@@ -566,17 +575,17 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
         let wallpart = if walls {
             format!(
                 "    var q = 0.0;
-    if (hasWall) {{ q = qbuf[wk * 18u + {im1}u]; }}
+    q = qa[{im1}];
     if (q > 0.0) {{
       let fj = pop({j}u, idx);
-      let qo = qbuf[wk * 18u + {jm1}u];
+      let qo = qa[{jm1}];
       // Paroi mobile (glissement de la loi de paroi) : 6 w_i ρ (c_i · u_w),
       // u_w ramenée dans le plan de la face que touche le lien (aux arêtes,
       // la normale de la maille n'est celle d'aucune face : sa composante
       // normale ferait souffler la paroi).
       var uwl = uw;
       if (P.sa == 1u) {{
-        let nf = oct_decode(qbuf[arrayLength(&qbuf) / 2u + wk * 18u + {im1}u]);
+        let nf = oct_decode(ca[{im1}]);
         // Transpiration : vitesse normale de la face (déplacement de la
         // couche limite) ; la paroi mobile de Bouzidi injecte ce débit.
         uwl = uw - dot(uw, nf) * nf + vn * nf;
@@ -760,7 +769,8 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
 // Étendue en x du corps par tranche y (zone laminaire).
 @group(0) @binding(13) var<storage, read> slab: array<vec2<f32>>;
 @group(0) @binding(14) var<storage, read> blk: array<u32>;
-// Rang de chaque maille pariétale (passe des mailles pariétales).
+// Rang de chaque maille pariétale (passe des mailles pariétales), puis,
+// sur une grille creuse, de chaque maille à calculer du cœur.
 @group(0) @binding(15) var<storage, read> wcell: array<u32>;
 {SPARSE_FNS}
 {lam_fns}
@@ -883,7 +893,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (P.sa == 1u && hasWall) {{
     vn = utau[arrayLength(&utau) / 6u * 4u + wk];
   }}
-  g[0] = pop(0u, idx);
+{prefetch}  g[0] = pop(0u, idx);
 {pull}
   var fv: array<f32, 19>;
   {fv}
@@ -961,11 +971,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         sa_fns = SA_FNS,
         lam_fns = LAM_FNS,
         head = if walls {
-            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= arrayLength(&wcell)) { return; }\n  let idx = wcell[kw];"
+            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];"
         } else {
-            "  let idx = gid.x + gid.y * nwg.x * WGu;\n  if (idx >= P.N) { return; }"
+            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }"
         },
         wg = if walls { 64 } else { step_wg() },
+        // Mailles pariétales : fractions q et codes des normales des 18 liens
+        // lus d'un coup (contigus), au lieu d'un par direction derrière ses
+        // branches (−27 % sur la collision pariétale).
+        prefetch = if walls {
+            format!(
+                "  let qa = array<f32, 18>({});
+  let ch = arrayLength(&qbuf) / 2u + wk * 18u;
+  let ca = array<f32, 18>({});
+",
+                (0..18).map(|k| format!("qbuf[wk * 18u + {k}u]")).collect::<Vec<_>>().join(", "),
+                (0..18).map(|k| format!("qbuf[ch + {k}u]")).collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            String::new()
+        },
         skip = if walls { "" } else { "  // Maille pariétale : passe à part.\n  if (wk0 != 0u) { return; }" },
         rho = sum_expr(|_| 1),
         jx = sum_expr(|i| C3[i][0]),
@@ -1664,6 +1689,9 @@ pub struct Gpu3D {
     spec: [u32; 3],
     pub(crate) wall_disp: (u32, u32),
     pub(crate) disp_step: (u32, u32),
+    /// Grille creuse : mailles du cœur de la collision (liste), 0 : toutes.
+    n_active: u32,
+    _step_list: wgpu::Buffer,
     _wcell: wgpu::Buffer,
     init_pipe: wgpu::ComputePipeline,
     slice_pipe: wgpu::ComputePipeline,
@@ -1737,7 +1765,7 @@ pub(crate) struct WallPass {
 /// Code de la collision où les paramètres fixes d'une grille deviennent des
 /// constantes (SA, sous-maille, type de bords, diagnostics, stockage) : le
 /// compilateur retire leurs branches (collision 4 % plus rapide).
-fn specialize(code: &str, c: [u32; 5]) -> String {
+fn specialize(code: &str, c: [u32; 7]) -> String {
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
@@ -1749,8 +1777,8 @@ fn specialize(code: &str, c: [u32; 5]) -> String {
         .replace("P.\u{1}A", "P.lesA")
         .replace("P.\u{2}Nu", "P.essaiNu");
     format!(
-        "const SA_C = {}u;\nconst LES_C = {}u;\nconst ROWS_C = {}u;\nconst ESSAI_C = {}u;\nconst BNX_C = {}u;\n{body}",
-        c[0], c[1], c[2], c[3], c[4]
+        "const SA_C = {}u;\nconst LES_C = {}u;\nconst ROWS_C = {}u;\nconst ESSAI_C = {}u;\nconst BNX_C = {}u;\nconst WALLN_C = {}u;\nconst ACTN_C = {}u;\n{body}",
+        c[0], c[1], c[2], c[3], c[4], c[5], c[6]
     )
 }
 
@@ -1761,10 +1789,10 @@ fn step_pipelines(
     layout: &wgpu::PipelineLayout,
     fp16: bool,
     walls: bool,
-    c: [u32; 5],
+    c: [u32; 7],
 ) -> (wgpu::ComputePipeline, Option<wgpu::ComputePipeline>) {
     let mk = |label: &str, code: String| {
-        let module = compute_module(device, label, specialize(&code, c));
+        let module = compute_module_raw(device, label, specialize(&wgsl_hook(label, code), c));
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -1789,7 +1817,13 @@ impl Gpu3D {
         if k == self.spec {
             return;
         }
-        let (a, b) = step_pipelines(&self.device, &self.step_layout, self.fp16, self.step_wall_pipe.is_some(), [p.sa, k[0], k[1], k[2], p.bnx]);
+        let (a, b) = step_pipelines(
+            &self.device,
+            &self.step_layout,
+            self.fp16,
+            self.step_wall_pipe.is_some(),
+            [p.sa, k[0], k[1], k[2], p.bnx, self.wall_count as u32, self.n_active],
+        );
         self.step_pipe = a;
         self.step_wall_pipe = b;
         self.spec = k;
@@ -3160,7 +3194,29 @@ impl Gpu3D {
         // (sous-maille selon la viscosité, comme `set_viscosity`).
         let spec = [((0.5 + 3.0 * nu) < 0.51) as u32, nested as u32 | (((body.ground && !nested) as u32) << 1), 0];
         let sparse_bnx = sparse.as_ref().map_or(0, |m| m.bd[0] as u32);
-        let (step_pipe, step_wall_pipe) = step_pipelines(&device, &step_layout, fp16, wall_count > 0, [sa as u32, spec[0], spec[1], spec[2], sparse_bnx]);
+        // Grille creuse : le cœur de la collision ne lance que ses mailles à
+        // calculer (fluides sans lien de paroi), rangées après les mailles
+        // pariétales ; dans une couche, un tiers des mailles stockées sont
+        // fantômes ou solides et occupaient des fils pour rien.
+        let active: Vec<u32> = if sparse.is_some() {
+            (0..ns as u32).filter(|&i| wall_gpu[i as usize] == 0).collect()
+        } else {
+            Vec::new()
+        };
+        let n_active = active.len() as u32;
+        let step_list: Vec<u32> = wall_cells.iter().chain(&active).copied().chain(std::iter::once(0)).collect();
+        let step_list_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("step_list3d"),
+            contents: bytemuck::cast_slice(&step_list),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let (step_pipe, step_wall_pipe) = step_pipelines(
+            &device,
+            &step_layout,
+            fp16,
+            wall_count > 0,
+            [sa as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
+        );
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
         let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true);
         // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
@@ -3228,7 +3284,7 @@ impl Gpu3D {
                         buf_entry(12, &dist_buf, None),
                         buf_entry(13, &slab_buf, None),
                         buf_entry(14, &blk_buf, None),
-                        buf_entry(15, &wcell, None),
+                        buf_entry(15, &step_list_buf, None),
                     ],
                 })
             })
@@ -3336,8 +3392,10 @@ impl Gpu3D {
             step_layout,
             spec,
             wall_disp,
+            n_active,
+            _step_list: step_list_buf,
             disp_step: {
-                let groups = (ns as u32).div_ceil(step_wg());
+                let groups = (if n_active > 0 { n_active } else { ns as u32 }).div_ceil(step_wg());
                 let dx = groups.min(65535);
                 (dx, groups.div_ceil(dx))
             },
@@ -4296,8 +4354,23 @@ impl Gpu3D {
             out.push((
                 format!("{name} collision"),
                 g.n,
-                time(g, &|p| g.encode_step(p, 0)),
+                time(g, &|p| {
+                    p.set_pipeline(&g.step_pipe);
+                    p.set_bind_group(0, &g.bind[g.cur], &[0]);
+                    p.dispatch_workgroups(g.disp_step.0, g.disp_step.1, 1);
+                }),
             ));
+            if let Some(w) = &g.step_wall_pipe {
+                out.push((
+                    format!("{name} collision pariétale"),
+                    g.wall_count,
+                    time(g, &|p| {
+                        p.set_pipeline(w);
+                        p.set_bind_group(0, &g.bind[g.cur], &[0]);
+                        p.dispatch_workgroups(g.wall_disp.0, g.wall_disp.1, 1);
+                    }),
+                ));
+            }
             if g.sa {
                 out.push((
                     format!("{name} ν̃"),
@@ -4879,7 +4952,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        wgsl_step(fp16, false).replace("WGu", "64u")
+        specialize(&wgsl_step(fp16, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
     }
 }
 

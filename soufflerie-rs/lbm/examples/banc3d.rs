@@ -8,7 +8,7 @@
 //!
 //! Cas : `ar4` (aile AR 4 du STL, 4°, Re = 10⁶, L = 16, grille ×2),
 //! `ar4b` (idem plus une couche pariétale ×4 de 16 mailles), `ar4r2` (grilles
-//! ×2 et ×4), `ar4n` (sans
+//! ×2 et ×4), `ar4c3` (grille ×2 et trois couches ×4, ×8, ×16 : `--bande auto`), `ar4n` (sans
 //! raffinement), `sphere` (Re = 1000, L = 16, sous-maille sans loi de paroi).
 //! La boucle reprend celle de `soufflerie run3d` : efforts relevés tous les
 //! quarts de temps convectif, intégration sur la surface et bilan sur boîtes
@@ -30,7 +30,7 @@ fn main() {
     const U: f32 = 0.1;
     let l = 16usize;
     let (body, re, depth, bands): (Body3D, f64, usize, Vec<f64>) = match case.as_str() {
-        "ar4" | "ar4b" | "ar4n" | "ar4r2" => {
+        "ar4" | "ar4b" | "ar4n" | "ar4r2" | "ar4c3" => {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../banc/wing_ar4.stl");
             let tris = lbm::stl::read_stl(&path).expect("banc/wing_ar4.stl");
             let setup = MeshSetup {
@@ -46,13 +46,14 @@ fn main() {
                 "ar4" => (1, vec![]),
                 "ar4b" => (1, vec![16.0]),
                 "ar4r2" => (2, vec![]),
+                "ar4c3" => (1, vec![16.0, 16.0, 16.0]),
                 _ => (0, vec![]),
             };
             (b, 1e6, depth, bands)
         }
         "sphere" => (Body3D::new(Shape3D::Sphere, l, 0.0), 1000.0, 0, vec![]),
         _ => {
-            eprintln!("cas : ar4, ar4b, ar4n, ar4r2, sphere");
+            eprintln!("cas : ar4, ar4b, ar4n, ar4r2, ar4c3, sphere");
             std::process::exit(2)
         }
     };
