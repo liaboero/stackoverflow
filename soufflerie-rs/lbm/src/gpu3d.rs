@@ -969,6 +969,8 @@ struct R {
   size: vec4<f32>,
   sdf0: vec4<f32>,
   sdfn: vec4<f32>,
+  vorg: vec4<f32>,
+  vdims: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> V: R;
 // Distance signée à la maquette (affichage) : origine et pas dans sdf0, taille
@@ -1005,17 +1007,34 @@ fn id(p: vec3<i32>) -> u32 {
   let q = clamp(p, vec3<i32>(0), n - vec3<i32>(1));
   return u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z));
 }
+// Mailles affichées (grille la plus fine qui entoure la maquette, ou la veine) :
+// position dans cette grille d'un point en mailles de la veine.
+fn toVox(p: vec3<f32>) -> vec3<f32> { return (p - V.vorg.xyz) * V.vorg.w; }
 fn voxKind(c: vec3<i32>) -> u32 {
-  let n = vec3<i32>(V.dims.xyz);
+  let n = vec3<i32>(V.vdims.xyz);
   if (any(c < vec3<i32>(0)) || any(c >= n)) { return 0u; }
   let i = u32(c.x) + u32(n.x) * (u32(c.y) + u32(n.y) * u32(c.z));
   return (vox[i >> 4u] >> ((i & 15u) * 2u)) & 3u;
 }
 
 // Première maille non fluide le long du rayon (traversée d'Amanatides et Woo,
-// mailles centrées sur les entiers) : (t, axe de la face d'entrée, type).
-fn voxHit(o: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32) -> vec3<f32> {
-  let p = o + dir * t0;
+// mailles centrées sur les entiers), en mailles de la grille affichée :
+// (t, axe de la face d'entrée, type) ; t en mailles de la veine.
+fn voxHit(ov: vec3<f32>, dir: vec3<f32>, t0v: f32, t1v: f32) -> vec3<f32> {
+  let s = V.vorg.w;
+  let o = toVox(ov);
+  // Rayon limité à la boîte de la grille affichée.
+  let inv = 1.0 / dir;
+  let ba = (vec3<f32>(-0.5) - o) * inv;
+  let bb = (V.vdims.xyz - vec3<f32>(0.5) - o) * inv;
+  let t0 = max(t0v * s, max(max(min(ba.x, bb.x), min(ba.y, bb.y)), min(ba.z, bb.z)));
+  let t1 = min(t1v * s, min(min(max(ba.x, bb.x), max(ba.y, bb.y)), max(ba.z, bb.z)));
+  if (t0 > t1) { return vec3<f32>(1e30, 0.0, 0.0); }
+  let r = voxWalk(o, dir, t0, t1);
+  return vec3<f32>(select(r.x / s, 1e30, r.x > 1e29), r.y, r.z);
+}
+fn voxWalk(o: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32) -> vec3<f32> {
+  let p = o + dir * (t0 + 1e-4);
   var c = vec3<i32>(round(p));
   let st = vec3<i32>(sign(dir));
   var tmax = vec3<f32>(1e30);
@@ -1029,7 +1048,7 @@ fn voxHit(o: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32) -> vec3<f32> {
   }
   var t = t0;
   var axis = 0;
-  for (var k = 0; k < 6000; k++) {
+  for (var k = 0; k < 20000; k++) {
     let kd = voxKind(c);
     if (kd != 0u) { return vec3<f32>(t, f32(axis), f32(kd)); }
     if (tmax.x <= tmax.y && tmax.x <= tmax.z) { axis = 0; } else if (tmax.y <= tmax.z) { axis = 1; } else { axis = 2; }
@@ -1156,12 +1175,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       var base = V.body.rgb;
       if (vh.z > 1.5) { base = vec3<f32>(0.93, 0.55, 0.18); }
       col = base * (0.35 + 0.45 * lam + 0.25 * key);
-      let fr = abs(fract(p + vec3<f32>(0.5)) - vec3<f32>(0.5));
+      let fr = abs(fract(toVox(p) + vec3<f32>(0.5)) - vec3<f32>(0.5));
       var e = 1.0;
       for (var b = 0; b < 3; b++) {
         if (b != a) { e = min(e, 0.5 - fr[b]); }
       }
-      if (e < 0.05) { col = mix(col, V.bg.rgb, 0.55); }
+      // Arêtes d'environ un pixel quelle que soit la distance : largeur en
+      // mailles affichées ≈ angle d'un pixel × distance.
+      let px = 2.0 * V.up.w / V.size.y * tb * V.vorg.w;
+      let ew = clamp(px * 0.8, 0.015, 0.12);
+      // Mailles de moins de quatre pixels environ : arêtes estompées (moiré).
+      let fade = 1.0 - smoothstep(0.15, 0.35, px);
+      col = mix(col, col * 0.45, fade * (1.0 - smoothstep(ew * 0.5, ew, e)));
     } else if (tb < 1e29) {
       let p = o + dir * tb;
       let e = 0.5 * V.sdf0.w;
@@ -1181,7 +1206,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
     } else if (ts < 1e29) {
       let p = o + dir * ts;
-      let inBody = select(S(p) < V.sdfn.w, voxKind(vec3<i32>(round(p))) != 0u, mode == 2u);
+      let inBody = select(S(p) < V.sdfn.w, voxKind(vec3<i32>(round(toVox(p)))) != 0u, mode == 2u);
       if (inBody) {
         col = V.body.rgb * 0.6;
       } else if (V.plane.z < 0.5) {
@@ -1232,6 +1257,10 @@ struct RenderUniform {
     size: [f32; 4],
     sdf0: [f32; 4],
     sdfn: [f32; 4],
+    /// Grille des mailles affichées : origine (mailles de la veine) et facteur
+    /// de raffinement, puis dimensions.
+    vorg: [f32; 4],
+    vdims: [f32; 4],
 }
 
 /// Caméra orbitale autour d'un point (mailles) : azimut et élévation en
@@ -4271,6 +4300,26 @@ impl Gpu3D {
             contents: bytemuck::cast_slice(&dims),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        // Mailles affichées : celles de la grille la plus fine qui entoure toute
+        // la maquette (là où le calcul la voit), sinon celles de la veine.
+        let vk = match self.refine.as_ref() {
+            Some(r) if r.full > 0 && r.levels[r.full - 1].sparse.is_none() => Some(r.full - 1),
+            _ => None,
+        };
+        let (vorg, vs) = match vk {
+            Some(k) => {
+                let r = self.refine.as_ref().unwrap();
+                (r.origin[k], (1u64 << (k + 1)) as f64)
+            }
+            None => ([0.0; 3], 1.0),
+        };
+        let vdims = {
+            let g = match vk {
+                Some(k) => &self.refine.as_ref().unwrap().levels[k],
+                None => &*self,
+            };
+            [g.nx as f32, g.ny as f32, g.nz as f32, 0.0]
+        };
         let c = &o.camera;
         let v4 = |a: [f64; 3], w: f64| [a[0] as f32, a[1] as f32, a[2] as f32, w as f32];
         let ru = RenderUniform {
@@ -4291,6 +4340,8 @@ impl Gpu3D {
             size: [w as f32, h as f32, o.body_view as u8 as f32, 0.0],
             sdf0: self.sdf_geom.0,
             sdfn: self.sdf_geom.1,
+            vorg: [vorg[0] as f32, vorg[1] as f32, vorg[2] as f32, vs as f32],
+            vdims,
         };
         let rbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("render_params"),
@@ -4315,6 +4366,10 @@ impl Gpu3D {
         }
         let (_, _, img, staging) = self.render_bufs.as_ref().unwrap();
         let deriv = self.deriv.as_ref().unwrap();
+        let vox = match vk {
+            Some(k) => &self.refine.as_ref().unwrap().levels[k].vox,
+            None => &self.vox,
+        };
         let dbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("derive3d"),
             layout: &self.derive_pipe.get_bind_group_layout(0),
@@ -4334,7 +4389,7 @@ impl Gpu3D {
                 buf_entry(3, deriv, None),
                 buf_entry(4, img, None),
                 buf_entry(5, &self.sdf, None),
-                buf_entry(6, &self.vox, None),
+                buf_entry(6, vox, None),
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
