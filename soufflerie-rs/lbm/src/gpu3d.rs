@@ -2388,6 +2388,7 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
     let bd = [nx.div_ceil(SB), ny.div_ceil(SB), nz.div_ceil(SB)];
     // Blocs : centre à moins de band + demi-diagonale (√3 · 4 ≈ 6,9) + 2 de
     // la surface (de quoi loger les fantômes voisins des mailles actives).
+    let tb = std::time::Instant::now();
     let reach = band + 0.5 * (3.0f64).sqrt() * SB as f64 + 2.0;
     let used: Vec<bool> = (0..bd[0] * bd[1] * bd[2])
         .into_par_iter()
@@ -2404,6 +2405,7 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
         .collect();
     let map = SparseMap::new(bd, &used);
     let ns = map.slots() * SB3;
+    temps("couche : blocs", tb);
     // Type et distance de chaque maille gardée.
     let ghost = crate::refine3d::GHOST;
     let cells: Vec<(u32, f32)> = (0..ns)
@@ -2421,6 +2423,7 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
             (if d > band { ghost } else { 0 }, d as f32)
         })
         .collect();
+    temps("couche : types et distances", tb);
     let mut wall: Vec<u32> = cells.iter().map(|c| c.0).collect();
     let dist: Vec<f32> = cells.iter().map(|c| c.1).collect();
     let solid_count = wall.iter().filter(|&&w| w == SOLID).count();
@@ -2438,10 +2441,23 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
                     return None;
                 }
                 let p = map.pos(i, dims)?;
+                // Plus loin que √2 de la surface, aucun lien (longueur ≤ √2)
+                // ne la coupe : seuls des voisins solides en feraient une
+                // maille pariétale (même résultat, sans les 18 recherches
+                // de triangles).
+                if dist[i] > 1.5
+                    && !(1..19).any(|k| {
+                        let c = C3[k];
+                        solid_at(p[0] as i64 - c[0] as i64, p[1] as i64 - c[1] as i64, p[2] as i64 - c[2] as i64)
+                    })
+                {
+                    return None;
+                }
                 wall_links(body, p, &solid_at)
             })
             .collect()
     };
+    temps("couche : liens", tb);
     let mut qs: Vec<f32> = Vec::new();
     let mut qn: Vec<f32> = Vec::new();
     let mut edge_cos: Vec<f32> = Vec::new();
@@ -2466,34 +2482,33 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
     qs.extend_from_slice(&qn);
     // Fantômes à remplir : voisins (26) d'une maille active.
     let active = |c: usize| wall[c] < ghost;
-    let mut fill = Vec::new();
-    let mut fill_pos = Vec::new();
-    for i in 0..ns {
-        if wall[i] != ghost {
-            continue;
-        }
-        let Some(p) = map.pos(i, dims) else { continue };
-        let mut near = false;
-        'nb: for dz in -1i64..=1 {
-            for dy in -1i64..=1 {
-                for dx in -1i64..=1 {
-                    if let Some(c) = at(p[0] as i64 + dx, p[1] as i64 + dy, p[2] as i64 + dz) {
-                        if active(c) {
-                            near = true;
-                            break 'nb;
+    // En parallèle, dans l'ordre des rangs (même liste qu'en séquentiel).
+    let found: Vec<(u32, u32)> = (0..ns)
+        .into_par_iter()
+        .filter_map(|i| {
+            if wall[i] != ghost {
+                return None;
+            }
+            let p = map.pos(i, dims)?;
+            for dz in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        if let Some(c) = at(p[0] as i64 + dx, p[1] as i64 + dy, p[2] as i64 + dz) {
+                            if active(c) {
+                                return Some((i as u32, (p[0] + nx * (p[1] + ny * p[2])) as u32));
+                            }
                         }
                     }
                 }
             }
-        }
-        if near {
-            fill.push(i as u32);
-            fill_pos.push((p[0] + nx * (p[1] + ny * p[2])) as u32);
-        }
-    }
+            None
+        })
+        .collect();
+    let (fill, fill_pos): (Vec<u32>, Vec<u32>) = found.into_iter().unzip();
     // Mailles « profondes » (recopiées vers la grille parente) : actives,
     // et à plus de (2 MARGIN + 1) √3 mailles de toute fantôme, la distance à
     // la paroi variant d'au plus une maille par maille parcourue.
+    temps("couche : fantômes", tb);
     let r = (2 * crate::refine3d::MARGIN3 + 1) as f64 * (3.0f64).sqrt();
     let deep: Vec<bool> = (0..ns).map(|i| active(i) && (dist[i] as f64) <= band - r).collect();
     // Blocs gardés pour de bon : ceux qui contiennent une maille active ou
