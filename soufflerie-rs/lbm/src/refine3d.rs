@@ -302,6 +302,10 @@ const GATHER: &str = "
 @group(0) @binding(7) var<storage, read> gpos: array<u32>;
 @group(0) @binding(9) var<storage, read> gstart: array<u32>;
 @group(0) @binding(10) var<storage, read> gslot: array<u32>;
+// Remplissage du premier demi-pas de la grille fine (α = 0), fait ici.
+@group(0) @binding(8) var<storage, read> gidx: array<u32>;
+@group(0) @binding(5) var<storage, read_write> cnut: array<f32>;
+@group(0) @binding(6) var<storage, read_write> cmacro: array<vec4<f32>>;
 
 struct St { n: i32, o: vec4<i32>, w: vec4<f32>, };
 // Pochoir le long d'un axe : nœud parent (coordonnée paire), ou interpolation
@@ -327,9 +331,12 @@ fn lin(x2: i32) -> St {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let g = flat(gid, nwg);
   if (g >= P.ng) { return; }
-  gm[6u * g] = gm[6u * g + 3u];
-  gm[6u * g + 1u] = gm[6u * g + 4u];
-  gm[6u * g + 2u] = gm[6u * g + 5u];
+  let oa = gm[6u * g + 3u];
+  let ob = gm[6u * g + 4u];
+  let oc = gm[6u * g + 5u];
+  gm[6u * g] = oa;
+  gm[6u * g + 1u] = ob;
+  gm[6u * g + 2u] = oc;
   // Position de la maille fantôme dans la boîte de la grille fine.
   let c = gpos[g];
   let x = c % P.cnx;
@@ -390,6 +397,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   gm[6u * g + 3u] = m.a;
   gm[6u * g + 4u] = m.b;
   gm[6u * g + 5u] = m.c;
+  // Remplissage à α = P.alpha (0) : mêmes opérations que la passe FILL.
+  let a = mix(oa, m.a, P.alpha);
+  let b = mix(ob, m.b, P.alpha);
+  let c3 = mix(oc, m.c, P.alpha);
+  let kk = 1.0 - 1.0 / c3.w;
+  let p = regul(a.x, a.yzw, kk * b.x, kk * b.y, kk * b.z, kk * c3.x, kk * c3.y, kk * c3.z);
+  let idx = gidx[g];
+  st_cf(idx, p);
+  if (P.sa != 0u) { cnut[idx] = b.w; }
+  cmacro[idx] = vec4<f32>(a.yzw, a.x);
 }
 ";
 
@@ -653,7 +670,9 @@ impl Link3 {
             crate::gpu3d::compute_module(d, label, format!("{base}{body}"))
         };
         let pre = module("pre3d", format!("{}{PRE}", access("pf", 3, 4, fp16, false, "P.pn")));
-        let gather = module("gather3d", GATHER.to_string());
+        // Tirage et remplissage du premier demi-pas de la grille fine en une
+        // passe (un lancement de moins par pas de la grille parente).
+        let gather = module("gather3d", format!("{}{GATHER}", access("cf", 3, 4, fp16, true, "P.cn")));
         let fill = module("fill3d", format!("{}{FILL}", access("cf", 3, 4, fp16, true, "P.cn")));
         let restrict = module(
             "restrict3d",
@@ -831,17 +850,26 @@ impl Link3 {
                 )
             })
             .collect();
-        self.gather_bind = vec![group(
-            &self.gather,
-            vec![
-                (0, &self.params[0]),
-                (1, &self.gm),
-                (2, &self.pm),
-                (7, &self.gpos),
-                (9, &self.gstart),
-                (10, &self.gslot),
-            ],
-        )];
+        self.gather_bind = (0..2)
+            .map(|cur| {
+                group(
+                    &self.gather,
+                    vec![
+                        (0, &self.params[0]),
+                        (1, &self.gm),
+                        (2, &self.pm),
+                        (3, &c.pops[cur][0]),
+                        (4, &c.pops[cur][1]),
+                        (5, &c.nut[cur]),
+                        (6, &c.macro_buf),
+                        (7, &self.gpos),
+                        (8, &self.gidx),
+                        (9, &self.gstart),
+                        (10, &self.gslot),
+                    ],
+                )
+            })
+            .collect();
         self.fill_bind = (0..4)
             .map(|i| {
                 let (cur, a) = (i / 2, i % 2);
@@ -907,12 +935,12 @@ impl Link3 {
                 }),
             ),
             (
-                "tirage, interpolation".into(),
+                "tirage, interpolation et remplissage".into(),
                 self.ng as usize,
                 time(p, &|pass| {
                     let (dx, dy) = disp(self.ng);
                     pass.set_pipeline(&self.gather);
-                    pass.set_bind_group(0, &self.gather_bind[0], &[]);
+                    pass.set_bind_group(0, &self.gather_bind[c.cur], &[]);
                     pass.dispatch_workgroups(dx, dy, 1);
                 }),
             ),
@@ -921,7 +949,7 @@ impl Link3 {
                 self.ng as usize,
                 time(p, &|pass| {
                     pass.set_pipeline(&self.fill);
-                    pass.set_bind_group(0, &self.fill_bind[c.cur * 2], &[]);
+                    pass.set_bind_group(0, &self.fill_bind[c.cur * 2 + 1], &[]);
                     pass.dispatch_workgroups(dx, dy, 1);
                 }),
             ),
@@ -937,7 +965,8 @@ impl Link3 {
         ]
     }
 
-    fn gather(&self, pass: &mut wgpu::ComputePass, pcur: usize) {
+    /// Tirage (et remplissage du premier demi-pas de la grille fine, état `ccur`).
+    fn gather(&self, pass: &mut wgpu::ComputePass, pcur: usize, ccur: usize) {
         if self.nn > 0 {
             let (dx, dy) = disp(self.nn);
             pass.set_pipeline(&self.pre);
@@ -946,7 +975,7 @@ impl Link3 {
         }
         let (dx, dy) = disp(self.ng);
         pass.set_pipeline(&self.gather);
-        pass.set_bind_group(0, &self.gather_bind[0], &[]);
+        pass.set_bind_group(0, &self.gather_bind[ccur], &[]);
         pass.dispatch_workgroups(dx, dy, 1);
     }
 }
@@ -1004,12 +1033,15 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
     }
     for &c in &children[k] {
         let link = &links[c - 1];
-        link.gather(pass, levels[k].cur);
+        // Tirage, avec le remplissage du premier demi-pas (α = 0).
+        link.gather(pass, levels[k].cur, levels[c].cur);
         let (dx, dy) = disp(link.ng);
         for a in 0..2 {
-            pass.set_pipeline(&link.fill);
-            pass.set_bind_group(0, &link.fill_bind[levels[c].cur * 2 + a], &[]);
-            pass.dispatch_workgroups(dx, dy, 1);
+            if a == 1 {
+                pass.set_pipeline(&link.fill);
+                pass.set_bind_group(0, &link.fill_bind[levels[c].cur * 2 + a], &[]);
+                pass.dispatch_workgroups(dx, dy, 1);
+            }
             encode(levels, links, children, pass, c, slot);
         }
         let nr = link.nr;
@@ -1022,6 +1054,9 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
 
 /// `n` pas de la veine `top` et de ses grilles fines.
 pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::cpu::Ramp) {
+    for g in r.levels.iter_mut() {
+        g.ensure_spec();
+    }
     for k in 0..r.links.len() {
         let p = if r.parent[k] == 0 { &*top } else { &r.levels[r.parent[k] - 1] };
         let link = &mut r.links[k];
@@ -1043,7 +1078,7 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
             let mut pass = enc.begin_compute_pass(&Default::default());
             for (k, link) in r.links.iter().enumerate() {
                 for _ in 0..2 {
-                    link.gather(&mut pass, all[r.parent[k]].cur);
+                    link.gather(&mut pass, all[r.parent[k]].cur, all[k + 1].cur);
                 }
             }
         }
