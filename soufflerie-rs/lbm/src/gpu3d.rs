@@ -488,6 +488,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       usv = tv0;
       nuw = 0.0;
     }
+    // Contrainte imposée comme force au nœud (collision) : la paroi glisse
+    // librement ; viscosité du nœud κ u_τ h gardée, ou nulle (32768).
+    if ((P.essai & 16384u) != 0u && !edge) {
+      usv = tv0;
+      if ((P.essai & 32768u) != 0u) { nuw = 0.0; }
+    }
     // Relaxation sur une dizaine de pas : une paroi qui suit à chaque pas la
     // vitesse de son propre nœud (glissement presque libre près de la paroi)
     // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
@@ -964,7 +970,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   // Bandes absorbantes : rappel vers l'écoulement amont près des bords.
   if (sig > 0.0) {{
 {absorb_code}  }}
-{out}
+{wforce}{out}
   if (hasWall) {{
     force[wk] += vec4<f32>(fsum, 0.0);
   }}
@@ -973,6 +979,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   }}
 }}
 ",
+        wforce = if walls {
+            let mut a = String::new();
+            for i in 1..19 {
+                let [cx, cy, cz] = C3[i];
+                let _ = writeln!(
+                    a,
+                    "    if (qa[{k}] > 0.0) {{ aw += {w6} * abs(dot(vec3<f32>({x}, {y}, {z}), oct_decode(ca[{k}]))); }}",
+                    k = i - 1,
+                    w6 = f(6.0 * w3(i)),
+                    x = f(cx as f64),
+                    y = f(cy as f64),
+                    z = f(cz as f64)
+                );
+            }
+            let mut d = String::new();
+            for i in 1..19 {
+                let [cx, cy, cz] = C3[i];
+                let _ = writeln!(d, "      o[{i}] += {} * dot(vec3<f32>({}, {}, {}), fw);", f(3.0 * w3(i)), f(cx as f64), f(cy as f64), f(cz as f64));
+            }
+            format!(
+                "  // Contrainte pariétale imposée comme force (essai 16384) : la paroi
+  // glisse librement (passe `wall3d`) et le nœud cède ρ u_τ² A le long de
+  // sa vitesse tangentielle, A = 6 Σ w_i |c_i · n| sur ses liens de paroi
+  // (aire exacte en moyenne pour un plan quelconque). Le corps reçoit
+  // l'opposé : conservatif par construction.
+  if ((P.essai & 16384u) != 0u && P.sa == 1u && nuw >= 0.0) {{
+    var aw = 0.0;
+{a}    let nw = wallGeo[wk].xyz;
+    let ut3 = u - dot(u, nw) * nw;
+    let utl = length(ut3);
+    if (utl > 1e-9) {{
+      let ts = utau[4u * wk];
+      // Pas d'inversion de la vitesse tangentielle en un pas.
+      let fm = min(rho * ts * ts * aw, 0.5 * rho * utl);
+      let fw = -ut3 * (fm / utl);
+{d}      fsum -= fw;
+    }}
+  }}
+"
+            )
+        } else {
+            String::new()
+        },
         sa_fns = SA_FNS,
         lam_fns = LAM_FNS,
         head = if walls {
@@ -3684,7 +3733,9 @@ impl Gpu3D {
     /// 1024 viscosité de la couche pariétale plafonnée à `nu_cap` (unités de
     /// la veine) ; 2048 ν̃ de Spalart–Allmaras plafonné à `nu_cap` partout ;
     /// 4096 sans la borne de monotonie du glissement ; 8192 ancienne
-    /// borne (u_h − pente · h).
+    /// borne (u_h − pente · h) ; 16384 contrainte pariétale imposée comme force
+    /// au nœud, paroi en glissement libre ; 32768 (avec 16384) viscosité du
+    /// premier nœud nulle.
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;

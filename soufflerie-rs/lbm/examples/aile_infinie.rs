@@ -8,13 +8,20 @@
 //! couches pariétales imbriquées (comme `run3d --bande`). Efforts intégrés
 //! sur la surface (triangles de la tranche centrale de 4 mailles : les bords
 //! de la grille fine en envergure ne sont pas périodiques et faussent les
-//! tranches voisines) et échange aux parois (toute la veine, indicatif),
-//! moyennés sur la dernière corde parcourue (4 relevés).
+//! tranches voisines), échange aux parois de la même tranche, et bilan de
+//! quantité de mouvement sur des boîtes 3D autour de la tranche (mesure de
+//! référence : l'intégration sur la surface sous-estime la traînée aux
+//! faibles incidences), moyennés sur la dernière corde parcourue (4 relevés,
+//! `AILE_NREL`).
 use lbm::bodies3d::Body3D;
 use lbm::gpu3d::Gpu3D;
 use lbm::shapes::Naca;
 use lbm::stl::{MeshBody, MeshSetup, Tri, Unit};
 use std::sync::Arc;
+
+/// Marges des contours du bilan, en cordes : les 4 premières dans la grille
+/// entière la plus fine, les suivantes dans la veine.
+const MARGES: [f64; 4] = [0.05, 0.1, 0.15, 0.2];
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -99,11 +106,28 @@ fn main() {
     }
     sim.run(((t_end - 1.0) * spt) as usize, &ramp);
     let _ = sim.take_forces();
+    let _ = sim.take_wall_forces();
+    let mut ex = [0.0f64; 2];
     let q = 0.5 * (u as f64).powi(2);
-    let nrel = 4;
+    let nrel: usize = std::env::var("AILE_NREL").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let (mut cx_p, mut cx_f, mut cz, mut cm_n) = (0.0, 0.0, 0.0, 0usize);
+    let mut bx = [[0.0f64; 3]; MARGES.len()];
     for _ in 0..nrel {
         sim.run((spt / nrel as f64) as usize, &ramp);
+        // Échange aux parois des seules mailles de la tranche centrale.
+        {
+            let (yc0, yc1) = (2.0 * (ny / 4) as f64 - 2.0, 2.0 * (ny / 4) as f64 + 2.0);
+            let w = sim.take_wall_forces();
+            let mut f = [0.0f64; 2];
+            for (p, v) in w.pos.iter().zip(&w.force) {
+                if p[1] >= yc0 && p[1] < yc1 {
+                    f[0] += v[0];
+                    f[1] += v[2];
+                }
+            }
+            ex[0] += f[0] / (q * lf * (yc1 - yc0));
+            ex[1] += f[1] / (q * lf * (yc1 - yc0));
+        }
         let Some(s) = sim.surface_forces() else { continue };
         // Pression et frottement séparés : `loads` les mêlent, on les
         // recompose par la part de chaque triangle dans la veine.
@@ -130,6 +154,72 @@ fn main() {
         cx_f += fx * fr / qa;
         cz += fz / qa;
         cm_n += 1;
+        // Bilan de quantité de mouvement sur des contours rectangulaires du
+        // plan (x, z), moyenné sur les rangées de la tranche centrale :
+        // −∮ (ρ u u·n + p n) dl, dans la grille entière la plus fine, plus le
+        // flux à travers les faces y de la tranche (les bords non périodiques
+        // de la grille fine y entretiennent un écoulement transversal qui
+        // emporte de la quantité de mouvement x : sans lui, le bilan plan
+        // trouve deux fois moins de traînée). Indépendant de la paroi.
+        {
+            let (xl, xh) = (pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max));
+            let (zl, zh) = (pts.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max));
+            let fine = sim.finest_macros();
+            for (k, mgc) in MARGES.iter().enumerate() {
+                let (mac, d, org, sc) = (&fine.0, fine.1, fine.2, fine.3);
+                let (j0, j1) = (((yc0 - org[1]) * sc).ceil() as usize, ((yc1 - org[1]) * sc).floor() as usize);
+                let mg = mgc * lf;
+                let fx = |v: f64, a: usize| ((v - org[a]) * sc).round() as i64;
+                let (x0, x1, z0, z1) = (fx(xl - mg, 0), fx(xh + mg, 0), fx(zl - mg, 2), fx(zh + mg, 2));
+                if x0 < 2 || z0 < 2 || x1 > d[0] as i64 - 3 || z1 > d[2] as i64 - 3 || j1 <= j0 {
+                    continue;
+                }
+                // Boîte 3D x0..x1, j0..j1, z0..z1 (trapèzes), flux de
+                // quantité de mouvement ρ (u − U e_x) u·n + p n : le débit
+                // net à travers la boîte fermée est nul, et la forme en
+                // u − U le rend insensible à l'écart de fermeture.
+                let uin = u as f64;
+                let tw = |i: i64, a: i64, b: i64| if i == a || i == b { 0.5 } else { 1.0 };
+                let (mut fl, mut mass) = ([0.0f64; 2], 0.0f64);
+                let mut add = |x: i64, j: i64, z: i64, n: [f64; 3], w: f64| {
+                    let c = mac[x as usize + d[0] * (j as usize + d[1] * z as usize)];
+                    let (ux, uy, uz, r) = (c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64);
+                    let un = ux * n[0] + uy * n[1] + uz * n[2];
+                    let p = (r - 1.0) / 3.0;
+                    fl[0] += w * (r * (ux - uin) * un + p * n[0]);
+                    fl[1] += w * (r * uz * un + p * n[2]);
+                    mass += w * r * un;
+                };
+                let (ja, jb) = (j0 as i64, j1 as i64);
+                for j in ja..=jb {
+                    for z in z0..=z1 {
+                        let w = tw(j, ja, jb) * tw(z, z0, z1);
+                        add(x0, j, z, [-1.0, 0.0, 0.0], w);
+                        add(x1, j, z, [1.0, 0.0, 0.0], w);
+                    }
+                    for x in x0..=x1 {
+                        let w = tw(j, ja, jb) * tw(x, x0, x1);
+                        add(x, j, z0, [0.0, 0.0, -1.0], w);
+                        add(x, j, z1, [0.0, 0.0, 1.0], w);
+                    }
+                }
+                for z in z0..=z1 {
+                    for x in x0..=x1 {
+                        let w = tw(z, z0, z1) * tw(x, x0, x1);
+                        add(x, ja, z, [0.0, -1.0, 0.0], w);
+                        add(x, jb, z, [0.0, 1.0, 0.0], w);
+                    }
+                }
+                let span = (jb - ja) as f64;
+                if std::env::var("AILE_BILAN").is_ok() {
+                    print!(" {:.4} (débit {:.2e})", -fl[0] / span / (q * lf * sc), mass / span / (uin * lf * sc));
+                    if k + 1 == MARGES.len() { println!(); }
+                }
+                bx[k][0] += -fl[0] / span / (q * lf * sc);
+                bx[k][1] += -fl[1] / span / (q * lf * sc);
+                bx[k][2] += 1.0;
+            }
+        }
         if std::env::var("AILE_BANDES").is_ok() {
             // Cx et Cz par bande d'envergure de 2 mailles (veine).
             let nb = ny / 2;
@@ -155,6 +245,9 @@ fn main() {
             );
         }
     }
+    let bl: Vec<String> = bx.iter().zip(MARGES).filter(|(b, _)| b[2] > 0.0).map(|(b, m)| format!("{m}: {:.4}/{:.5}", b[1] / b[2], b[0] / b[2])).collect();
+    println!("  échange (tranche centrale) Cz/Cx {:.4}/{:.5}", ex[1] / nrel as f64, ex[0] / nrel as f64);
+    println!("  bilan (marge en cordes : Cz/Cx) {}", bl.join(" · "));
     let f = sim.take_forces();
     let nn = cm_n.max(1) as f64;
     let (mac, ..) = sim.finest_macros();

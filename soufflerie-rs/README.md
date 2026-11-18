@@ -1356,8 +1356,10 @@ l'aile AR 4, L = 8 pour TR-1208 ; mesure de TR-1208 lue sur la figure à
 
 La portance dépasse la mesure de 8 à 15 % et VSPAERO de 2 à 11 %, et
 l'écart croît en affinant : ce n'est pas un défaut de résolution. La
-traînée est juste à 4° (×4) mais trop forte de 40 à 80 % à 8°, en partie
-traînée induite d'une portance trop forte. L'erreur de placement du bord de
+traînée intégrée sur la surface paraît juste à 4° (×4) et trop forte de 40
+à 80 % à 8°. Mais l'intégration sur la surface sous-estime la traînée aux
+faibles incidences (voir « Traînée : où est l'excès ») : le bilan sur boîte
+donne 0,028 à 4° (×4), 2,5 fois la mesure. L'erreur de placement du bord de
 fuite (±3 % à ×4) ne couvre pas l'écart.
 
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
@@ -1410,7 +1412,7 @@ induite ni le passage au 3D. La hauteur de veine (6, 12 ou 24 cordes) ne
 change Cx que de 10 %. Efforts relevés sur la tranche centrale de 4 mailles :
 les bords en envergure des grilles fines, non périodiques, faussent les
 tranches voisines (de là un faux écart entre couche pariétale et grille
-entière ; au centre, les deux donnent le même Cx à 0,0002 près).
+entière ; au centre, les deux donnent le même Cx à 0,0002 près). Cx intégré sur la surface, qui sous-estime à 0° et 4° (voir plus bas).
 
 | α | Ladson (80 à 180 grit) Cz / Cx | 64 mailles Cz / Cx | 128 | 256 |
 | --- | --- | --- | --- | --- |
@@ -1425,6 +1427,58 @@ mailles. À 256 mailles, l'écoulement près de la paroi devient
 instationnaire et tridimensionnel : Cx varie de 0,019 à 0,039 d'une tranche
 à l'autre, et un seul passage de corde ne suffit pas à le moyenner.)
 
+**Mesure de la traînée : la surface sous-estime aux faibles incidences.**
+Le tableau ci-dessus est intégré sur la surface (pression extrapolée à la
+paroi, frottement de la loi de paroi). Deux mesures indépendantes de cette
+reconstruction le contredisent : l'échange de quantité de mouvement aux
+parois des seules mailles de la tranche centrale, et un bilan sur une boîte
+3D autour de l'aile dans la grille la plus fine (faces x, z et faces y de
+la tranche, flux ρ(u − U)u·n + p n, débit net fermé à 0,3 % près ; Cx
+indépendant de la marge, 0,05 à 0,2 corde, à 0,001 près, Cz égal à celui
+de la surface à 1 %). Un premier bilan plan, sans les faces y, trouvait
+deux fois moins de traînée : les bords non périodiques de la grille fine
+entretiennent un écoulement transversal qui emporte de la quantité de
+mouvement hors de la tranche.
+
+| α | Cx surface (64 / 128 mailles) | Cx échange | Cx boîte | Ladson |
+| --- | --- | --- | --- | --- |
+| 0° | 0,003 / 0,012 | 0,021 / 0,025 | 0,032 / 0,023 | 0,0081 |
+| 4° | 0,019 / 0,012 | 0,033 / 0,022 | 0,034 / 0,024 | 0,0081 à 0,0088 |
+| 8° | 0,046 / 0,031 | 0,042 / 0,027 | 0,042 / 0,033 | 0,0099 à 0,0105 |
+
+L'échange et la boîte s'accordent ; la surface les rejoint à 8° mais en
+donne la moitié ou moins à 0° et 4°. L'excès de traînée est donc de 3 à 4
+fois la mesure à toutes les incidences, et pas seulement aux fortes. Même
+écart sur TR-1208 à 4° (×4) : surface 0,011, échange 0,028, boîte 0,028.
+
+**Essai : contrainte pariétale imposée comme force** (`--essai 16384`).
+Au lieu d'un glissement et d'une viscosité du premier nœud qui doivent
+ensemble transmettre τ_p, la paroi glisse librement (vitesse du nœud,
+relaxée) et le nœud pariétal cède ρ u_τ² A le long de sa vitesse
+tangentielle, A = 6 Σ w_i |c_i·n| sur ses liens de paroi (aire exacte en
+moyenne pour un plan quelconque) ; le corps reçoit l'opposé, conservatif
+par construction. Variante 49152 : viscosité du premier nœud nulle en plus.
+Bilan sur boîte, aile infinie, 64 / 128 mailles par corde :
+
+| α | Loi de paroi actuelle | Force imposée | Glissement libre (`--essai 16`) |
+| --- | --- | --- | --- |
+| 0° | 0,032 / 0,023 | 0,026 / 0,021 | 0,017 / 0,011 |
+| 4° | 0,034 / 0,024 | 0,029 / 0,020 | 0,022 / 0,017 |
+| 8° | 0,042 / 0,033 | 0,033 / 0,028 | 0,040 / 0,038 (instationnaire) |
+
+La force imposée retire 15 à 25 % de la traînée, mais la portance monte de
+2 à 4 % (à 128 mailles, 0,449 à 4° et 0,926 à 8°, contre 0,431 et 0,890 ;
+Ladson 0,43 à 0,44 et 0,87 à 0,89), et le calcul diverge sur TR-1208
+(×4, t* = 6 à 10), comme le glissement libre en 3D : rien ne retient un
+nœud pariétal qui glisse librement. Non retenue. Surtout, **le glissement
+libre, sans aucun frottement, a déjà 1,5 à 2 fois la traînée mesurée**
+(0,011 à 0,017 à 0° et 4°, 128 mailles) : l'essentiel de l'excès est une
+perte numérique de l'écoulement non visqueux près de la paroi, pas la
+couche limite. La sous-maille de Smagorinsky, non nulle dans une
+déformation pure comme celle du bord d'attaque, n'en est qu'une petite
+part : sa constante divisée par 2 retire 15 % de la traînée (0,023 à
+0,020 à 0°), et sans elle le calcul diverge.
+
 **Mécanisme.** Les profils de couche limite de la soufflerie 2D (64 mailles,
 8°) montrent une épaisseur de quantité de mouvement θ/c de 0,0025 dès 5 %
 de corde sur l'extrados (environ dix fois une couche limite réelle), puis
@@ -1436,14 +1490,14 @@ forte, plus l'amplification l'est : la traînée de pression croît avec
 l'incidence. En affinant toute la grille, θ/c à 5 % de corde passe à
 0,0009 puis 0,0005 (128 et 192 mailles).
 
-**Bilan.** À 8°, la traînée converge en affinant, à l'ordre un environ
-(0,046, 0,031, 0,025), mais lentement : encore 2,5 fois la mesure à 256
-mailles par corde. À 0° et 4°, elle ne converge pas de façon monotone, et
-la portance à 4° croît de 0,40 à 0,49 (+14 % sur la mesure) comme sur les
-ailes 3D. Aucune correction n'est retenue. Imposer la contrainte pariétale
-directement au premier nœud (populations reconstruites) est la piste déjà
-signalée par la plaque plane ; sa première tentative n'était pas
-conservative avec le rebond de Bouzidi.
+**Bilan.** La traînée décroît en affinant (boîte : 0,042 puis 0,033 à 8°,
+0,032 puis 0,023 à 0°), mais reste 2,5 à 3 fois la mesure à 128 mailles par
+corde ; la portance à 4° croît de 0,40 à 0,49 (+14 % sur la mesure) de 64 à
+256 mailles, comme sur les ailes 3D. Imposer la contrainte pariétale comme
+force au premier nœud retire 15 à 25 % de la traînée mais diverge en 3D.
+La plus grande part de l'excès existe sans frottement (glissement libre) :
+c'est elle qu'il faudrait trouver ensuite (perte de pression totale
+au bord d'attaque, rebond interpolé, arêtes adhérentes du bord de fuite).
 
 ### Programmes de diagnostic
 
@@ -1470,7 +1524,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite, Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
