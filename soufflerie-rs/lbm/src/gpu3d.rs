@@ -2430,19 +2430,34 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
     temps("couche : blocs", tb);
     // Type et distance de chaque maille gardée.
     let ghost = crate::refine3d::GHOST;
-    let cells: Vec<(u32, f32)> = (0..ns)
+    // Distance de chaque maille bornée par celle du centre de son bloc
+    // (inégalité triangulaire) : au-delà du plafond sans recherche, sinon
+    // recherche arrêtée plus tôt ; même valeur au bit
+    // (`MeshBody::distance_bounded`, `distance_beyond`).
+    let cap = band + 3.0;
+    let hd = 0.5 * (3.0f64).sqrt() * SB as f64;
+    let cells: Vec<(u32, f32)> = (0..map.slots())
         .into_par_iter()
-        .map(|i| {
-            let Some(p) = map.pos(i, dims) else { return (ghost, 1e3) };
-            if p[0] == 0 || p[1] == 0 || p[2] == 0 || p[0] == nx - 1 || p[1] == ny - 1 || p[2] == nz - 1 {
-                return (ghost, 1e3);
-            }
-            let pf = p.map(|v| v as f64);
-            if body.inside(pf[0], pf[1], pf[2]) {
-                return (SOLID, 0.0);
-            }
-            let d = mesh.distance(pf, band + 3.0);
-            (if d > band { ghost } else { 0 }, d as f32)
+        .flat_map_iter(|slot| {
+            let c = map.coords[slot].map(|v| v as f64 * SB as f64 + 0.5 * (SB - 1) as f64);
+            let mut dc: Option<f64> = None;
+            (0..SB3)
+                .map(|l| {
+                    let i = slot * SB3 + l;
+                    let Some(p) = map.pos(i, dims) else { return (ghost, 1e3) };
+                    if p[0] == 0 || p[1] == 0 || p[2] == 0 || p[0] == nx - 1 || p[1] == ny - 1 || p[2] == nz - 1 {
+                        return (ghost, 1e3);
+                    }
+                    let pf = p.map(|v| v as f64);
+                    if body.inside(pf[0], pf[1], pf[2]) {
+                        return (SOLID, 0.0);
+                    }
+                    let dc = *dc.get_or_insert_with(|| mesh.distance(c, cap + hd + 1.0));
+                    let r = ((pf[0] - c[0]).powi(2) + (pf[1] - c[1]).powi(2) + (pf[2] - c[2]).powi(2)).sqrt();
+                    let d = if dc - r > cap + 1e-6 { mesh.distance_beyond(pf, cap) } else { mesh.distance_bounded(pf, cap, dc + r) };
+                    (if d > band { ghost } else { 0 }, d as f32)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     temps("couche : types et distances", tb);

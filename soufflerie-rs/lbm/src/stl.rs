@@ -642,7 +642,16 @@ impl MeshBody {
     /// bit près, que le parcours de toutes les cases à moins de `cap`
     /// (`distance_scan`), pour bien moins de triangles près de la surface.
     pub fn distance(&self, p: [f64; 3], cap: f64) -> f64 {
+        self.distance_bounded(p, cap, f64::INFINITY)
+    }
+
+    /// Idem, sachant que la distance vraie est au plus `upper` (borne d'un
+    /// point voisin : sa distance plus l'écart) : recherche arrêtée plus tôt,
+    /// même valeur au bit (le triangle le plus proche est toujours trouvé ;
+    /// la borne, élargie d'une marge, ne sert qu'à écarter des cases).
+    pub fn distance_bounded(&self, p: [f64; 3], cap: f64, upper: f64) -> f64 {
         let mut best = cap * cap;
+        let mut prune = best.min(upper * upper * (1.0 + 1e-6) + 1e-6);
         let g0 = [0, 1, 2].map(|a| ((p[a] - cap - self.lo[a]) / self.cell).floor());
         let g1 = [0, 1, 2].map(|a| ((p[a] + cap - self.lo[a]) / self.cell).floor());
         let r = |a: usize, v: f64| v.clamp(0.0, (self.gdim[a] - 1) as f64) as usize;
@@ -667,7 +676,7 @@ impl MeshBody {
         for rad in 0..=reach {
             if rad >= 2 {
                 let lb = (rad - 1) as f64 * self.cell;
-                if lb * lb * (1.0 - 1e-9) - 1e-12 > best {
+                if lb * lb * (1.0 - 1e-9) - 1e-12 > prune {
                     break;
                 }
             }
@@ -682,17 +691,30 @@ impl MeshBody {
                         if !edge && gx.abs_diff(c[0]) != rad {
                             continue;
                         }
-                        if cell_d2([gx, gy, gz]) > best {
+                        if cell_d2([gx, gy, gz]) > prune {
                             continue;
                         }
                         for &k in &self.grid[gx + self.gdim[0] * (gy + self.gdim[1] * gz)] {
                             best = best.min(tri_dist2(p, &self.tris[k as usize]));
                         }
+                        prune = prune.min(best);
                     }
                 }
             }
         }
         best.sqrt()
+    }
+
+    /// Valeur de `distance` pour un point dont la vraie distance dépasse
+    /// `cap` (aucun triangle plus près) : `cap` si sa boîte de recherche sort
+    /// de la grille, √(cap²) sinon (mêmes chemins que `distance`).
+    pub fn distance_beyond(&self, p: [f64; 3], cap: f64) -> f64 {
+        let g0 = [0, 1, 2].map(|a| ((p[a] - cap - self.lo[a]) / self.cell).floor());
+        let g1 = [0, 1, 2].map(|a| ((p[a] + cap - self.lo[a]) / self.cell).floor());
+        if (0..3).any(|a| g1[a] < 0.0 || g0[a] > (self.gdim[a] - 1) as f64) {
+            return cap;
+        }
+        (cap * cap).sqrt()
     }
 
     /// Distance à la surface par le parcours de toutes les cases à moins de
@@ -803,6 +825,30 @@ pub fn write_stl(path: &Path, tris: &[Tri]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bornes d'un point voisin : même distance au bit.
+    #[test]
+    fn distance_bornee_exacte() {
+        let mut tris = icosphere(10.0, [20.0, 20.0, 20.0], 3);
+        tris.extend(icosphere(3.0, [33.0, 21.0, 18.0], 2));
+        let m = MeshBody::new(tris, false);
+        let mut s = 777u64;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20000 {
+            let c = [rnd() * 60.0 - 10.0, rnd() * 60.0 - 10.0, rnd() * 60.0 - 10.0];
+            let cap = 0.5 + rnd() * 20.0;
+            let hd = 6.1;
+            let dc = m.distance(c, cap + hd + 1.0);
+            let p = [c[0] + (rnd() - 0.5) * 7.0, c[1] + (rnd() - 0.5) * 7.0, c[2] + (rnd() - 0.5) * 7.0];
+            let r = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt();
+            let want = m.distance_scan(p, cap);
+            let got = if dc - r > cap + 1e-6 { m.distance_beyond(p, cap) } else { m.distance_bounded(p, cap, dc + r) };
+            assert_eq!(got.to_bits(), want.to_bits(), "p {p:?} cap {cap} : {got} contre {want}");
+        }
+    }
 
     /// La recherche par coques rend exactement la distance du parcours complet.
     #[test]
