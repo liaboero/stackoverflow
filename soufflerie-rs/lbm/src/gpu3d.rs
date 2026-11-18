@@ -4800,32 +4800,73 @@ impl Gpu3D {
                     None => {}
                 }
             }
-            let Some((li, n, c, ar, r)) = got else { continue };
+            let Some((li, _, c0, ar0, r0)) = got else { continue };
             let l = &levs[li];
             // Surfaces ramenées aux mailles de la veine.
-            let ar = ar / (l.s * l.s);
-            area += ar;
-            let Some((p, pw, vf, hf, v)) = r else {
-                out.missed += ar;
+            let s2 = l.s * l.s;
+            area += ar0 / s2;
+            if r0.is_none() {
+                out.missed += ar0 / s2;
                 continue;
-            };
-            let un = vf[0] * n[0] + vf[1] * n[1] + vf[2] * n[2];
-            let ut = [0, 1, 2].map(|k| vf[k] - un * n[k]);
-            let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
-            let utau = spalding_utau(utm, hf, l.nu);
-            let tau = v[3] * utau * utau;
-            let mut fl = [0.0; 3];
-            for k in 0..3 {
-                out.pressure[k] -= p * n[k] * ar;
-                out.pressure_wall[k] -= pw * n[k] * ar;
-                fl[k] = -pw * n[k] * ar;
-                if utm > 0.0 {
-                    out.friction[k] += tau * ut[k] / utm * ar;
-                    fl[k] += tau * ut[k] / utm * ar;
+            }
+            // Relevés : le triangle est découpé en m² sous-triangles de côté
+            // au plus une maille de cette grille (m ≤ 8), chacun relevé en son
+            // centre le long de la normale lisse (normales des coins
+            // interpolées), au lieu d'un seul relevé au centre le long de la
+            // normale plate de la facette.
+            let t = l.mesh.tris[ti];
+            let edge = |a: usize, b: usize| (0..3).map(|k| (t[a][k] - t[b][k]).powi(2)).sum::<f64>().sqrt();
+            let m = edge(0, 1).max(edge(1, 2)).max(edge(2, 0)).ceil().clamp(1.0, 8.0) as usize;
+            let sub_ar = ar0 / (m * m) as f64 / s2;
+            let mf = m as f64;
+            // Centres des sous-triangles en coordonnées barycentriques.
+            let mut centers: Vec<[f64; 3]> = Vec::with_capacity(m * m);
+            for i in 0..m {
+                for j in 0..m - i {
+                    let (fi, fj) = (i as f64, j as f64);
+                    let up = [fi + 1.0 / 3.0, fj + 1.0 / 3.0];
+                    centers.push([1.0 - (up[0] + up[1]) / mf, up[0] / mf, up[1] / mf]);
+                    if i + j + 1 < m {
+                        let dn = [fi + 2.0 / 3.0, fj + 2.0 / 3.0];
+                        centers.push([1.0 - (dn[0] + dn[1]) / mf, dn[0] / mf, dn[1] / mf]);
+                    }
                 }
             }
-            out.loads.push(([0, 1, 2].map(|k| l.org[k] + c[k] / l.s), fl));
-            out.walls.push((n, pw));
+            let mut fl = [0.0; 3];
+            let (mut pw_acc, mut n_acc, mut got_any) = (0.0, [0.0; 3], false);
+            for w in &centers {
+                let c = [0, 1, 2].map(|k| w[0] * t[0][k] + w[1] * t[1][k] + w[2] * t[2][k]);
+                let n = l.mesh.smooth_normal_bary(ti, *w).map(|v| sgn * v);
+                let Some((p, pw, vf, hf, v)) = probe(l, c, n) else {
+                    out.missed += sub_ar;
+                    continue;
+                };
+                got_any = true;
+                let ar = sub_ar;
+                let un = vf[0] * n[0] + vf[1] * n[1] + vf[2] * n[2];
+                let ut = [0, 1, 2].map(|k| vf[k] - un * n[k]);
+                let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
+                let utau = spalding_utau(utm, hf, l.nu);
+                let tau = v[3] * utau * utau;
+                for k in 0..3 {
+                    out.pressure[k] -= p * n[k] * ar;
+                    out.pressure_wall[k] -= pw * n[k] * ar;
+                    fl[k] -= pw * n[k] * ar;
+                    if utm > 0.0 {
+                        out.friction[k] += tau * ut[k] / utm * ar;
+                        fl[k] += tau * ut[k] / utm * ar;
+                    }
+                    n_acc[k] += n[k] * ar;
+                }
+                pw_acc += pw * ar;
+            }
+            if !got_any {
+                continue;
+            }
+            let nl_ = (n_acc[0] * n_acc[0] + n_acc[1] * n_acc[1] + n_acc[2] * n_acc[2]).sqrt().max(1e-300);
+            let ar_tot = sub_ar * centers.len() as f64;
+            out.loads.push(([0, 1, 2].map(|k| l.org[k] + c0[k] / l.s), fl));
+            out.walls.push((n_acc.map(|v| v / nl_), pw_acc / ar_tot));
             let mut ys = l.mesh.tris[ti].map(|v| l.org[1] + v[1] / l.s);
             ys.sort_by(f64::total_cmp);
             out.spans.push(ys);

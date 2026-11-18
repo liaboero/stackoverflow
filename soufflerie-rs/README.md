@@ -1284,6 +1284,41 @@ cases d'une maille quelle que soit la grille : sur une couche ×16, chaque
 recherche parcourait des dizaines de milliers de cases. Les cases ont
 maintenant la longueur médiane des arêtes (au moins une maille).
 
+### Normales lisses et relevés multiples sur la surface
+
+Le maillage d'une maquette ne décrit qu'une surface plane par facettes ;
+deux corrections la rapprochent de la surface réelle sans rien changer à
+la grille :
+- **normales lisses** : chaque coin de triangle reçoit la moyenne des
+  normales des faces voisines de son groupe lisse, sans traverser d'arête
+  vive (`geom3d::corner_normals`, seuil de 60°), et la normale en un point
+  du triangle est l'interpolation de ses coins (Phong). Elle sert au point
+  où un lien coupe la paroi (normale de la face touchée : plan de la
+  vitesse de glissement, critère d'arête vive des mailles) et aux relevés
+  de la surface. Sur une sphère facettée, l'écart à la normale radiale
+  passe de 1 − cos = 1,5·10⁻² à zéro (test `normale_lisse_sphere`) ;
+- **relevés multiples** : un triangle plus grand qu'une maille de la grille
+  où il est relevé est découpé en m² sous-triangles (m ≤ 8), chacun relevé
+  en son centre le long de sa normale lisse, au lieu d'un seul relevé au
+  centre le long de la normale plate.
+
+Le bilan sur boîte, indépendant de la surface, sert d'arbitre :
+
+| Cas | Cz surface / boîte avant | après | Cx surface avant → après |
+| --- | --- | --- | --- |
+| TR-1208, 8°, L = 8 + ×4 | 0,5510 / 0,5446 | 0,5394 / 0,5394 | 0,0441 → 0,0387 |
+| TR-1208, 8°, ×4, STL lissé (`--lisser 1`) | — | 0,5556 / 0,5550 | 0,0431 |
+| Aile AR 4, 4°, L = 16 + ×2 | 0,2897 / 0,2685 | 0,2859 / 0,2675 | 0,0244 → 0,0164 |
+
+Sur TR-1208, la surface et la boîte coïncident désormais (écart 0 à 0,1 %,
+contre 1,2 %) ; l'échange aux parois de l'aile AR 4 rejoint lui aussi la
+boîte (0,2679). Les normales lisses des liens changent un peu l'écoulement
+(portance de la boîte −1 % sur TR-1208) : la vitesse de glissement suit la
+surface réelle et non la facette. Sur l'aile AR 4 à ×2 (32 mailles par
+corde), la surface reste 7 % au-dessus de la boîte : le bord de fuite y
+tient dans une à deux mailles. Le STL lissé de TR-1208 porte 3 % de plus
+(rayon du bord d'attaque rendu).
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de

@@ -520,6 +520,42 @@ pub struct MeshBody {
     grid: Vec<Vec<u32>>,
     gdim: [usize; 3],
     cell: f64,
+    /// Normales lisses aux trois coins de chaque triangle (unitaires, du
+    /// côté de la normale de la face) : moyenne des faces voisines du même
+    /// groupe lisse, sans traverser d'arête vive (`geom3d::corner_normals`).
+    corner_n: Vec<[[f64; 3]; 3]>,
+}
+
+/// Normales lisses aux coins de chaque triangle, dans l'ordre des triangles.
+/// Les triangles dégénérés (sommets confondus) gardent leur normale plate.
+fn corner_normals_of(tris: &[Tri]) -> Vec<[[f64; 3]; 3]> {
+    let flat = |t: &Tri| {
+        let n = cr_of(sub(t[1], t[0]), sub(t[2], t[0]));
+        let l = dot(n, n).sqrt().max(1e-300);
+        n.map(|v| v / l)
+    };
+    let ix = crate::geom3d::Indexed::from_tris(tris);
+    let creases = crate::geom3d::crease_set(&ix, crate::geom3d::FEATURE_DEG);
+    let cn = crate::geom3d::corner_normals(&ix, &creases);
+    // Même soudure des sommets que `Indexed::from_tris` : le k-ième triangle
+    // non dégénéré est la face k.
+    let (lo, hi) = bbox(tris);
+    let eps = 1e-7 * dot(sub(hi, lo), sub(hi, lo)).sqrt().max(1e-30);
+    let key = |p: [f64; 3]| p.map(|c| (c / eps).round() as i64);
+    let mut f = 0usize;
+    tris.iter()
+        .map(|t| {
+            let k = t.map(key);
+            let n0 = flat(t);
+            if k[0] == k[1] || k[1] == k[2] || k[0] == k[2] || f >= ix.faces.len() {
+                return [n0; 3];
+            }
+            let c = [cn[3 * f], cn[3 * f + 1], cn[3 * f + 2]];
+            f += 1;
+            // Du côté de la normale de la face (même sens de parcours).
+            c.map(|n| if dot(n, n0) < 0.0 { n.map(|v| -v) } else { n })
+        })
+        .collect()
 }
 
 impl MeshBody {
@@ -552,6 +588,7 @@ impl MeshBody {
         }
         let axes: &[usize] = if robust { &[0, 1, 2] } else { &[0] };
         let rays = axes.iter().map(|&a| RayBins::new(&tris, lo, hi, a)).collect();
+        let corner_n = corner_normals_of(&tris);
         MeshBody {
             tris,
             lo,
@@ -560,7 +597,31 @@ impl MeshBody {
             grid,
             gdim,
             cell,
+            corner_n,
         }
+    }
+
+    /// Normale lisse du triangle `k` au point de coordonnées barycentriques
+    /// `w` : interpolation des normales de ses coins (Phong), unitaire, du
+    /// côté de la normale de la face.
+    pub fn smooth_normal_bary(&self, k: usize, w: [f64; 3]) -> [f64; 3] {
+        let c = &self.corner_n[k];
+        let n = [0, 1, 2].map(|a| w[0] * c[0][a] + w[1] * c[1][a] + w[2] * c[2][a]);
+        let l = dot(n, n).sqrt().max(1e-300);
+        n.map(|v| v / l)
+    }
+
+    /// Idem au point `p` (projeté sur le plan du triangle, coordonnées
+    /// barycentriques bornées au triangle).
+    pub fn smooth_normal(&self, k: usize, p: [f64; 3]) -> [f64; 3] {
+        let [a, b, c] = self.tris[k];
+        let (e1, e2, s) = (sub(b, a), sub(c, a), sub(p, a));
+        let (d11, d12, d22) = (dot(e1, e1), dot(e1, e2), dot(e2, e2));
+        let (d1, d2) = (dot(s, e1), dot(s, e2));
+        let den = (d11 * d22 - d12 * d12).max(1e-300);
+        let v = ((d22 * d1 - d12 * d2) / den).clamp(0.0, 1.0);
+        let w = ((d11 * d2 - d12 * d1) / den).clamp(0.0, 1.0 - v);
+        self.smooth_normal_bary(k, [1.0 - v - w, v, w])
     }
 
     /// Le même maillage transformé point par point (grilles de rangement refaites).
@@ -620,10 +681,11 @@ impl MeshBody {
                         }
                         let t = inv * dot(e2, qv);
                         if t > 1e-9 && t <= 1.0 && best.is_none_or(|b| t < b.0) {
-                            let nv = cr_of(e1, e2);
-                            let ln = dot(nv, nv).sqrt().max(1e-300);
-                            let sg = if dot(nv, d) > 0.0 { -1.0 } else { 1.0 };
-                            best = Some((t, nv.map(|v| sg * v / ln)));
+                            // Normale lisse au point touché (coordonnées
+                            // barycentriques 1 − u − v, u, v), tournée vers p.
+                            let nv = self.smooth_normal_bary(k as usize, [1.0 - u - v, u, v]);
+                            let sg = if dot(cr_of(e1, e2), d) > 0.0 { -1.0 } else { 1.0 };
+                            best = Some((t, nv.map(|x| sg * x)));
                         }
                     }
                 }
@@ -955,5 +1017,36 @@ mod tests {
         let b = parse_stl(&bin).unwrap();
         assert_eq!(b.len(), tris.len());
         assert!((b[3][1][2] - tris[3][1][2]).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod tests_normales {
+    use super::*;
+
+    /// Sphère facettée : la normale lisse (coins interpolés) suit la
+    /// direction radiale bien mieux que la normale plate de la facette.
+    #[test]
+    fn normale_lisse_sphere() {
+        let c = [10.0, 10.0, 10.0];
+        let m = MeshBody::new(icosphere(5.0, c, 1), false);
+        let (mut e_flat, mut e_smooth) = (0.0f64, 0.0f64);
+        for (k, t) in m.tris.iter().enumerate() {
+            // Point à un quart d'un sommet.
+            let w = [0.6, 0.3, 0.1];
+            let p = [0, 1, 2].map(|a| w[0] * t[0][a] + w[1] * t[1][a] + w[2] * t[2][a]);
+            let r = sub(p, c);
+            let rl = dot(r, r).sqrt();
+            let r = r.map(|v| v / rl);
+            let nf = cr_of(sub(t[1], t[0]), sub(t[2], t[0]));
+            let nl = dot(nf, nf).sqrt();
+            let nf = nf.map(|v| v / nl);
+            let ns = m.smooth_normal_bary(k, w);
+            let s = if dot(nf, r) < 0.0 { -1.0 } else { 1.0 };
+            e_flat = e_flat.max(1.0 - s * dot(nf, r));
+            e_smooth = e_smooth.max(1.0 - s * dot(ns, r));
+        }
+        println!("1 − cos, normale plate {e_flat:.2e}, lisse {e_smooth:.2e}");
+        assert!(e_smooth < 0.3 * e_flat);
     }
 }
