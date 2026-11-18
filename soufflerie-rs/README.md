@@ -1742,7 +1742,7 @@ ancienne et nouvelle version lancées en alternance) :
 | `ar4` | 2,91 M (3,68 M) | 7,65 s | 3,35 s | ×2,3 | 1,3 s | 1,2 s |
 | `ar4b` | 4,27 M (9,10 M) | 29,4 s | 8,6 s | ×3,4 | 4,2 s | 2,2 s |
 | `ar4r2` (×2 puis ×4) | 5,52 M (14,1 M) | 35 s | 15,2 s | ×2,3 | 2,5 s | 2,5 s |
-| `ar4c3` (×2, couches ×4, ×8, ×16), 40 pas | 24,1 M (292 M) | 43,0 s | 11,2 s | ×3,8 | 18 s | 14 s |
+| `ar4c3` (×2, couches ×4, ×8, ×16), 40 pas | 24,1 M (292 M) | 43,0 s | 11,1 s | ×3,9 | 18 s | 9,5 s |
 
 `ar4c3` reproduit `--bande auto` sur l'aile AR 4 (trois couches de 16
 mailles) : c'est le cas qui ressemble le plus aux gros calculs, et celui
@@ -1768,6 +1768,8 @@ Par optimisation (profil par passe, `ar4` ; durées par lancement) :
 | tirage des raccords et remplissage du premier demi-pas de la grille fine en une passe | raccords | | −1,5 % | identique au bit |
 | couches creuses : le cœur de la collision ne lance que les mailles à calculer (un tiers des mailles stockées sont fantômes ou solides) | collision, couche ×16 | 7,2 ms | 6,9 ms | identique au bit |
 | collision pariétale : fractions q et codes des normales des 18 liens lus d'un coup au lieu d'un par direction derrière ses branches | collision pariétale, couche ×16 | 2,6 ms | 1,7 ms | identique au bit |
+| couches creuses : collision du cœur sans lecture du type des mailles de la liste (toutes fluides sans paroi) | collision, couche ×16 | 6,85 ms | 6,64 ms | identique au bit |
+| mise en place des couches : liens de paroi cherchés à moins de 1,5 maille de la surface seulement (un lien de √2 ne peut pas la couper plus loin), fantômes à remplir cherchés en parallèle | mise en place, couche ×16 | 3,9 s | 1,6 s | identique au bit |
 | distance à la surface par coques croissantes (même minimum que le parcours complet, test `distance_par_coques_exacte`) | mise en place des couches | 4,3 s | 1,4 s | identique au bit |
 
 **Précision.** Toutes les optimisations sauf deux rendent des champs et des
@@ -1842,6 +1844,16 @@ valeur instantanée (Cx au dernier relevé) en sort, de 6·10⁻⁴ en relatif.
 - Transport de ν̃ et collision limités aux mailles lues sur les couches
   (sans solides ni fantômes jamais lus) : aucun gain pour ν̃, limité par
   la mémoire des mailles actives.
+- Champ de vitesses en plans séparés (u_x, u_y, u_z, puis ρ écrit au
+  dernier pas seulement) : ν̃ −6 %, mais collision des couches +5 % (trois
+  flux d'écriture au lieu d'un) ; écarté.
+- Mailles pariétales lancées par motif de liens (groupes homogènes) :
+  collision pariétale 1,5 fois plus lente (localité perdue) ; écarté.
+- Boucles de 19 des raccords déroulées à la génération : à peine plus
+  rapide, et plus identique au bit (le compilateur replie autrement) ;
+  écarté.
+- Distance à la surface par listes de triangles par bloc de 8³ : plus
+  lent (listes trop longues) ; écarté.
 
 **Ce qui reste.** GPU libre, la collision de la veine prend 1,40 ms ;
 sans calcul ni tirage des voisins (mêmes lectures et écritures), elle
