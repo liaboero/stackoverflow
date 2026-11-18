@@ -348,7 +348,13 @@ Ce que cela montre :
 
 - `run3d --envergure fichier.csv` : répartition de la portance en
   envergure (c·cl/c_ref par tranche, efforts de la grille la plus fine sur
-  deux temps convectifs de plus).
+  deux temps convectifs de plus). Maquette maillée : l'effort de chaque
+  triangle est réparti sur son étendue en envergure selon la densité d'aire
+  du triangle (`span_distribution`). Posé au centre du triangle, il faisait
+  apparaître des creux et des bosses parasites : sur l'aile AR 4, maillée
+  par stations de 0,087 m, chaque tranche de 1/32 m recevait une ou deux
+  rangées de triangles (aire par tranche de 1 à 1,5). La répartition est
+  maintenant lisse (écart à la moyenne glissante < 0,002 hors des saumons).
 - Moment de tangage Cm des maquettes STL (et avec `--xref`), autour du
   point situé à xref longueur de référence de l'avant (quart de corde par
   défaut), positif à cabrer.
