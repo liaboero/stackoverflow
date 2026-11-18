@@ -841,7 +841,6 @@ fn feqIn(i: u32) -> f32 {{
 @compute @workgroup_size({wg})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
 {head}
-  let wk0 = wall[idx];
   // Solide, maille fantôme d'une grille fine (remplie par refine3d), ou
   // maille recouverte (recopiée de la grille fine, voir `mark_covered`).
   if (wk0 >= 0xfffffffdu) {{ return; }}
@@ -971,9 +970,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         sa_fns = SA_FNS,
         lam_fns = LAM_FNS,
         head = if walls {
-            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];"
+            "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];\n  let wk0 = wall[idx];"
         } else {
-            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }"
+            "  let t = gid.x + gid.y * nwg.x * WGu;\n  var idx = t;\n  // Grille creuse : liste des mailles à calculer (après les pariétales).\n  if (ACTN_C > 0u) {\n    if (t >= ACTN_C) { return; }\n    idx = wcell[WALLN_C + t];\n  } else if (idx >= P.N) { return; }\n  // Liste : mailles fluides sans lien de paroi, type connu sans le lire.\n  var wk0 = 0u;\n  if (ACTN_C == 0u) { wk0 = wall[idx]; }"
         },
         wg = if walls { 64 } else { step_wg() },
         // Mailles pariétales : fractions q et codes des normales des 18 liens
