@@ -47,6 +47,68 @@ pub fn lift() -> Color32 {
 pub fn warn() -> Color32 {
     pick(rgb(0x93650f), rgb(0xe2b04a))
 }
+/// Erreur.
+pub fn err() -> Color32 {
+    pick(rgb(0xb3261e), rgb(0xff8a80))
+}
+/// Calcul en marche, résultat établi.
+pub fn ok() -> Color32 {
+    pick(rgb(0x2e7d4f), rgb(0x6cc795))
+}
+/// Moment de tangage.
+pub fn moment() -> Color32 {
+    pick(rgb(0x6b4fa0), rgb(0xb59cf0))
+}
+/// Couleur translucide.
+pub fn alpha(c: Color32, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+}
+
+/// Style commun : espacements un peu plus aérés, coins arrondis, boutons
+/// plus hauts (cibles plus faciles à atteindre).
+pub fn setup_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        s.spacing.interact_size.y = 22.0;
+        s.spacing.slider_width = 130.0;
+        let r = egui::CornerRadius::same(5);
+        s.visuals.widgets.inactive.corner_radius = r;
+        s.visuals.widgets.hovered.corner_radius = r;
+        s.visuals.widgets.active.corner_radius = r;
+        s.visuals.widgets.open.corner_radius = r;
+        s.visuals.widgets.noninteractive.corner_radius = r;
+    });
+}
+
+/// Palettes du rendu 3D (lbm/src/gpu3d.rs, seqMap et divMap), pour les
+/// échelles de couleur de la vue 3D.
+pub fn render_seq(t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let a = [0.05, 0.11, 0.27];
+    let b = [0.10, 0.45, 0.62];
+    let c = [0.42, 0.78, 0.62];
+    let d = [0.99, 0.88, 0.35];
+    let mix = |p: [f32; 3], q: [f32; 3], u: f32| [0, 1, 2].map(|k| p[k] + (q[k] - p[k]) * u);
+    let v = if t < 0.33 {
+        mix(a, b, t / 0.33)
+    } else if t < 0.66 {
+        mix(b, c, (t - 0.33) / 0.33)
+    } else {
+        mix(c, d, (t - 0.66) / 0.34)
+    };
+    Color32::from_rgb((v[0] * 255.0) as u8, (v[1] * 255.0) as u8, (v[2] * 255.0) as u8)
+}
+
+/// Palette divergente du rendu 3D, t ∈ [−1, 1] ; valeur nulle : teinte du fond.
+pub fn render_div(t: f32) -> Color32 {
+    let t = t.clamp(-1.0, 1.0);
+    let bg = canvas();
+    let mid = [bg.r(), bg.g(), bg.b()].map(|c| (c as f32 / 255.0 * 1.04 + 0.01).clamp(0.0, 1.0));
+    let (end, u) = if t < 0.0 { ([0.13, 0.36, 0.70], -t) } else { ([0.78, 0.20, 0.15], t) };
+    let v = [0, 1, 2].map(|k| mid[k] + (end[k] - mid[k]) * u);
+    Color32::from_rgb((v[0] * 255.0) as u8, (v[1] * 255.0) as u8, (v[2] * 255.0) as u8)
+}
 /// Texte et traits sur le fond de la veine.
 pub fn ink() -> Color32 {
     pick(rgb(0x13202a), rgb(0xe1e8ed))

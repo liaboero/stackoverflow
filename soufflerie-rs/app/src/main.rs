@@ -25,6 +25,8 @@ use lbm::{EngineKind, Naca, ShapeKind, ShapeParams, Transition, TunnelConfig, Tu
 use rayon::prelude::*;
 
 #[cfg(feature = "gui")]
+mod capture;
+#[cfg(feature = "gui")]
 mod gui;
 #[cfg(feature = "gui")]
 mod launch;
@@ -34,6 +36,8 @@ mod wing_tab;
 mod sweep;
 #[cfg(feature = "gui")]
 mod tab3d;
+#[cfg(feature = "gui")]
+mod tab3d_calc;
 #[cfg(feature = "gui")]
 mod worker;
 #[cfg(feature = "gui")]
@@ -70,7 +74,8 @@ fn usage() -> ! {
          \x20                 fichier .sgeo : mise en place et arêtes vives lues dans le fichier\n\
          \x20         --raff 1|2 (GPU, 2D et 3D : grilles 2 ou 4 fois plus fines autour de la maquette)\n\
          \x20         --paroi 0 (run, polar : coefficients bruts, sans correction du blocage de la veine)\n\
-         \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)"
+         \x20         --rendu auto|dx12|vulkan|glow (interface : rendu graphique)\n\
+         \x20         --tab 3d | --stl f.stl [--prereglage apercu|rapide|precis|validation] [--lancer 1] [mise en place --stl] (interface, soufflerie 3D)"
     );
     std::process::exit(2)
 }
