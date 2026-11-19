@@ -156,7 +156,9 @@ fn main() {
     }
     sim.periodic_span = true;
     if essai != 0 {
-        sim.set_essai(essai, 0.0);
+        // AILE_NUCAP : plafond de ν (multiple de ν) pour les essais 1024 / 2048.
+        let cap = std::env::var("AILE_NUCAP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        sim.set_essai(essai, cap * u as f64 * lf / re);
     }
     sim.run(((t_end - 1.0) * spt) as usize, &ramp);
     let _ = sim.take_forces();
@@ -490,18 +492,55 @@ fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64, nu: f
             println!("{o}");
         }
     }
+    if let Ok(v) = std::env::var("AILE_PAROI") {
+        // Mailles pariétales de la rangée centrale, intrados (i) ou extrados
+        // (e) selon AILE_PAROI : x/c, distance (mailles fines), u_τ, glissement,
+        // vitesse du nœud et perte de p₀ (÷ q).
+        let j = (j0 + j1) / 2;
+        let ws = sim.finest_wall_state();
+        let mut rows: Vec<(f64, String)> = Vec::new();
+        for (k, (p, _)) in sim.finest_wall_cells().into_iter().enumerate() {
+            if ((p[1] - org[1]) * sc).round() as usize != j {
+                continue;
+            }
+            let (i, kk) = (((p[0] - org[0]) * sc).round() as usize, ((p[2] - org[2]) * sc).round() as usize);
+            let zc = pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (p[0] - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+            if (p[2] > zc) != (v == "e") {
+                continue;
+            }
+            let c = at(i, j, kk);
+            let w = ws.get(k).copied().unwrap_or([0.0; 4]);
+            let xc = (p[0] - xle) / ch;
+            rows.push((xc, format!("{:.4} {:.3} {:.5} {:.4} {:.4} {:.3}", xc, dist(p[0], p[2]) * sc, w[0], w[1], (c[0] * c[0] + c[2] * c[2]).sqrt(), rinf * (hinf - h(c).0) / q)));
+        }
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for r in rows {
+            println!("  paroi {}", r.1);
+        }
+    }
     if std::env::var("AILE_TE").is_ok() {
         // Carte du bord de fuite (grille fine, rangée centrale) : '#' dans
         // le profil, maille pariétale : u en millièmes (et '!' si arête vive,
         // cos < 0,5), '.' fluide.
         let j = (j0 + j1) / 2;
         let wc: std::collections::HashMap<(i64, i64), f32> = sim.finest_wall_cells().into_iter().filter(|(p, _)| ((p[1] - org[1]) * sc).round() as usize == j).map(|(p, e)| ((((p[0] - org[0]) * sc).round() as i64, ((p[2] - org[2]) * sc).round() as i64), e)).collect();
-        let pte = pts[0];
+        // AILE_CARTE=x/c : carte centrée sur l'intrados à cette abscisse.
+        let pte = match std::env::var("AILE_CARTE").ok().and_then(|v| v.parse::<f64>().ok()) {
+            Some(xc) => {
+                let xr = xle + xc * ch;
+                let mut zr = pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (xr - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+                while inside(xr, zr) {
+                    zr -= 0.01 / sc;
+                }
+                [xr, zr]
+            }
+            None => pts[0],
+        };
         let (it, kt) = (((pte[0] - org[0]) * sc).round() as i64, ((pte[1] - org[2]) * sc).round() as i64);
         println!("  bord de fuite en ({:.2}, {:.2}) mailles fines", (pte[0] - org[0]) * sc, (pte[1] - org[2]) * sc);
         for k in (kt - 4..=kt + 4).rev() {
             let mut o = format!("  {:>4.2} ", org[2] + k as f64 / sc - pte[1]);
-            for i in it - 10..=it + 3 {
+            for i in it - 10..=it + 6 {
                 let (xr, zr) = (org[0] + i as f64 / sc, org[2] + k as f64 / sc);
                 let c = at(i as usize, j, k as usize);
                 let t = if let Some(e) = wc.get(&(i, k)) {

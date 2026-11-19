@@ -1342,22 +1342,25 @@ références vérifiées à leur source.
 **3D** (Cz et Cx du bilan sur boîte, extrapolé à volume nul, avec Cx
 intégré sur la surface entre parenthèses ; L = 16 pour l'aile AR 4, L = 8
 pour TR-1208, STL lissé ; mesure de TR-1208 lue sur la figure à ±0,01
-près). Recalculé après la correction de la normale des nœuds posés sur la
-paroi (voir « Normale de paroi des nœuds posés sur la surface ») :
+près). Recalculé après le plancher du glissement (voir « Glissement des
+nœuds posés sur la paroi »), entre parenthèses la valeur précédente
+(normale de paroi corrigée, sans plancher) :
 
-| Cas | Cz | Cx boîte (surface) | Avant la correction | Mesure Cz / Cx | VSPAERO Cz / Cx |
+| Cas | Cz | Cx boîte (surface) | Avant le plancher | Mesure Cz / Cx | VSPAERO Cz / Cx |
 | --- | --- | --- | --- | --- | --- |
-| AR 4, 4°, ×4 (non lissé) | 0,2878 | 0,020 (0,016) | Cz 0,272 | — | 0,251 à 0,265 / 0,021 à 0,022 |
-| TR-1208, 4°, ×4 | 0,2808 | 0,022 (0,008) | 0,291 / 0,041 | 0,257 / 0,011 | 0,266 / 0,015 |
-| TR-1208, 4°, ×4 + couche ×8 | 0,2846 | 0,016 (0,009) | 0,294 / 0,036 | id. | id. |
-| TR-1208, 8°, ×4 | 0,5322 | 0,034 (0,036) | 0,555 / 0,044 | 0,499 / 0,021 | 0,531 / 0,026 |
-| TR-1208, 8°, ×4 + couche ×8 | 0,5478 | 0,027 (0,030) | 0,566 / 0,037 | id. | id. |
+| AR 4, 4°, ×4 (non lissé) | 0,2898 | 0,015 (0,016) | 0,2878 / 0,020 | — | 0,251 à 0,265 / 0,021 à 0,022 |
+| TR-1208, 4°, ×4 | 0,2794 | 0,018 (0,008) | 0,2808 / 0,022 | 0,257 / 0,011 | 0,266 / 0,015 |
+| TR-1208, 4°, ×4 + couche ×8 | 0,2824 | 0,015 (0,009) | 0,2846 / 0,016 | id. | id. |
+| TR-1208, 8°, ×4 | 0,5336 | 0,031 (0,036) | 0,5322 / 0,034 | 0,499 / 0,021 | 0,531 / 0,026 |
+| TR-1208, 8°, ×4 + couche ×8 | 0,5457 | 0,026 (0,030) | 0,5478 / 0,027 | id. | id. |
 
-La portance dépasse la mesure de 9 à 11 % et VSPAERO de 3 à 7 %. La
+La portance dépasse la mesure de 9 à 10 % et VSPAERO de 3 à 6 %. La
 traînée de la boîte, mesure de référence (l'intégration sur la surface la
 sous-estime aux faibles incidences, voir « Traînée : où est l'excès »),
-est 1,3 à 1,5 fois la mesure avec la couche ×8 (0,016 à 4°, 0,027 à 8°),
-contre 3 fois avant la correction ; elle décroît encore en affinant.
+est 1,3 fois la mesure avec la couche ×8 (0,015 à 4°, 0,026 à 8°), contre
+3 fois avant la correction de la normale ; elle décroît encore en
+affinant. Celle de l'aile AR 4 passe sous l'estimation de VSPAERO (dont la
+traînée de frottement est une formule de plaque plane).
 
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
 
@@ -1605,6 +1608,55 @@ forme en escalier. Rendre adhérentes les mailles à portée de lien de l'arête
   (`--essai 1048576`) : la couche de ν̃ s'arrête plus net, la traînée ne
   change pas.
 
+### Glissement des nœuds posés sur la paroi
+
+**Constat** (`aile_infinie`, 4°, 128 mailles, relevé paroi par paroi
+`AILE_PAROI=i`) : sur l'intrados, là où la paroi croise une rangée de nœuds
+(x/c = 0,59, 0,84, 0,97), le nouveau premier nœud est presque sur la paroi
+(y_n = 0,003 à 0,015) et ne va qu'à 0,047 contre 0,089 pour ses voisins. La
+couche lente d'une maille qui en résulte est advectée vers l'aval (vitesse
+du premier rang encore 15 % sous celle d'avant la marche au rang suivant),
+et la perte de pression totale du premier rang y triple ou quintuple : la
+perte intégrée du profil passe de 0,006 à mi-corde à 0,015 à x/c = 0,7.
+
+**Cause.** Ce nœud est dans le coin d'une marche de l'escalier (liens vers
+la paroi dessous et vers l'amont, `AILE_TE=1 AILE_CARTE=0.588`) :
+l'interpolation de Bouzidi lui donne la vitesse de la paroi. Or le
+glissement était tiré de sa propre vitesse (u_s = min(u_n, u_h) − pente · y_n) :
+rien d'autre ne le fixe, et il dérive vers le bas, freinant le fluide au-
+dessus bien plus que la contrainte pariétale ρu_τ². Le plancher de 0,1
+maille sur y_n dans la pente n'y est pour rien (distance vraie : résultat
+identique).
+
+**Correction : le profil ancré à h devient un plancher du glissement**,
+u_s ≥ u_h − pente · h (vitesse relevée à h, qui ne dépend pas du nœud). Là
+où le nœud donne plus (paroi convexe, couche limite plus mince que h,
+gradient adverse), rien ne change ; c'est ce qui distingue le plancher de
+l'ancienne borne u_s ≤ u_h − pente · h, qui freinait le nez de la plaque
+plane. Ancrer le glissement à h partout (`--essai 131072`) ou pondérer les
+deux ancrages par la distance du nœud baisse la traînée à 0° et 4° mais
+l'augmente de 5 à 10 % à 8° : sur l'extrados en gradient adverse, le profil
+calculé entre le nœud et h est plus plat que la couche linéaire.
+
+| Aile infinie, 64 / 128 mailles | Cx avant | Cx plancher | Cz plancher | Ladson Cx / Cz |
+| --- | --- | --- | --- | --- |
+| 0° | 0,0166 / 0,0152 | 0,0145 / 0,0138 | −0,013 / −0,013 | 0,0081 / 0 |
+| 4° | 0,0238 / 0,0186 | 0,0157 / 0,0140 | 0,458 / 0,458 | 0,0081 à 0,0088 / 0,43 à 0,44 |
+| 8° | 0,0306 / 0,0231 | 0,0286 / 0,0224 | 0,971 / 0,898 | 0,0099 à 0,0105 / 0,87 à 0,89 |
+
+La traînée de profil reste 1,6 à 2,2 fois la mesure à 128 mailles. Plaque
+plane (`plaque3d`, L = 64) : θ inchangé au calage 0,05, −5 % au calage 0,3.
+TR-1208 et aile AR 4 : traînée −3 à −26 %, portance à ±0,8 % (tableau de
+« Comparaison aux références : état actuel »).
+
+**Essai écarté : viscosité turbulente de la couche externe.** Plafonner la
+viscosité du premier nœud et de la couche pariétale à celle de la couche
+externe réelle (≈ 140 ν à mi-corde, `--essai 1024` avec `AILE_NUCAP`) rend
+la traînée deux fois plus forte (Cx = 0,039 à 4°) : u_τ chute de moitié, la
+couche lente s'étend sur 5 mailles. Comme sur la plaque plane, le premier
+nœud doit garder une viscosité de l'ordre de κ u_τ h pour transmettre ρu_τ²
+à travers une couche limite plus mince qu'une maille.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -1630,7 +1682,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur

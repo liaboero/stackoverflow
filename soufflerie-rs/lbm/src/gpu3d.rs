@@ -489,6 +489,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       // (plaque plane, `plaque3d` : θ −12 %, perte de pression totale du nez
       // −30 %).
       var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
+      // Plancher : le profil de la couche pariétale ancré à h. Là où la paroi
+      // croise une rangée de nœuds, le nouveau premier nœud (y_n ≪ 1, dans
+      // le coin d'une marche : liens vers la paroi dessous et vers l'amont)
+      // a la vitesse du glissement par l'interpolation de Bouzidi ; le
+      // glissement tiré de sa propre vitesse n'est alors plus fixé que par
+      // lui-même et dérive vers le bas (u_n ≈ 0,5 U contre 0,9 U aux voisins,
+      // NACA 0012 à 4°, 128 mailles par corde) : la couche lente d'une maille
+      // qui en résulte est advectée jusqu'au bord de fuite (perte de pression
+      // totale du premier rang ×3 à ×5). Le profil relevé à h n'en dépend
+      // pas ; là où le nœud donne plus (paroi convexe, couche plus mince que
+      // h, gradient adverse), le glissement reste celui du nœud. Diagnostic :
+      // sans plancher (4194304).
+      if ((P.essai & 4194304u) == 0u) { us = max(us, ut - ut2 * ut2 * yw / (P.nu + nuw)); }
       // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
       if ((P.essai & 4096u) != 0u) { us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }
       // Diagnostic : profil ancré à h seulement (131072).
@@ -3753,7 +3766,8 @@ impl Gpu3D {
     /// premier nœud nulle ; 65536 (avec 16) glissement libre à la vitesse
     /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement ;
     /// 262144 loi de paroi aussi aux arêtes vives ; 524288 ν̃ du premier nœud
-    /// κ u_τ y_n (distance du nœud) ; 1048576 advection de ν̃ de Lax–Wendroff.
+    /// κ u_τ y_n (distance du nœud) ; 1048576 advection de ν̃ de Lax–Wendroff ;
+    /// 4194304 sans le plancher du glissement (profil ancré à h).
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
