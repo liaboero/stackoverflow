@@ -317,6 +317,7 @@ impl WindTunnel {
             collision: cfg.collision,
             bouzidi: cfg.bouzidi,
             sponge_fraction: 0.12,
+            absorb: None,
             half: cfg.gpu_half,
         };
         let body = Body::new(cfg.shape, &cfg.params, l as f64, x0, y0, cfg.u_in as f64);

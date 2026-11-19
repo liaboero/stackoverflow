@@ -21,6 +21,7 @@ pub mod bodies3d;
 pub mod cpu;
 pub mod d2q9;
 pub mod fluid;
+pub mod fwh;
 pub mod geom3d;
 pub mod geometry;
 pub mod ibl3d;

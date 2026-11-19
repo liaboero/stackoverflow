@@ -275,7 +275,7 @@ fn step(@builtin(global_invocation_id) gid: vec3<u32>) {
     sa[idx] = vec4<f32>(ux, uy, s.z, s.w);
     tau += 3.0 * nu_turb(s.w);
   }
-  let p = collide(f, tau, c18, aux[P.nx + y]);
+  let p = collide(f, tau, c18, max(aux[P.nx + y], aux[P.nx + P.ny + x]));
   st9(idx, p);
   let wid = k >> 2u;
   if (wid != 0u) {

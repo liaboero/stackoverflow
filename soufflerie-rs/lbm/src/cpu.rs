@@ -40,6 +40,10 @@ pub struct SolverConfig {
     pub collision: Collision,
     pub bouzidi: bool,
     pub sponge_fraction: f64,
+    /// Couches absorbantes : `None`, bandes haute et basse de ny/8 lignes ;
+    /// `Some(w)` (moteur GPU seulement) : couches de w mailles sur les quatre
+    /// côtés, entrée et sortie comprises (calculs aéroacoustiques).
+    pub absorb: Option<usize>,
     /// Moteur GPU : populations en demi-précision (deux fois moins de mémoire).
     pub half: bool,
 }
@@ -114,6 +118,7 @@ impl CpuSolver {
     pub fn new(cfg: SolverConfig, threads: usize) -> CpuSolver {
         let (nx, ny) = (cfg.nx, cfg.ny);
         let n = nx * ny;
+        assert!(cfg.absorb.is_none(), "couches absorbantes sur quatre côtés : moteur GPU seulement");
         let absorb = ((ny as f64) / 8.0).round();
         let sigma_row = (0..ny)
             .map(|y| {
