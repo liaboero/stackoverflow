@@ -1,6 +1,8 @@
 //! Diagnostic : traînée 3D d'une maquette STL — échange aux parois, gradient
 //! de pression le long de la veine loin du corps, et poussée correspondante
 //! sur le volume du corps (−V dp/dx).
+//!
+//!   trainee3d <stl> [marge] [alpha] [L] [raff] [--raff-auto N]
 use lbm::bodies3d::Body3D;
 use lbm::gpu3d::Gpu3D;
 use lbm::stl::{MeshSetup, Unit};
@@ -24,7 +26,12 @@ fn main() {
     let (body, _) = Body3D::from_mesh(&tris, l, &setup).unwrap();
     let u = 0.1f32;
     let spt = l as f64 / u as f64;
-    let mut g = Gpu3D::with_refinement(&body, u as f64 * l as f64 / re, u, true, true, depth).unwrap();
+    // `--raff-auto N` (en fin de ligne) : raffinement automatique, N mailles
+    // par longueur à la paroi, au lieu de `depth` grilles boîtes.
+    let mut g = match lbm::raff_auto::options_from_args(&a) {
+        Some(o) => lbm::raff_auto::build(&body, u as f64 * l as f64 / re, u, true, true, &o).unwrap(),
+        None => Gpu3D::with_refinement(&body, u as f64 * l as f64 / re, u, true, true, depth).unwrap(),
+    };
     let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
     g.run((16.0 * spt) as usize, &ramp);
     let _ = g.take_forces();

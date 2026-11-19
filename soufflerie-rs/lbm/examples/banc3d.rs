@@ -10,6 +10,8 @@
 //! `ar4b` (idem plus une couche pariétale ×4 de 16 mailles), `ar4r2` (grilles
 //! ×2 et ×4), `ar4c3` (grille ×2 et trois couches ×4, ×8, ×16 : `--bande auto`), `ar4n` (sans
 //! raffinement), `sphere` (Re = 1000, L = 16, sous-maille sans loi de paroi).
+//! `--raff-auto N` remplace le raffinement du cas par le raffinement
+//! automatique (`lbm::raff_auto`, N mailles par longueur à la paroi).
 //! La boucle reprend celle de `soufflerie run3d` : efforts relevés tous les
 //! quarts de temps convectif, intégration sur la surface et bilan sur boîtes
 //! tous les demi-temps convectifs pendant la fenêtre de moyenne.
@@ -61,7 +63,10 @@ fn main() {
     let nu = U as f64 * l as f64 / re;
     let sa = re >= lbm::tunnel::RE_SA_AUTO;
     let t0 = Instant::now();
-    let mut sim = Gpu3D::with_refinement_edges(&body, nu, U, true, sa, depth, false, false, &bands).expect("GPU");
+    let mut sim = match lbm::raff_auto::options_from_args(&args) {
+        Some(o) => lbm::raff_auto::build(&body, nu, U, true, sa, &o).expect("GPU"),
+        None => Gpu3D::with_refinement_edges(&body, nu, U, true, sa, depth, false, false, &bands).expect("GPU"),
+    };
     let prep = t0.elapsed().as_secs_f64();
     let cells = sim.grid_cells();
     let per_step: f64 = cells.iter().map(|&(n, d)| (n as f64) * (1u64 << d) as f64).sum();
