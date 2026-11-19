@@ -245,6 +245,9 @@ fn main() {
             );
         }
     }
+    if std::env::var("AILE_P0").is_ok() {
+        perte_p0(&mut sim, &pts, lf, ny, u as f64);
+    }
     let bl: Vec<String> = bx.iter().zip(MARGES).filter(|(b, _)| b[2] > 0.0).map(|(b, m)| format!("{m}: {:.4}/{:.5}", b[1] / b[2], b[0] / b[2])).collect();
     println!("  échange (tranche centrale) Cz/Cx {:.4}/{:.5}", ex[1] / nrel as f64, ex[0] / nrel as f64);
     println!("  bilan (marge en cordes : Cz/Cx) {}", bl.join(" · "));
@@ -264,4 +267,141 @@ fn main() {
         if ok { "" } else { " · DIVERGÉ" },
         t0.elapsed().as_secs_f64()
     );
+}
+
+/// Diagnostic : où se perd la pression totale. Invariant de Bernoulli
+/// isotherme H = c_s² ln ρ + u²/2 (exact pour l'écoulement non visqueux
+/// stationnaire du schéma), déficit ρ∞ (H∞ − H) / q. Intégré sur des
+/// verticales (x fixé, toute la hauteur de la grille fine, mailles fluides,
+/// rangées de la tranche centrale) : sa croissance d'une station à l'autre
+/// localise la perte, et sa valeur loin en aval approche la traînée de
+/// profil. Puis le déficit moyen au premier rang de mailles fluides (à moins
+/// de 1,5 maille fine de la paroi), par tranche de corde, extrados/intrados.
+fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64) {
+    let (mac, d, org, sc) = sim.finest_macros();
+    let q = 0.5 * u * u;
+    let h = |c: &[f32; 4]| {
+        let (ux, uy, uz, r) = (c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64);
+        (r.ln() / 3.0 + 0.5 * (ux * ux + uy * uy + uz * uz), r)
+    };
+    let inside = |x: f64, z: f64| {
+        let mut c = false;
+        let n = pts.len();
+        for k in 0..n {
+            let (a, b) = (pts[k], pts[(k + n - 1) % n]);
+            if (a[1] > z) != (b[1] > z) && x < (b[0] - a[0]) * (z - a[1]) / (b[1] - a[1]) + a[0] {
+                c = !c;
+            }
+        }
+        c
+    };
+    let dist = |x: f64, z: f64| {
+        let mut m = f64::INFINITY;
+        let n = pts.len();
+        for k in 0..n {
+            let (a, b) = (pts[k], pts[(k + 1) % n]);
+            let (ex, ez) = (b[0] - a[0], b[1] - a[1]);
+            let t = (((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez)).clamp(0.0, 1.0);
+            m = m.min(((x - a[0] - t * ex).powi(2) + (z - a[1] - t * ez).powi(2)).sqrt());
+        }
+        m
+    };
+    let (yc0, yc1) = (2.0 * (ny / 4) as f64 - 2.0, 2.0 * (ny / 4) as f64 + 2.0);
+    let (j0, j1) = (((yc0 - org[1]) * sc).ceil() as usize, ((yc1 - org[1]) * sc).floor() as usize);
+    let xle = pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+    let xte = pts.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+    let ch = xte - xle;
+    let at = |i: usize, j: usize, k: usize| &mac[i + d[0] * (j + d[1] * k)];
+    // Référence : colonne amont (x = 3) de la grille fine.
+    let (mut hinf, mut rinf, mut nn) = (0.0, 0.0, 0.0);
+    for j in j0..=j1 {
+        for k in 3..d[2] - 3 {
+            let (hh, r) = h(at(3, j, k));
+            hinf += hh;
+            rinf += r;
+            nn += 1.0;
+        }
+    }
+    hinf /= nn;
+    rinf /= nn;
+    let xs = [-0.2, -0.05, 0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 0.98, 1.0, 1.02, 1.05, 1.1, 1.25, 1.5, 2.0];
+    let mut line = Vec::new();
+    for xc in xs {
+        let x = xle + xc * ch;
+        let i = ((x - org[0]) * sc).round() as i64;
+        if i < 3 || i > d[0] as i64 - 4 {
+            continue;
+        }
+        let i = i as usize;
+        let xr = org[0] + i as f64 / sc;
+        let mut s = 0.0;
+        for j in j0..=j1 {
+            for k in 3..d[2] - 3 {
+                let zr = org[2] + k as f64 / sc;
+                if inside(xr, zr) {
+                    continue;
+                }
+                s += rinf * (hinf - h(at(i, j, k)).0);
+            }
+        }
+        line.push(format!("{xc}: {:.4}", s / ((j1 - j0 + 1) as f64) / sc / (q * lf)));
+    }
+    println!("  perte de p₀ intégrée (x/c : ∫/(q c)) {}", line.join(" · "));
+    // Premier rang de mailles fluides.
+    let nb = 20;
+    let mut bins = vec![[0.0f64; 4]; nb];
+    for j in j0..=j1 {
+        for k in 3..d[2] - 3 {
+            for i in 3..d[0] - 3 {
+                let (xr, zr) = (org[0] + i as f64 / sc, org[2] + k as f64 / sc);
+                if xr < xle - 1.0 || xr > xte + 1.0 || inside(xr, zr) {
+                    continue;
+                }
+                let dw = dist(xr, zr) * sc;
+                if dw > 1.5 {
+                    continue;
+                }
+                let b = (((xr - xle) / ch * nb as f64).floor().max(0.0) as usize).min(nb - 1);
+                // Côté : au-dessus ou au-dessous de la corde.
+                let zc = pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (xr - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+                let o = if zr > zc { 0 } else { 2 };
+                bins[b][o] += rinf * (hinf - h(at(i, j, k)).0) / q;
+                bins[b][o + 1] += 1.0;
+            }
+        }
+    }
+    let v: Vec<String> = bins.iter().enumerate().map(|(b, x)| format!("{:.2}:{:.3}/{:.3}", (b as f64 + 0.5) / nb as f64, x[0] / x[1].max(1.0), x[2] / x[3].max(1.0))).collect();
+    if let Ok(v) = std::env::var("AILE_COL") {
+        // Colonnes x/c ∈ [a, b] : 6 premiers nœuds fluides au-dessus de
+        // l'extrados, distance à la paroi (mailles fines) et déficit.
+        let ab: Vec<f64> = v.split(',').filter_map(|t| t.parse().ok()).collect();
+        let j = (j0 + j1) / 2;
+        let ws = sim.finest_wall_state();
+        let wc: std::collections::HashMap<(i64, i64, i64), String> = sim.finest_wall_cells().into_iter().enumerate().map(|(k, (p, e))| {
+            let st = ws.get(k).map(|v| format!(" uτ {:.4} uw {:.4}", v[0], v[1])).unwrap_or_default();
+            (((p[0] * sc).round() as i64, (p[1] * sc).round() as i64, (p[2] * sc).round() as i64), format!(" e{e:.2}{st}"))
+        }).collect();
+        let (ia, ib) = (((xle + ab[0] * ch - org[0]) * sc) as usize, ((xle + ab[1] * ch - org[0]) * sc) as usize);
+        for i in ia..=ib {
+            let xr = org[0] + i as f64 / sc;
+            let mut k = d[2] - 4;
+            while k > 3 && !inside(xr, org[2] + (k - 1) as f64 / sc) && (org[2] + k as f64 / sc) > zq_mid(pts) {
+                k -= 1;
+            }
+            let mut o = format!("    x/c {:.3} :", (xr - xle) / ch);
+            for kk in k..(k + 6).min(d[2] - 3) {
+                let zr = org[2] + kk as f64 / sc;
+                let c = at(i, j, kk);
+                let yr = org[1] + j as f64 / sc;
+                let e = wc.get(&((xr * sc).round() as i64, (yr * sc).round() as i64, (zr * sc).round() as i64)).cloned().unwrap_or_default();
+                o += &format!(" [{:.2} {:.3} u {:.4} w {:.4}{e}]", dist(xr, zr) * sc, rinf * (hinf - h(c).0) / q, c[0], c[2]);
+            }
+            println!("{o}");
+        }
+    }
+    println!("  perte de p₀ au premier rang (x/c:extrados/intrados) {}", v.join(" "));
+}
+
+fn zq_mid(pts: &[[f64; 2]]) -> f64 {
+    0.5 * (pts[0][1] + pts[pts.len() / 2][1])
 }

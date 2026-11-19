@@ -1339,28 +1339,25 @@ références vérifiées à leur source.
 | CD à 0° | 0,00826 | Ladson, transition déclenchée : 0,0080 à 0,0081 | +2 à 3 % |
 | CL à 15° | 1,5526 | Ladson (15,25°) : 1,513 à 1,528 | +2 à 3 % |
 
-**3D** (Cz du bilan sur boîte, Cx intégré sur la surface ; L = 16 pour
-l'aile AR 4, L = 8 pour TR-1208 ; mesure de TR-1208 lue sur la figure à
-±0,01 près) :
+**3D** (Cz et Cx du bilan sur boîte, extrapolé à volume nul, avec Cx
+intégré sur la surface entre parenthèses ; L = 16 pour l'aile AR 4, L = 8
+pour TR-1208, STL lissé ; mesure de TR-1208 lue sur la figure à ±0,01
+près). Recalculé après la correction de la normale des nœuds posés sur la
+paroi (voir « Normale de paroi des nœuds posés sur la surface ») :
 
-| Cas | Cz | Cx | Mesure Cz / Cx | VSPAERO Cz / Cx |
-| --- | --- | --- | --- | --- |
-| AR 4, 4°, ×4 | 0,2723 | 0,0237 | — | 0,251 à 0,265 / 0,021 à 0,022 |
-| AR 4, 8°, ×4 | 0,5699 | 0,0516 | — | 0,501 à 0,529 / 0,039 à 0,045 |
-| TR-1208, 4°, ×4 | 0,2856 | 0,0114 | 0,257 / 0,011 | 0,266 / 0,015 |
-| TR-1208, 4°, ×4, STL lissé | 0,2909 | 0,0140 | id. | id. |
-| TR-1208, 4°, ×4 + couche ×8, lissé | 0,2944 | 0,0156 | id. | id. |
-| TR-1208, 8°, ×4 | 0,5394 | 0,0387 | 0,499 / 0,021 | 0,531 / 0,026 |
-| TR-1208, 8°, ×4, STL lissé | 0,5550 | 0,0431 | id. | id. |
-| TR-1208, 8°, ×4 + couche ×8, lissé | 0,5656 | 0,0372 | id. | id. |
+| Cas | Cz | Cx boîte (surface) | Avant la correction | Mesure Cz / Cx | VSPAERO Cz / Cx |
+| --- | --- | --- | --- | --- | --- |
+| AR 4, 4°, ×4 (non lissé) | 0,2878 | 0,020 (0,016) | Cz 0,272 | — | 0,251 à 0,265 / 0,021 à 0,022 |
+| TR-1208, 4°, ×4 | 0,2808 | 0,022 (0,008) | 0,291 / 0,041 | 0,257 / 0,011 | 0,266 / 0,015 |
+| TR-1208, 4°, ×4 + couche ×8 | 0,2846 | 0,016 (0,009) | 0,294 / 0,036 | id. | id. |
+| TR-1208, 8°, ×4 | 0,5322 | 0,034 (0,036) | 0,555 / 0,044 | 0,499 / 0,021 | 0,531 / 0,026 |
+| TR-1208, 8°, ×4 + couche ×8 | 0,5478 | 0,027 (0,030) | 0,566 / 0,037 | id. | id. |
 
-La portance dépasse la mesure de 8 à 15 % et VSPAERO de 2 à 11 %, et
-l'écart croît en affinant : ce n'est pas un défaut de résolution. La
-traînée intégrée sur la surface paraît juste à 4° (×4) et trop forte de 40
-à 80 % à 8°. Mais l'intégration sur la surface sous-estime la traînée aux
-faibles incidences (voir « Traînée : où est l'excès ») : le bilan sur boîte
-donne 0,028 à 4° (×4), 2,5 fois la mesure. L'erreur de placement du bord de
-fuite (±3 % à ×4) ne couvre pas l'écart.
+La portance dépasse la mesure de 9 à 11 % et VSPAERO de 3 à 7 %. La
+traînée de la boîte, mesure de référence (l'intégration sur la surface la
+sous-estime aux faibles incidences, voir « Traînée : où est l'excès »),
+est 1,3 à 1,5 fois la mesure avec la couche ×8 (0,016 à 4°, 0,027 à 8°),
+contre 3 fois avant la correction ; elle décroît encore en affinant.
 
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
 
@@ -1499,6 +1496,56 @@ La plus grande part de l'excès existe sans frottement (glissement libre) :
 c'est elle qu'il faudrait trouver ensuite (perte de pression totale
 au bord d'attaque, rebond interpolé, arêtes adhérentes du bord de fuite).
 
+### Normale de paroi des nœuds posés sur la surface
+
+**Localiser la perte.** `aile_infinie` mesure désormais (`AILE_P0=1`) la
+perte de pression totale, déficit de l'invariant de Bernoulli isotherme
+H = c_s² ln ρ + u²/2 (exact pour l'écoulement non visqueux stationnaire du
+schéma), intégrée sur des verticales à x fixé, puis au premier rang de
+mailles fluides par tranche de corde. En glissement libre comme avec la loi
+de paroi, la perte du premier rang saute brutalement (de 0,03 q à 0,4 q en
+glissement libre) en quelques points de la corde. Ces points se
+déplacent quand on décale l'aile verticalement d'une fraction de maille
+(`AILE_DZ`) : ce sont les endroits où la paroi, presque horizontale,
+traverse une rangée de nœuds. La perte qui y naît part ensuite dans le
+sillage.
+
+**Cause.** Au point de traversée, un nœud fluide se trouve à moins de 0,2
+maille de la paroi. Les profils (`AILE_COL=a,b`, avec u_τ et glissement de
+chaque maille pariétale) le montrent arrêté (u = 0,003 contre 0,11 au
+large, déficit 1,5 q), avec u_τ = 0,0003 contre 0,0043 chez ses voisins.
+`Body3D::wall_normal` prenait la normale comme gradient de la distance
+**non signée** par différences centrées de ±0,2 maille : à moins de 0,2
+maille de la paroi, ces différences enjambent la surface, et la composante
+normale du gradient s'annule. La normale de ce nœud était donc fausse.
+Le relevé de la loi de paroi à h = 2 tombait dans le corps et la loi se
+rabattait sur la vitesse du nœud lui-même. Le glissement u_s ≤ u_n le
+gardait alors arrêté, piège stable puisque rien d'autre n'entraîne un
+nœud posé sur la paroi. Le défaut touche toutes les formes, analytiques ou
+maillées.
+
+**Correction.** Gradient de la distance signée (négative dans le corps,
+`Body3D::inside`). Ce n'est pas un réglage : la normale est celle de la
+géométrie. Le nœud repart (u = 0,088).
+
+**Résultats**, aile infinie (bilan sur boîte, 64 / 128 mailles par corde) :
+
+| α | Cx avant | Cx après | Cz après (128) | Ladson Cx / Cz |
+| --- | --- | --- | --- | --- |
+| 0° | 0,032 / 0,023 | 0,019 / 0,0175 | −0,039 | 0,0081 / 0 |
+| 4° | 0,034 / 0,024 | 0,026 / 0,021 | 0,446 (avant 0,431) | 0,0081 à 0,0088 / 0,43 à 0,44 |
+| 8° | 0,042 / 0,033 | 0,033 / 0,026 | 0,885 (avant 0,890) | 0,0099 à 0,0105 / 0,87 à 0,89 |
+
+Sur TR-1208, la traînée de la boîte passe de 0,036 à 0,016 à 4° et de 0,037
+à 0,027 à 8° (×4 + couche ×8), la portance baisse de 3 % (tableau de
+« Comparaison aux références »). Il reste sur l'aile infinie 2 à 2,5 fois
+la traînée mesurée à 128 mailles.
+
+**Essais écartés.** Prendre le glissement libre à la vitesse relevée à h
+(`--essai 65552`), ou ancrer le profil de la couche pariétale à h seulement
+(`--essai 131072`, u_s = u_h − pente · h) : gain à 64 mailles mais nul à
+128, et la portance monte.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -1524,7 +1571,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`) et profils pariétaux (`AILE_COL=a,b`, x/c) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur

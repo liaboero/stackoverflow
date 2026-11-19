@@ -404,6 +404,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let y0 = max(0.1, gw.w);
     var ut = ut0;
     var yw = y0;
+    var th = tv0;
     {
       // Loi de paroi alimentée à une hauteur fixe h = WM_H au-dessus du pied
       // de la normale (Kawai et Larsson 2012) : au premier nœud, l'erreur
@@ -430,7 +431,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         ds += wv.x * wv.y * wv.z * wdist[ci];
       }
       if (ok && abs(ds - WM_H) < 0.5) {
-        ut = length(us3 - dot(us3, gw.xyz) * gw.xyz);
+        th = us3 - dot(us3, gw.xyz) * gw.xyz;
+        ut = length(th);
         yw = WM_H;
       }
     }
@@ -480,6 +482,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
       // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
       if ((P.essai & 4096u) != 0u) { us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }
+      // Diagnostic : profil ancré à h seulement (131072).
+      if ((P.essai & 131072u) != 0u) { us = max(0.0, ut - ut2 * ut2 * yw / (P.nu + nuw)); }
       if ((P.essai & 8192u) != 0u) { us = max(0.0, min(ut0 - ut2 * ut2 * y0 / (P.nu + nuw), ut - ut2 * ut2 * yw / (P.nu + nuw))); }
       usv = tv0 * (us / ut0);
     }
@@ -487,6 +491,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       // Diagnostic : glissement libre (paroi non visqueuse).
       usv = tv0;
       nuw = 0.0;
+      // Diagnostic : glissement libre à la vitesse relevée à h (65536).
+      if ((P.essai & 65536u) != 0u) { usv = th; }
     }
     // Contrainte imposée comme force au nœud (collision) : la paroi glisse
     // librement ; viscosité du nœud κ u_τ h gardée, ou nulle (32768).
@@ -3735,7 +3741,8 @@ impl Gpu3D {
     /// 4096 sans la borne de monotonie du glissement ; 8192 ancienne
     /// borne (u_h − pente · h) ; 16384 contrainte pariétale imposée comme force
     /// au nœud, paroi en glissement libre ; 32768 (avec 16384) viscosité du
-    /// premier nœud nulle.
+    /// premier nœud nulle ; 65536 (avec 16) glissement libre à la vitesse
+    /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement.
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
@@ -4477,6 +4484,26 @@ impl Gpu3D {
         };
         self.transp = Some(tr);
         Some(rep)
+    }
+
+    /// Diagnostic : par maille pariétale de la grille entière la plus fine
+    /// (ordre de `finest_wall_cells`), u_τ et vitesse de glissement relaxée.
+    pub fn finest_wall_state(&self) -> Vec<[f32; 4]> {
+        let g = match self.refine.as_ref() {
+            Some(r) => &r.levels[r.full - 1],
+            None => self,
+        };
+        if g.wall_count == 0 || !g.sa {
+            return Vec::new();
+        }
+        let size = 16 * g.wall_count as u64;
+        let staging = g.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("utau_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        g.read(&g._utau, &staging, size).chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
     }
 
     pub fn finest_wall_cells(&self) -> Vec<([f64; 3], f32)> {

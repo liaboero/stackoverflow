@@ -609,13 +609,18 @@ impl Body3D {
     pub fn wall_normal(&self, p: [f64; 3]) -> ([f64; 3], f64) {
         let foil = if self.shape == Shape3D::Wing { self.foil() } else { Vec::new() };
         let dist = |q: [f64; 3]| self.surface_distance(q, 4.0, &foil);
+        // Gradient de la distance signée (négative dans le corps) : à moins
+        // de e de la paroi, les différences centrées de la distance non
+        // signée enjambent la surface et la composante normale du gradient
+        // s'annule (normale fausse, relevé de la loi de paroi dans le corps).
+        let sdist = |q: [f64; 3]| if self.inside(q[0], q[1], q[2]) { -dist(q) } else { dist(q) };
         let e = 0.2;
         let mut g = [0.0; 3];
         for a in 0..3 {
             let (mut pp, mut pm) = (p, p);
             pp[a] += e;
             pm[a] -= e;
-            g[a] = dist(pp) - dist(pm);
+            g[a] = sdist(pp) - sdist(pm);
         }
         let n = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
         let g = if n > 1e-9 { g.map(|v| v / n) } else { [0.0, 0.0, 1.0] };
