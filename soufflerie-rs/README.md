@@ -1391,6 +1391,59 @@ ponctuel](https://tmbwg.github.io/turbmodels/naca0012numerics_val_sa_withpv.html
 [TMR, validation NACA 0012](https://tmbwg.github.io/turbmodels/naca0012_val.html),
 [données de Ladson](https://tmbwg.github.io/turbmodels/NACA0012_validation/CLCD_Ladson_expdata.dat).
 
+#### Décrochage (NACA 0012, Re = 6·10⁶) — en cours
+
+Balayage reproductible : `tools/decrochage.sh [dossier] [incidences] [64|128]`
+(2D `decrochage2d`, puis `aile_infinie 16 2|3 6e6 α 12 - 60` ; au-delà de
+14°, moyenne sur 4 cordes, écart type des relevés donné). Références :
+Ladson (TM-4074, grains 80/120/180) et TMR, CFL3D SA (897×257, valeurs lues
+sur la figure « near CLmax », ±0,01) : Cz 1,546 / 1,62 / 1,67 / 1,69 / 1,60 et
+Cx 0,021 / 0,025 / 0,030 / 0,039 / 0,060 à 15 / 16 / 17 / 18 / 19°.
+
+**2D, couplage Newton** (`decrochage2d 0012 6e6 0:20:0.5`, puis pas de
+0,1° à 0,25° au-delà de 15°) :
+
+| α | Cz | Cx | Cm | Décoll. extrados | Ladson Cz (80 grit) | TMR SA Cz / Cx |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10° | 1,0924 | 0,01222 | 0,0025 | attaché | 1,0707 (10,12°) | 1,0909 / 0,01231 |
+| 14° | 1,4741 | 0,01756 | 0,0088 | attaché | 1,4365 (14,22°) | — |
+| 15° | 1,5526 | 0,01958 | 0,0120 | attaché | 1,5129 (15,26°) | 1,546 / 0,0212 |
+| 16,4° | 1,6257 | 0,02348 | 0,0203 | 0,97 | 1,5739 (16,30°) | ≈ 1,62 / 0,025 (16°) |
+| 17° | 1,6466 | 0,02611 | 0,0232 | 0,91 | 1,6116 (17,13°) | ≈ 1,67 / 0,030 |
+| 17,7° | 1,6626 | 0,03050 | 0,0247 | 0,83 | décroché à 18° (0,997) | ≈ 1,69 / 0,039 (18°) |
+
+Jusqu'à 17,7°, Cz suit TMR/SA à −1,5 à +0,5 % et dépasse Ladson de 2 à 3 %
+(écart du modèle SA lui-même, du même ordre). Cx est 8 à 13 % sous SA à
+15–17°. **Défaut : Newton ne converge plus au-delà de 17,7°** (décollement
+avancé à plus de 17 % de corde) : ni Cz max ni décrochage ne sont obtenus
+(TMR/SA : 1,69 vers 18°). Échecs isolés aussi à 9,0°, 16,0–16,2° et 17,3°
+(voisins à ±0,1° convergés), quand le point de transition ou le début du
+décollement change de station ; la continuation depuis 0° n'y suffit pas.
+Pistes : continuation depuis l'incidence convergée voisine, mode inverse
+dans Newton (comme XFOIL), déplacement de la transition de plus d'une
+station par itération.
+
+**3D, aile infinie 64 mailles par corde** (bilan sur boîte, marge 0,2 c ;
+Cm intégré sur la surface ; balayage en cours, 0–12°) :
+
+| α | Cz boîte | Cx boîte | Cm | Ladson Cz / Cx |
+| --- | --- | --- | --- | --- |
+| 0° | −0,013 | 0,0153 | 0,001 | 0 / 0,0081 |
+| 4° | 0,458 | 0,0159 | −0,007 | 0,43–0,44 / 0,0082–0,0088 |
+| 8° | 0,971 | 0,0284 | −0,030 | 0,87–0,89 / 0,0099–0,0105 |
+| 10° | 1,115 | 0,0312 | −0,014 | 1,07–1,08 / 0,0117–0,0120 |
+| 12° | 1,311 | 0,0360 | −0,010 | 1,26–1,27 / 0,0128–0,0133 |
+
+Aucun retour d'écoulement à la paroi jusqu'à 12° : au dernier 40e de corde
+de l'extrados, la vitesse du nœud pariétal vaut encore 0,70 U∞ (glissement
+0,66 U∞). Diagnostic : la loi de paroi d'équilibre (Spalding, sans gradient
+de pression) et le premier nœud à 1,5 % de corde, dans une couche limite à
+peine plus épaisse, ne voient pas le ralentissement près du bord de fuite ;
+le décollement sera retardé (voir la tâche « paroi-gradp »). Cm, irrégulier
+(−0,030 à 8°, −0,010 à 12°), suit la sensibilité du bord de fuite au
+placement à 64 mailles. Restent : 14–20° à 64 mailles, balayage à 128
+mailles, Cz max 3D.
+
 ### Traînée : où est l'excès
 
 **Décomposition dans le sillage** (TR-1208, 8°, STL lissé, `--sillage 1`) :
@@ -1678,11 +1731,12 @@ arguments en tête de chaque fichier) :
 | `cp2d`, `split` | 2D : Cp et Cf pariétaux, part frottement / pression, contre les panneaux |
 | `freestream3d` | vitesse et masse volumique réellement vues par la maquette, le long de la veine et par section |
 | `ibl3d` | couche limite intégrale sur le maillage (θ, H, δ*, v_n par triangle, CSV), profils de vitesse le long de la normale, couplages de transpiration (mode 1 : u_e à WM_H ; mode 2 : déplacement manquant au champ) |
+| `decrochage2d` | balayage d'incidence 2D jusqu'au décrochage (couplage Newton) : Cz, Cx, Cm, décollement turbulent, transition ; `decrochage2d 0012 6e6 0:20:0.5` ; balayage 2D et 3D complet : `tools/decrochage.sh` (voir « Décrochage ») |
 | `decamber2d` | décambrage visqueux 2D : couplage faible (1 et 20 itérations) contre couplage simultané (Newton), traînée, transition ; `decamber2d 0012 6e6 0 0:15:1`, `decamber2d 2412 3e6 libre -2:12:2` |
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
