@@ -12,7 +12,9 @@
 //! quantité de mouvement sur des boîtes 3D autour de la tranche (mesure de
 //! référence : l'intégration sur la surface sous-estime la traînée aux
 //! faibles incidences), moyennés sur la dernière corde parcourue (4 relevés,
-//! `AILE_NREL`).
+//! `AILE_NREL`). La grille fine ne couvre pas les bords de l'envergure
+//! périodique (raccords) : l'aile n'y existe que sur la grille de la veine,
+//! dont la circulation contamine la tranche centrale ; prendre ny ≥ 40.
 use lbm::bodies3d::Body3D;
 use lbm::gpu3d::Gpu3D;
 use lbm::shapes::Naca;
@@ -93,13 +95,65 @@ fn main() {
     body.center = [xq, 0.5 * ny as f64, zq];
     body.area = lf * ny as f64;
     body.mesh = Some(Arc::new(mesh));
+    // Arête vive du bord de fuite (AILE_ARETE=1), comme `--aretes maillage`.
+    if std::env::var("AILE_ARETE").is_ok() {
+        let fe = lbm::geom3d::FeatureEdge { a: [te[0] + xq, -8.0, te[1] + zq], b: [te[0] + xq, ny as f64 + 8.0, te[1] + zq], angle_deg: 180.0, convex: true };
+        body.features = Some(Arc::new(lbm::geom3d::FeatureSet::new(vec![fe])));
+    } else {
+        body.features = None;
+    }
 
     let u = 0.1f32;
     let nu = u as f64 * lf / re;
     let spt = lf / u as f64;
-    let ramp = lbm::cpu::Ramp { steps: (2.0 * spt) as u64, u };
+    let ramp = lbm::cpu::Ramp { steps: (2.0 * spt * std::env::var("AILE_RAMPE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)) as u64, u };
     let t0 = std::time::Instant::now();
-    let mut sim = Gpu3D::with_refinement_edges(&body, nu, u, true, true, raff, false, false, &bands).unwrap();
+    let mut sim = Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), true, raff, false, false, &bands).unwrap();
+    if let Ok(f) = std::env::var("AILE_DUMP") {
+        // Champ fin (u, w, ρ de la rangée centrale) après AILE_DUMP_T cordes.
+        let tt: f64 = std::env::var("AILE_DUMP_T").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+        let ramp0 = lbm::cpu::Ramp { steps: (2.0 * spt) as u64, u };
+        sim.run((tt * spt) as usize, &ramp0);
+        let (mac, d, org, sc) = if std::env::var("AILE_DUMP_VEINE").is_ok() { (sim.macros(), [nx, ny, nz], [0.0; 3], 1.0) } else { sim.finest_macros() };
+        let j = ((2.0 * (ny / 4) as f64 - org[1]) * sc).round() as usize;
+        let mut out = format!("{} {} {} {} {}
+", d[0], d[2], org[0], org[2], sc);
+        for k in 0..d[2] {
+            for i in 0..d[0] {
+                let c = mac[i + d[0] * (j + d[1] * k)];
+                out += &format!("{} {} {}
+", c[0], c[2], c[3]);
+            }
+        }
+        std::fs::write(&f, out).unwrap();
+        return;
+    }
+    if std::env::var("AILE_VOX").is_ok() {
+        // Empreinte des mailles pariétales fines relative au profil (rangée
+        // centrale) : nombre et somme des positions, pour comparer deux
+        // placements de même géométrie fine.
+        let (_, _, org, sc) = sim.finest_macros();
+        let yc = 2.0 * (ny / 4) as f64;
+        let mut v: Vec<(i64, i64)> = sim.finest_wall_cells().iter().filter(|(p, _)| (p[1] - yc).abs() < 0.5 / sc).map(|(p, _)| (((p[0] - xq) * sc).round() as i64, ((p[2] - zq) * sc).round() as i64)).collect();
+        v.sort();
+        let h = v.iter().fold(0u64, |h, &(a, b)| h.wrapping_mul(1_000_003).wrapping_add((a * 7919 + b) as u64));
+        println!("  mailles pariétales fines (rangée y = {yc}) : {} empreinte {h:x} ; origine z {:.3}", v.len(), org[2]);
+    }
+    {
+        // La grille fine ne couvre pas toute l'envergure périodique (marges
+        // de raccord) : l'aile n'existe ailleurs que sur la grille de la
+        // veine, avec sa propre circulation, qui fausse la tranche centrale
+        // (traînée +15 %, portance dépendante du placement : ny ≥ 40).
+        let (_, d, org, sc) = sim.finest_macros();
+        let (y0, y1) = (org[1], org[1] + (d[1] - 1) as f64 / sc);
+        println!("  grille fine en envergure : y de {y0:.1} à {y1:.1} sur [0, {ny}) ({:.0} % de l'envergure)", 100.0 * (y1 - y0) / ny as f64);
+    }
+    if std::env::var("AILE_GRILLE").is_ok() {
+        let (_, d, org, sc) = sim.finest_macros();
+        let zl = pts.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
+        let zh = pts.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+        println!("  grille fine : z de {:.3} à {:.3} ; profil de {:.3} à {:.3} : marges {:.3} dessous, {:.3} dessus", org[2], org[2] + (d[2] - 1) as f64 / sc, zl, zh, zl - org[2], org[2] + (d[2] - 1) as f64 / sc - zh);
+    }
     sim.periodic_span = true;
     if essai != 0 {
         sim.set_essai(essai, 0.0);
@@ -212,13 +266,28 @@ fn main() {
                 }
                 let span = (jb - ja) as f64;
                 if std::env::var("AILE_BILAN").is_ok() {
-                    print!(" {:.4} (débit {:.2e})", -fl[0] / span / (q * lf * sc), mass / span / (uin * lf * sc));
+                    print!(" {:.4}/{:.4} (débit {:.2e})", -fl[1] / span / (q * lf * sc), -fl[0] / span / (q * lf * sc), mass / span / (uin * lf * sc));
                     if k + 1 == MARGES.len() { println!(); }
                 }
                 bx[k][0] += -fl[0] / span / (q * lf * sc);
                 bx[k][1] += -fl[1] / span / (q * lf * sc);
                 bx[k][2] += 1.0;
             }
+        }
+        if std::env::var("AILE_CORDE").is_ok() {
+            // Cz par dixième de corde (tranche centrale), extrados/intrados.
+            let xl = pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+            let xh = pts.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+            let zc = 0.5 * (pts[0][1] + pts[pts.len() / 2][1]);
+            let mut b = [[0.0f64; 2]; 10];
+            for (p, f) in &s.loads {
+                if p[1] >= yc0 && p[1] < yc1 {
+                    let k = (((p[0] - xl) / (xh - xl) * 10.0) as usize).min(9);
+                    b[k][if p[2] > zc { 0 } else { 1 }] += f[2] / qa;
+                }
+            }
+            let v: Vec<String> = b.iter().map(|x| format!("{:+.4}/{:+.4}", x[0], x[1])).collect();
+            println!("  Cz par dixième de corde (extrados/intrados) {}", v.join(" "));
         }
         if std::env::var("AILE_BANDES").is_ok() {
             // Cx et Cz par bande d'envergure de 2 mailles (veine).
@@ -246,7 +315,25 @@ fn main() {
         }
     }
     if std::env::var("AILE_P0").is_ok() {
-        perte_p0(&mut sim, &pts, lf, ny, u as f64);
+        perte_p0(&mut sim, &pts, lf, ny, u as f64, nu);
+    }
+    if std::env::var("AILE_W").is_ok() {
+        // Vitesse verticale moyenne de la veine sur des sections x fixées
+        // (en cordes depuis l'entrée), toute la hauteur et l'envergure.
+        let mac = sim.macros();
+        let mut o = String::from("  w moyen (x/c depuis l'entrée : w/U)");
+        for xc in [0.5, 1.0, 2.0, 3.0, 6.0, 8.0, 10.0, 11.5] {
+            let i = ((xc * lf) as usize).min(nx - 1);
+            let (mut sw, mut n) = (0.0, 0.0);
+            for k in 1..nz - 1 {
+                for j in 0..ny {
+                    sw += mac[i + nx * (j + ny * k)][2] as f64;
+                    n += 1.0;
+                }
+            }
+            o += &format!(" {xc}: {:.5}", sw / n / u as f64);
+        }
+        println!("{o}");
     }
     let bl: Vec<String> = bx.iter().zip(MARGES).filter(|(b, _)| b[2] > 0.0).map(|(b, m)| format!("{m}: {:.4}/{:.5}", b[1] / b[2], b[0] / b[2])).collect();
     println!("  échange (tranche centrale) Cz/Cx {:.4}/{:.5}", ex[1] / nrel as f64, ex[0] / nrel as f64);
@@ -277,7 +364,9 @@ fn main() {
 /// localise la perte, et sa valeur loin en aval approche la traînée de
 /// profil. Puis le déficit moyen au premier rang de mailles fluides (à moins
 /// de 1,5 maille fine de la paroi), par tranche de corde, extrados/intrados.
-fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64) {
+fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64, nu: f64) {
+    let (_, _, _, sc0) = sim.finest_macros();
+    let nu_f = (nu * sc0) as f32;
     let (mac, d, org, sc) = sim.finest_macros();
     let q = 0.5 * u * u;
     let h = |c: &[f32; 4]| {
@@ -377,6 +466,7 @@ fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64) {
         let ab: Vec<f64> = v.split(',').filter_map(|t| t.parse().ok()).collect();
         let j = (j0 + j1) / 2;
         let ws = sim.finest_wall_state();
+        let nt = sim.finest_nu_tilde();
         let wc: std::collections::HashMap<(i64, i64, i64), String> = sim.finest_wall_cells().into_iter().enumerate().map(|(k, (p, e))| {
             let st = ws.get(k).map(|v| format!(" uτ {:.4} uw {:.4}", v[0], v[1])).unwrap_or_default();
             (((p[0] * sc).round() as i64, (p[1] * sc).round() as i64, (p[2] * sc).round() as i64), format!(" e{e:.2}{st}"))
@@ -389,12 +479,39 @@ fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64) {
                 k -= 1;
             }
             let mut o = format!("    x/c {:.3} :", (xr - xle) / ch);
-            for kk in k..(k + 6).min(d[2] - 3) {
+            for kk in k..(k + 10).min(d[2] - 3) {
                 let zr = org[2] + kk as f64 / sc;
                 let c = at(i, j, kk);
                 let yr = org[1] + j as f64 / sc;
                 let e = wc.get(&((xr * sc).round() as i64, (yr * sc).round() as i64, (zr * sc).round() as i64)).cloned().unwrap_or_default();
-                o += &format!(" [{:.2} {:.3} u {:.4} w {:.4}{e}]", dist(xr, zr) * sc, rinf * (hinf - h(c).0) / q, c[0], c[2]);
+                let nv = nt.get(i + d[0] * (j + d[1] * kk)).map(|v| format!(" ν̃/ν {:.0}", v / nu_f)).unwrap_or_default();
+                o += &format!(" [{:.2} {:.3} u {:.4}{nv}{e}]", dist(xr, zr) * sc, rinf * (hinf - h(c).0) / q, c[0]);
+            }
+            println!("{o}");
+        }
+    }
+    if std::env::var("AILE_TE").is_ok() {
+        // Carte du bord de fuite (grille fine, rangée centrale) : '#' dans
+        // le profil, maille pariétale : u en millièmes (et '!' si arête vive,
+        // cos < 0,5), '.' fluide.
+        let j = (j0 + j1) / 2;
+        let wc: std::collections::HashMap<(i64, i64), f32> = sim.finest_wall_cells().into_iter().filter(|(p, _)| ((p[1] - org[1]) * sc).round() as usize == j).map(|(p, e)| ((((p[0] - org[0]) * sc).round() as i64, ((p[2] - org[2]) * sc).round() as i64), e)).collect();
+        let pte = pts[0];
+        let (it, kt) = (((pte[0] - org[0]) * sc).round() as i64, ((pte[1] - org[2]) * sc).round() as i64);
+        println!("  bord de fuite en ({:.2}, {:.2}) mailles fines", (pte[0] - org[0]) * sc, (pte[1] - org[2]) * sc);
+        for k in (kt - 4..=kt + 4).rev() {
+            let mut o = format!("  {:>4.2} ", org[2] + k as f64 / sc - pte[1]);
+            for i in it - 10..=it + 3 {
+                let (xr, zr) = (org[0] + i as f64 / sc, org[2] + k as f64 / sc);
+                let c = at(i as usize, j, k as usize);
+                let t = if let Some(e) = wc.get(&(i, k)) {
+                    format!("{:>4}{}", (c[0] * 1000.0).round(), if *e < 0.5 { '!' } else { ' ' })
+                } else if inside(xr, zr) {
+                    "   # ".into()
+                } else {
+                    format!("{:>4}.", (c[0] * 1000.0).round())
+                };
+                o += &t;
             }
             println!("{o}");
         }

@@ -1528,7 +1528,9 @@ maillées.
 `Body3D::inside`). Ce n'est pas un réglage : la normale est celle de la
 géométrie. Le nœud repart (u = 0,088).
 
-**Résultats**, aile infinie (bilan sur boîte, 64 / 128 mailles par corde) :
+**Résultats**, aile infinie (bilan sur boîte, 64 / 128 mailles par corde,
+ny = 20 : envergure trop étroite, voir « Aile infinie : envergure trop
+étroite, placement et bord de fuite » pour les valeurs avec ny = 60) :
 
 | α | Cx avant | Cx après | Cz après (128) | Ladson Cx / Cz |
 | --- | --- | --- | --- | --- |
@@ -1545,6 +1547,63 @@ la traînée mesurée à 128 mailles.
 (`--essai 65552`), ou ancrer le profil de la couche pariétale à h seulement
 (`--essai 131072`, u_s = u_h − pente · h) : gain à 64 mailles mais nul à
 128, et la portance monte.
+
+### Aile infinie : envergure trop étroite, placement et bord de fuite
+
+**Cz à 0° dépendait du placement.** Le profil symétrique à 0° donnait
+Cz = −0,04 (128 mailles par corde). Décalé verticalement d'une fraction de
+maille (`AILE_DZ`), il donnait entre −0,115 et +0,113 à 64 mailles, en dent
+de scie (rampe de +0,035 par 1/32 de maille de la veine, puis chute). Les
+placements symétriques donnent bien 0, et des placements miroirs des
+**toutes** les grilles donnent des Cz opposés : le solveur est symétrique.
+Mais à géométrie fine identique (mêmes mailles pariétales), Cz changeait
+avec la position de la grille de la veine. Ni la durée de démarrage, ni la
+simple précision, ni l'étendue des grilles fines vers l'aval ou sur les
+côtés ne changent le résultat.
+
+**Cause : la grille fine ne couvre pas toute l'envergure.** Les marges de
+raccord la limitent à y ∈ [3, ny − 4]. Avec ny = 20, l'aile n'existe sur 30 %
+de l'envergure périodique que sur la grille de la veine (16 mailles par
+corde), avec sa propre circulation, sensible au placement, qui se propage à
+la tranche centrale. C'est un défaut du banc, pas du solveur : `aile_infinie`
+affiche désormais la part de l'envergure couverte. Avec ny = 40 ou 60
+(10 à 17 % non couverts), à 128 mailles par corde, Cz à 0° reste entre 0 et
+0,026 selon le placement, et la traînée baisse de 15 %.
+
+**Aile infinie refaite** (ny = 60, bilan sur boîte, 64 / 128 mailles par
+corde) :
+
+| α | Cx | Cz | Ladson Cx / Cz |
+| --- | --- | --- | --- |
+| 0° | 0,0166 / 0,0152 | −0,013 / −0,011 | 0,0081 / 0 |
+| 4° | 0,0238 / 0,0186 | 0,451 / 0,463 | 0,0081 à 0,0088 / 0,43 à 0,44 |
+| 8° | 0,0306 / 0,0231 | 0,967 / 0,888 | 0,0099 à 0,0105 / 0,87 à 0,89 |
+
+La traînée est 1,9 à 2,2 fois la mesure à 128 mailles, la portance à 8° est
+juste, celle de 4° 5 % au-dessus.
+
+**Reste du placement : le bord de fuite.** Une part de la dispersion vient
+de la grille fine elle-même : Cz est impair dans la position verticale du
+bord de fuite par rapport aux rangées de nœuds (±0,08 à 64 mailles avec
+ny = 60, moins de 0,03 à 128). La pointe, plus mince qu'une maille, ne
+touche jamais les deux faces dans une même maille : aucune maille n'y est
+classée arête vive, et la condition de Kutta n'y est imposée que par la
+forme en escalier. Rendre adhérentes les mailles à portée de lien de l'arête
+(`AILE_ARETE=1` donne l'arête au banc) aggrave l'écart (±0,13) et la traînée.
+
+**Autres essais, sans effet utile** (aile infinie, 128 mailles) :
+
+- loi de paroi aux arêtes vives (`--essai 262144`) : aucune maille d'arête
+  sur ce profil, résultat identique ;
+- ν̃ du premier nœud κ u_τ y_n au lieu de κ u_τ h (`--essai 524288`) :
+  traînée −5 % à −8 %. La viscosité turbulente au-dessus de la paroi reste
+  environ 8 fois trop forte et 5 fois trop épaisse (ν̃ = 1 600 ν au premier
+  nœud, 300 ν à 5 mailles, contre environ 150 ν sur 1,2 maille pour la couche
+  limite réelle à mi-corde) : le relevé à h = 2 mailles tombe hors de la
+  couche limite, et la couche épaisse s'entretient elle-même ;
+- advection de ν̃ de Lax–Wendroff au lieu du décentrage amont d'ordre un
+  (`--essai 1048576`) : la couche de ν̃ s'arrête plus net, la traînée ne
+  change pas.
 
 ### Programmes de diagnostic
 
@@ -1571,7 +1630,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`) et profils pariétaux (`AILE_COL=a,b`, x/c) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur

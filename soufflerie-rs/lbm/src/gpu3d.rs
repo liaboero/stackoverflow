@@ -272,6 +272,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // valeur ne saute pas quand la paroi traverse une rangée de nœuds).
     let k = wk0 - 1u;
     out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
+    // Diagnostic : ν̃ = κ u_τ y_n, distance du nœud (524288).
+    if ((P.essai & 524288u) != 0u) { out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * max(0.1, abs(wallGeo[k].w))); }
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
   } else {
     // Voisins (comme `cell`, sans modulo ; ici 0 < x < nx − 1) : y
@@ -301,6 +303,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     var adv = select(u.x * (vxp - v), u.x * (v - vxm), u.x > 0.0);
     adv += select(u.y * (vyp - v), u.y * (v - vym), u.y > 0.0);
     adv += select(u.z * (vzp - v), u.z * (v - vzm), u.z > 0.0);
+    if ((P.essai & 1048576u) != 0u) {
+      // Diagnostic : advection de Lax–Wendroff (ordre 2, diffusion
+      // numérique u_a²/2 au lieu de |u_a|/2 par direction).
+      adv = 0.5 * (u.x * (vxp - vxm) + u.y * (vyp - vym) + u.z * (vzp - vzm))
+        - 0.5 * (u.x * u.x * (vxp - 2.0 * v + vxm) + u.y * u.y * (vyp - 2.0 * v + vym) + u.z * u.z * (vzp - 2.0 * v + vzm));
+    }
     var diff = (nu + 0.5 * (v + vxp)) * (vxp - v) - (nu + 0.5 * (v + vxm)) * (v - vxm)
       + (nu + 0.5 * (v + vyp)) * (vyp - v) - (nu + 0.5 * (v + vym)) * (v - vym)
       + (nu + 0.5 * (v + vzp)) * (vzp - v) - (nu + 0.5 * (v + vzm)) * (v - vzm);
@@ -395,7 +403,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (P.sa == 1u && hasWall) {
     let gw0 = wallGeo[wk];
     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
-    let edge = gw0.w < 0.0;
+    // Diagnostic : loi de paroi aussi aux arêtes vives (262144).
+    let edge = gw0.w < 0.0 && (P.essai & 262144u) == 0u;
     let gw = vec4<f32>(gw0.xyz, abs(gw0.w));
     let u0 = macroBuf[idx].xyz;
     // Vitesse tangentielle du nœud et sa distance à la paroi.
@@ -3742,7 +3751,9 @@ impl Gpu3D {
     /// borne (u_h − pente · h) ; 16384 contrainte pariétale imposée comme force
     /// au nœud, paroi en glissement libre ; 32768 (avec 16384) viscosité du
     /// premier nœud nulle ; 65536 (avec 16) glissement libre à la vitesse
-    /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement.
+    /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement ;
+    /// 262144 loi de paroi aussi aux arêtes vives ; 524288 ν̃ du premier nœud
+    /// κ u_τ y_n (distance du nœud) ; 1048576 advection de ν̃ de Lax–Wendroff.
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
@@ -4484,6 +4495,14 @@ impl Gpu3D {
         };
         self.transp = Some(tr);
         Some(rep)
+    }
+
+    /// ν̃ de Spalart–Allmaras de la grille entière la plus fine (vide sans SA).
+    pub fn finest_nu_tilde(&self) -> Vec<f32> {
+        match self.refine.as_ref() {
+            Some(r) => r.levels[r.full - 1].nu_tilde(),
+            None => self.nu_tilde(),
+        }
     }
 
     /// Diagnostic : par maille pariétale de la grille entière la plus fine
