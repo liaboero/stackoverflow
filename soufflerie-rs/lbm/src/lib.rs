@@ -38,6 +38,7 @@ pub mod sgeo;
 pub mod shapes;
 pub mod stats;
 pub mod stl;
+pub mod surfel;
 pub mod tunnel;
 pub mod vii;
 pub mod wall;
