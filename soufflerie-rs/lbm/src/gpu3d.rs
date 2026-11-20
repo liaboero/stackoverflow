@@ -2544,6 +2544,36 @@ pub fn auto_band_count(body: &Body3D, depth: usize) -> (usize, f64, f64) {
     (n, r, corner)
 }
 
+/// Région d'une couche limitée aux bords (attaque, fuite, saumon) : mailles
+/// à moins de `radius` (mailles de la couche) des arêtes de `set`.
+#[derive(Clone, Debug)]
+pub struct EdgeRegion {
+    pub set: crate::geom3d::FeatureSet,
+    pub radius: f64,
+}
+
+/// Couche pariétale (grille creuse) : mailles actives à moins de `band`
+/// mailles (de cette couche) de la paroi ; plus, si `wake` > 0, celles
+/// balayées vers l'aval (+x) sur `wake` mailles depuis la dernière maille
+/// de la couche de chaque rangée ; si `edges`, seulement près des arêtes.
+#[derive(Clone, Debug, Default)]
+pub struct LayerSpec {
+    pub band: f64,
+    pub wake: f64,
+    pub edges: Option<std::sync::Arc<EdgeRegion>>,
+}
+
+/// Plan de raffinement : grilles boîtes (emprise amont, aval, de côté en
+/// longueurs de référence autour de la maquette, comme `EXTENT3`), puis
+/// couches pariétales, ou grilles des bords (`le`, `te`, sans couches).
+#[derive(Clone, Debug, Default)]
+pub struct RefinePlan {
+    pub boxes: Vec<(f64, f64, f64)>,
+    pub layers: Vec<LayerSpec>,
+    pub le: bool,
+    pub te: bool,
+}
+
 pub fn nested_bands(bands: &[f64]) -> Vec<f64> {
     let mut b = bands.to_vec();
     let m = (2 * crate::refine3d::MARGIN3 + 3) as f64;
@@ -2811,8 +2841,15 @@ fn slab_of(ny: usize, cells: impl Iterator<Item = [usize; 2]>) -> Vec<[f32; 2]> 
 /// maillage du centre du bloc), puis, maille par maille : solide, fluide à
 /// moins de `band` de la paroi (active), ou fantôme. Mémoire et calcul de la
 /// mise en place proportionnels à la surface, pas au volume de la boîte.
-fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
+fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
+    let band = spec.band;
     let mesh = body.mesh.clone().ok_or("couche pariétale : maquette maillée seulement")?;
+    // Région étendue (sillage, bords) : chemins ajoutés ; sans eux, mêmes
+    // opérations qu'avant, au bit près.
+    let extended = spec.wake > 0.0 || spec.edges.is_some();
+    let near_edge = |p: [f64; 3], slack: f64| -> bool {
+        spec.edges.as_ref().is_none_or(|e| e.set.distance(p, e.radius + slack + 1.0) <= e.radius + slack)
+    };
     let (nx, ny, nz) = (body.nx, body.ny, body.nz);
     let dims = [nx, ny, nz];
     let bd = [nx.div_ceil(SB), ny.div_ceil(SB), nz.div_ceil(SB)];
@@ -2830,11 +2867,10 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
             if (0..3).any(|a| c[a] < lo[a] - reach || c[a] > hi[a] + reach) {
                 return false;
             }
-            mesh.distance(c, reach + 1.0) <= reach
+            mesh.distance(c, reach + 1.0) <= reach && near_edge(c, reach - band)
         })
         .collect();
     let map = SparseMap::new(bd, &used);
-    let ns = map.slots() * SB3;
     temps("couche : blocs", tb);
     // Type et distance de chaque maille gardée.
     let ghost = crate::refine3d::GHOST;
@@ -2863,12 +2899,82 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
                     let dc = *dc.get_or_insert_with(|| mesh.distance(c, cap + hd + 1.0));
                     let r = ((pf[0] - c[0]).powi(2) + (pf[1] - c[1]).powi(2) + (pf[2] - c[2]).powi(2)).sqrt();
                     let d = if dc - r > cap + 1e-6 { mesh.distance_beyond(pf, cap) } else { mesh.distance_bounded(pf, cap, dc + r) };
-                    (if d > band { ghost } else { 0 }, d as f32)
+                    (if d > band || !near_edge(pf, 0.0) { ghost } else { 0 }, d as f32)
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
     temps("couche : types et distances", tb);
+    // Sillage : dans chaque rangée (y, z), les mailles à moins de `wake`
+    // en aval de la dernière maille active deviennent actives (blocs
+    // ajoutés au besoin), avec leur distance à la paroi (Spalart–Allmaras).
+    let (map, cells) = if spec.wake > 0.0 {
+        let w = spec.wake;
+        let mut last = vec![-1i64; ny * nz];
+        for (i, c) in cells.iter().enumerate() {
+            if c.0 == 0 {
+                if let Some(p) = map.pos(i, dims) {
+                    let r = &mut last[p[1] + ny * p[2]];
+                    *r = (*r).max(p[0] as i64);
+                }
+            }
+        }
+        let in_wake = |p: [usize; 3]| {
+            let x0 = last[p[1] + ny * p[2]];
+            x0 >= 0 && (p[0] as i64) > x0 && (p[0] as f64) <= x0 as f64 + w
+        };
+        let mut used_w = vec![false; bd[0] * bd[1] * bd[2]];
+        for c in map.coords.iter().skip(1) {
+            used_w[c[0] as usize + bd[0] * (c[1] as usize + bd[1] * c[2] as usize)] = true;
+        }
+        for z in 0..nz {
+            for y in 0..ny {
+                let x0 = last[y + ny * z];
+                if x0 < 0 {
+                    continue;
+                }
+                let x1 = ((x0 as f64 + w).floor() as usize).min(nx - 1);
+                for bx in (x0 as usize + 1) / SB..=x1 / SB {
+                    used_w[bx + bd[0] * (y / SB + bd[1] * (z / SB))] = true;
+                }
+            }
+        }
+        let map_w = SparseMap::new(bd, &used_w);
+        let capw = band + w + 3.0;
+        let cells_w: Vec<(u32, f32)> = (0..map_w.slots())
+            .into_par_iter()
+            .flat_map_iter(|slot| {
+                let c = map_w.coords[slot];
+                let old = if c[0] == u32::MAX { 0 } else { map.table[c[0] as usize + bd[0] * (c[1] as usize + bd[1] * c[2] as usize)] as usize };
+                let (map_w, cells, mesh, in_wake) = (&map_w, &cells, &mesh, &in_wake);
+                (0..SB3).map(move |l| {
+                    let i = slot * SB3 + l;
+                    let Some(p) = map_w.pos(i, dims) else { return (ghost, 1e3) };
+                    let boundary = p[0] == 0 || p[1] == 0 || p[2] == 0 || p[0] == nx - 1 || p[1] == ny - 1 || p[2] == nz - 1;
+                    let pf = p.map(|v| v as f64);
+                    let cur = if old > 0 {
+                        cells[old * SB3 + l]
+                    } else if boundary {
+                        (ghost, 1e3)
+                    } else if body.inside(pf[0], pf[1], pf[2]) {
+                        (SOLID, 0.0)
+                    } else {
+                        (ghost, 1e3)
+                    };
+                    if cur.0 == ghost && !boundary && in_wake(p) {
+                        (0, mesh.distance(pf, capw) as f32)
+                    } else {
+                        cur
+                    }
+                })
+            })
+            .collect();
+        temps("couche : sillage", tb);
+        (map_w, cells_w)
+    } else {
+        (map, cells)
+    };
+    let ns = map.slots() * SB3;
     let mut wall: Vec<u32> = cells.iter().map(|c| c.0).collect();
     let dist: Vec<f32> = cells.iter().map(|c| c.1).collect();
     let solid_count = wall.iter().filter(|&&w| w == SOLID).count();
@@ -2955,7 +3061,36 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
     // la paroi variant d'au plus une maille par maille parcourue.
     temps("couche : fantômes", tb);
     let r = (2 * crate::refine3d::MARGIN3 + 1) as f64 * (3.0f64).sqrt();
-    let deep: Vec<bool> = (0..ns).map(|i| active(i) && (dist[i] as f64) <= band - r).collect();
+    let deep: Vec<bool> = if extended {
+        // Région quelconque : la distance à la paroi ne dit plus où sont les
+        // fantômes. Érosion du masque « non fantôme » par un cube de
+        // demi-côté ⌈r⌉ (trois passes d'une dimension) : plus strict que la
+        // boule de rayon r, donc sûr.
+        let rr = r.ceil() as i64;
+        let mut m: Vec<bool> = wall.iter().map(|&w| w != ghost).collect();
+        for ax in 0..3 {
+            let prev = m;
+            m = (0..ns)
+                .into_par_iter()
+                .map(|i| {
+                    if !prev[i] {
+                        return false;
+                    }
+                    let Some(p) = map.pos(i, dims) else { return false };
+                    (1..=rr).all(|t| {
+                        [-t, t].iter().all(|&dt| {
+                            let mut q = p.map(|v| v as i64);
+                            q[ax] += dt;
+                            at(q[0], q[1], q[2]).is_some_and(|c| prev[c])
+                        })
+                    })
+                })
+                .collect();
+        }
+        (0..ns).map(|i| active(i) && m[i]).collect()
+    } else {
+        (0..ns).map(|i| active(i) && (dist[i] as f64) <= band - r).collect()
+    };
     // Blocs gardés pour de bon : ceux qui contiennent une maille active ou
     // une fantôme à remplir (la sélection par le centre du bloc est large).
     let mut keep = vec![false; map.slots()];
@@ -2998,6 +3133,10 @@ fn band_setup(body: &Body3D, band: f64) -> Result<CellSetup, String> {
         }
     }
     let (wall, dist, deep, ns) = (wall2, dist2, deep2, ns2);
+    if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
+        let act = wall.iter().filter(|&&w| w < ghost).count();
+        eprintln!("  [mise en place] couche : {act} mailles actives, {ns} stockées (rapport {:.2})", ns as f64 / act.max(1) as f64);
+    }
     let wall_cells: Vec<u32> = wall_cells.iter().map(|&i| remap(i as usize) as u32).collect();
     let thin: Vec<u32> = thin.iter().map(|&i| remap(i as usize) as u32).collect();
     let fill: Vec<u32> = fill.iter().map(|&i| remap(i as usize) as u32).collect();
@@ -3186,10 +3325,26 @@ impl Gpu3D {
         te: bool,
         bands: &[f64],
     ) -> Result<Gpu3D, String> {
-        let sa: Turbulence = sa.into();
-        let (device, queue, name) = Self::open_device()?;
-        let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, 0.0)?;
         let depth = depth.min(crate::refine3d::EXTENT3.len());
+        let plan = RefinePlan {
+            boxes: crate::refine3d::EXTENT3[..depth].to_vec(),
+            layers: nested_bands(bands).into_iter().map(|band| LayerSpec { band, ..Default::default() }).collect(),
+            le,
+            te,
+        };
+        Self::with_plan(body, nu, u_in, fp16, sa, &plan)
+    }
+
+    /// Idem, d'après un plan de raffinement : grilles boîtes d'emprise
+    /// donnée, puis couches pariétales (épaisseur, sillage, bords), ou
+    /// grilles des bords. `with_refinement_edges` et le raffinement
+    /// automatique (`raff_auto`) en sont deux cas.
+    pub fn with_plan(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: impl Into<Turbulence>, plan: &RefinePlan) -> Result<Gpu3D, String> {
+        let sa: Turbulence = sa.into();
+        let (le, te) = (plan.le, plan.te);
+        let (device, queue, name) = Self::open_device()?;
+        let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, &LayerSpec::default())?;
+        let depth = plan.boxes.len();
         if depth == 0 {
             return Ok(top);
         }
@@ -3203,7 +3358,7 @@ impl Gpu3D {
         let mut origin: Vec<[f64; 3]> = Vec::new();
         let mut porg = [0.0f64; 3];
         for k in 1..=depth {
-            let (up, down, side) = crate::refine3d::EXTENT3[k - 1];
+            let (up, down, side) = plan.boxes[k - 1];
             // Emprise en mailles de la grille parente (échelle 2^(k−1)).
             let sp = (1u64 << (k - 1)) as f64;
             let pb = parent_body.bounds;
@@ -3225,7 +3380,7 @@ impl Gpu3D {
             let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
             let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
             let nu_k = nu * (1u64 << k) as f64;
-            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, 0.0)?;
+            let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &LayerSpec::default())?;
             child.les = top.les;
             {
                 let parent = if k == 1 { &top } else { &levels[k - 2] };
@@ -3240,13 +3395,13 @@ impl Gpu3D {
         let mut parent = (0..full).collect::<Vec<usize>>();
         let mut lev_depth: Vec<u32> = (1..=full as u32).collect();
         let mut core: Vec<Option<[[f64; 3]; 2]>> = vec![None; full];
-        let bands = nested_bands(bands);
-        if !bands.is_empty() {
+        if !plan.layers.is_empty() {
             // Couches pariétales imbriquées : chacune deux fois plus fine que
             // la précédente, sur une épaisseur `bands[i]` (mailles de cette
             // couche) autour de toute la surface ; boîte qui entoure la
             // maquette, calcul et stockage limités à la couche.
-            for (bi, &band) in bands.iter().enumerate() {
+            for (bi, spec) in plan.layers.iter().enumerate() {
+                let band = spec.band;
                 let k = depth + 1 + bi;
                 let sp = (1u64 << (k - 1)) as f64;
                 let pb = parent_body.bounds;
@@ -3259,15 +3414,28 @@ impl Gpu3D {
                     (pb.y0 - mg).floor().max(3.0) as usize,
                     (pb.z0 - mg).floor().max(3.0) as usize,
                 ];
+                // Sillage : la couche s'étend vers l'aval de `wake` mailles.
                 let hi = [
-                    ((pb.x1 + mg).ceil() as usize).min(pnx - 4),
+                    ((pb.x1 + mg + 0.5 * spec.wake).ceil() as usize).min(pnx - 4),
                     ((pb.y1 + mg).ceil() as usize).min(pny - 4),
                     ((pb.z1 + mg).ceil() as usize).min(pnz - 4),
                 ];
                 let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
                 let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
                 let nu_k = nu * (1u64 << k) as f64;
-                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, band)?;
+                // Arêtes des bords : en mailles de cette couche.
+                let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
+                let sk = (1u64 << k) as f64;
+                let spec_k = LayerSpec {
+                    edges: spec.edges.as_ref().map(|e| {
+                        std::sync::Arc::new(EdgeRegion {
+                            set: e.set.transformed(|q| [0, 1, 2].map(|a| (q[a] - o[a]) * sk)),
+                            radius: e.radius,
+                        })
+                    }),
+                    ..spec.clone()
+                };
+                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &spec_k)?;
                 child.les = top.les;
                 // Mémoire du GPU : environ 100 octets par maille en demi-précision
                 // (200 en simple) ; au-delà de 40 M mailles en tout, on s'arrête.
@@ -3286,7 +3454,6 @@ impl Gpu3D {
                     links.push({ let tl = std::time::Instant::now(); let l = crate::refine3d::Link3::new(par, &child, lo); temps("raccord", tl); l });
                 }
                 levels.push(child);
-                let o = [0, 1, 2].map(|a| porg[a] + lo[a] as f64 / sp);
                 origin.push(o);
                 parent.push(pi);
                 lev_depth.push(k as u32);
@@ -3317,7 +3484,7 @@ impl Gpu3D {
                 let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
                 let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
                 let nu_k = nu * (1u64 << k) as f64;
-                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, 0.0)?;
+                let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &LayerSpec::default())?;
                 child.les = top.les;
                 {
                     let par = if full == 0 { &top } else { &levels[full - 1] };
@@ -3413,10 +3580,11 @@ impl Gpu3D {
         fp16: bool,
         turb: Turbulence,
         nested: bool,
-        band: f64,
+        layer: &LayerSpec,
     ) -> Result<Gpu3D, String> {
         let sa = turb != Turbulence::Laminar;
         let keps = turb == Turbulence::KEpsRng;
+        let band = layer.band;
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
         let al = device.limits();
         let words_a = if fp16 { 5 } else { 10 };
@@ -3441,7 +3609,7 @@ impl Gpu3D {
         // maille rangés comme sur le GPU (boîte, ou blocs près de la surface).
         let tt = std::time::Instant::now();
         let cs = if nested && band > 0.0 {
-            band_setup(body, band)?
+            band_setup(body, layer)?
         } else {
             dense_setup(body, nested)
         };

@@ -2,7 +2,7 @@
 //! contre les références 2D (TMR, Ladson). Sans traînée induite : la traînée
 //! est celle du profil, pression et frottement.
 //!
-//! aile_infinie <L> <raff> <Re> <alpha> <t> [bandes, ex. 16,16 ou -] [ny] [hauteur en cordes] [essai]
+//! aile_infinie <L> <raff> <Re> <alpha> <t> [bandes, ex. 16,16 ou -] [ny] [hauteur en cordes] [essai] [--raff-auto N]
 //!
 //! L mailles par corde (veine), `raff` grilles fines entières, `bandes` :
 //! couches pariétales imbriquées (comme `run3d --bande`). Efforts intégrés
@@ -108,7 +108,12 @@ fn main() {
     let spt = lf / u as f64;
     let ramp = lbm::cpu::Ramp { steps: (2.0 * spt * std::env::var("AILE_RAMPE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)) as u64, u };
     let t0 = std::time::Instant::now();
-    let mut sim = Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &bands).unwrap();
+    // `--raff-auto N` (en fin de ligne) : raffinement automatique au lieu
+    // de `raff` et `bandes`.
+    let mut sim = match lbm::raff_auto::options_from_args(&a) {
+        Some(o) => lbm::raff_auto::build(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), &o).unwrap(),
+        None => Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &bands).unwrap(),
+    };
     {
         let cells: usize = sim.grid_cells().iter().map(|c| c.0).sum();
         println!("  mailles (toutes grilles) : {:.2} M, modèle {}", cells as f64 / 1e6, if sim.keps { "k-ε RNG" } else { "Spalart–Allmaras" });

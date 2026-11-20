@@ -1289,6 +1289,84 @@ cases d'une maille quelle que soit la grille : sur une couche ×16, chaque
 recherche parcourait des dizaines de milliers de cases. Les cases ont
 maintenant la longueur médiane des arêtes (au moins une maille).
 
+### Raffinement automatique (`--raff-auto N`)
+
+Un seul paramètre, N mailles par longueur de référence à la paroi
+(N = L · 2ⁿ), remplace `--raff` et `--bande` ; options identiques dans
+`run3d`, `banc3d`, `trainee3d` et `aile_infinie` (`lbm::raff_auto`).
+Comme les régions décalées des codes commerciaux, le niveau k (×2ᵏ) couvre
+les points à moins de d_k de la surface, plus un sillage balayé vers
+l'aval sur W_k = d_k (`--raff-auto-sillage s` : W_k = s · d_k). Décalages,
+sans réglage nouveau, tirés des règles déjà établies :
+- couche de paroi : d_n = max(16 mailles ×2ⁿ, 0,125 L), épaisseur sous
+  laquelle le raccord tombe dans la couche limite (« Couche pariétale
+  fine », `--bande-corde`) ;
+- niveaux plus grossiers : d_k = d_{k+1} + m mailles ×2ᵏ, marge du raccord
+  (pochoir cubique ±2 et zone non recopiée : m = 4 sous une boîte ; m = 7
+  sous une couche, règle de `nested_bands`). Le décalage croît donc avec
+  la taille de maille, chaque raccord restant à nombre de mailles à peu
+  près constant de la paroi.
+
+La structure imbriquée n'accepte que des boîtes et des couches creuses
+(blocs de 8³) : les niveaux 1 à n − 1 sont l'enveloppe exacte de leur
+région (maquette ± d_k, + W_k vers l'aval), le niveau de la paroi une
+couche creuse avec son sillage (`LayerSpec::wake`, mailles balayées depuis
+la dernière maille de la couche de chaque rangée ; mailles recopiées vers
+la grille parente choisies par érosion du masque, la distance à la paroi ne
+suffisant plus). Les niveaux intermédiaires restent des boîtes parce que le
+bilan sur boîte s'intègre sur la grille entière la plus fine.
+`--raff-auto-creux 1` les met en couches dès que la boîte dépasse deux fois
+le volume de la région (le stockage creux garde 1,6 fois les mailles
+actives). `--raff-auto-bords 1` ajoute un niveau limité aux arêtes vives
+(angle dièdre ≥ 60°) et aux arêtes de rayon de courbure inférieur à deux
+mailles de la paroi (bord d'attaque) ; cette région coupe la surface comme
+les grilles des bords : essai, pas de défaut.
+
+Règle obtenue sur TR-1208 (L = 8, N = 64) : boîtes ×2 de 0,625 L (aval
+1,25 L) et ×4 de 0,375 L (aval 0,75 L), couche ×8 de 16 mailles avec
+16 mailles de sillage, à comparer aux emprises manuelles (0,6 / 1,5 / 0,6
+et 0,35 / 0,7 / 0,4 L, couche de 16 mailles sans sillage) : la règle
+retrouve presque le réglage manuel.
+
+Comparaison à résolution de paroi égale (N = 64 ; `--t 20 --avg 8` ;
+TR-1208 L = 8, STL lissé, manuel `--raff 2 --bande 16` ; AR 4 L = 16, 4°,
+manuel `--raff 1 --bande 16`). Cz et Cx du bilan sur boîte (Cx extrapolé à
+volume nul), mises à jour de maille par pas de la veine (le coût) :
+
+| Cas | Raffinement | Mailles | Mises à jour / pas | Cz | Cx boîte | Cz surface / échange |
+| --- | --- | --- | --- | --- | --- | --- |
+| TR-1208, 4° | manuel | 9,59 M | 34,6 M | 0,2824 | 0,0146 | 0,2727 / 0,2832 |
+| | auto | 9,95 M | 37,4 M | 0,2791 | 0,0085 | 0,2681 / 0,2785 |
+| | auto sans sillage | 9,43 M | 34,0 M | 0,2823 | 0,0168 | 0,2725 / 0,2832 |
+| | auto creux | 9,11 M | 33,8 M | 0,2843 | −0,011 | 0,2595 / 0,2696 |
+| TR-1208, 8° | manuel | 10,29 M | 37,1 M | 0,5457 | 0,0262 | 0,5284 / 0,5495 |
+| | auto | 10,49 M | 39,4 M | 0,5395 | 0,0209 | 0,5163 / 0,5372 |
+| | auto creux | 9,29 M | 34,3 M | 0,5462 | 0,0067 | 0,5008 / 0,5213 |
+| AR 4, 4° | manuel | 4,27 M | 9,10 M | 0,2914 | 0,0179 | 0,2832 / 0,2982 |
+| | auto | 3,93 M | 8,58 M | 0,2899 | 0,0150 | 0,2837 / 0,2960 |
+| | auto + bords | 5,90 M | 24,4 M | 0,2739 | 0,0210 | faux |
+
+Mesure TR-1208 : 0,257 / 0,011 à 4°, 0,499 / 0,021 à 8° ; VSPAERO 0,266 /
+0,015 et 0,531 / 0,026.
+
+- **TR-1208** : la règle donne presque les emprises manuelles ; sans
+  sillage, elle redonne le calcul manuel (0,2823 contre 0,2824). Le sillage
+  ×8 (16 mailles derrière le bord de fuite et les saumons) baisse la
+  portance de 1,1 à 1,2 % et la traînée de la boîte de 20 à 40 %, dans le
+  même sens sur les trois mesures : à 8°, Cx 0,0209 contre 0,021 mesuré.
+  Coût : +2 à 4 % de mailles, +6 à 8 % de mises à jour.
+- **AR 4** : la région décalée remplit 76 % de sa boîte : le niveau ×4 est
+  une boîte entière (comme le ×4 complet du tableau de validation, 0,2898 /
+  0,015), 8 % de mailles en moins que boîte ×2 plus couche.
+- **Variante creuse** : ×4 en couche, le bilan sur boîte passe sur la grille
+  ×2 et n'est plus exploitable (Cx négatif ou trop faible) ; la surface et
+  l'échange baissent de 5 %. D'où les boîtes jusqu'au niveau n − 1.
+- **Bords** : portance −5,5 % et efforts de surface faux (le niveau des
+  bords compte comme domaine propre toute sa boîte) : le raccord qui coupe
+  la paroi garde le défaut des grilles des bords. Non retenu.
+
+`--raff-auto` reste une option ; le défaut ne change pas.
+
 ### Normales lisses et relevés multiples sur la surface
 
 Le maillage d'une maquette ne décrit qu'une surface plane par facettes ;
@@ -2462,6 +2540,22 @@ Cas : `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles par corde, 4°,
 
 Surcoût attendu : celui du transport, +0,24 ms par pas, ≈ +4 % ; il n'est
 pas séparable du bruit sur la durée totale.
+
+### Raffinement automatique (`--raff-auto 64`)
+
+GTX 1070, demi-précision ; mémoire du GPU ≈ 100 octets par maille.
+
+| Cas | Avant (manuel) | Après (auto) |
+| --- | --- | --- |
+| AR 4, `banc3d ar4b`, t* = 6, GPU libre | 8,8 à 9,1 s de calcul, 4,27 M mailles (≈ 0,43 Go), 9,10 M mises à jour / pas | 9,4 s, 3,93 M mailles (≈ 0,39 Go), 8,58 M |
+| TR-1208 4°, `run3d`, t* = 20 | 9,59 M mailles (≈ 0,96 Go), 34,6 M mises à jour / pas | 9,95 M (≈ 1,0 Go), 37,4 M (+8 %) |
+| TR-1208 8°, `run3d`, t* = 20 | 10,29 M (≈ 1,03 Go), 37,1 M | 10,49 M (≈ 1,05 Go), 39,4 M (+6 %) |
+
+Les durées de TR-1208 ont été mesurées sur un GPU partagé avec d'autres
+calculs (215 à 560 millions de mailles par seconde selon la charge) : le
+coût y est donné par les mises à jour par pas, proportionnelles au temps à
+débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
+mailles du sillage ×8).
 
 ## Installation
 

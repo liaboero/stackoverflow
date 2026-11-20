@@ -30,6 +30,8 @@ pub mod gpu;
 pub mod gpu3d;
 #[cfg(feature = "gpu")]
 pub mod refine3d;
+#[cfg(feature = "gpu")]
+pub mod raff_auto;
 pub mod panel;
 #[cfg(feature = "gpu")]
 pub mod refine;

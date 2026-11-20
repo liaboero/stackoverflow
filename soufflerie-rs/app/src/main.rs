@@ -818,7 +818,29 @@ fn cmd_run3d(a: &Args) {
             bands.iter().map(|b| format!("{b:.0}")).collect::<Vec<_>>().join(", ")
         );
     }
-    let mut sim = match Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, &bands) {
+    // Raffinement automatique d'après la géométrie : N mailles par longueur
+    // de référence à la paroi (voir `lbm::raff_auto`) ; remplace --raff et --bande.
+    let raff_auto = a.get("raff-auto", 0usize);
+    let built = if raff_auto > 0 {
+        let o = lbm::raff_auto::AutoOptions {
+            wall_cells: raff_auto,
+            wake: a.get("raff-auto-sillage", 1.0f64),
+            edges: a.get("raff-auto-bords", 0usize) > 0,
+            sparse: a.get("raff-auto-creux", 0usize) > 0,
+        };
+        let ap = lbm::raff_auto::auto_plan(&body, &o).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        });
+        eprint!("Raffinement automatique ({raff_auto} mailles par longueur à la paroi) :\n{}", ap.describe());
+        if ap.edges.is_some() {
+            eprintln!("Attention : le niveau des bords coupe la surface (voir le README, « Grilles des bords »).");
+        }
+        Gpu3D::with_plan(&body, nu, U, fp16, sa, &ap.plan)
+    } else {
+        Gpu3D::with_refinement_edges(&body, nu, U, fp16, sa, depth, le, te, &bands)
+    };
+    let mut sim = match built {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Calcul 3D impossible : {e}");
@@ -879,6 +901,16 @@ fn cmd_run3d(a: &Args) {
             d[2],
             (d[0] * d[1] * d[2]) as f64 / 1e6,
             l * s
+        );
+    }
+    {
+        // Toutes les grilles : mailles stockées et mises à jour par pas de la veine.
+        let cells = sim.grid_cells();
+        eprintln!(
+            "Grilles : {} · {:.2} M mailles en tout, {:.2} M mises à jour par pas de la veine",
+            cells.iter().map(|&(n, d)| format!("×{} {:.2} M", 1u64 << d, n as f64 / 1e6)).collect::<Vec<_>>().join(", "),
+            cells.iter().map(|c| c.0).sum::<usize>() as f64 / 1e6,
+            cells.iter().map(|&(n, d)| (n as f64) * (1u64 << d) as f64).sum::<f64>() / 1e6
         );
     }
     if let Some((nb, n, w, s)) = sim.le_grid() {
