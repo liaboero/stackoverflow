@@ -2788,45 +2788,6 @@ partagée (≈ 5 %) ; transport de ν̃ dans la collision du pas suivant
 et un décalage d'un pas à reporter dans les raccords) ; vitesses rangées
 en tableaux séparés (≈ 2 %).
 
-
-## Coût de calcul des modifications
-
-Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
-totale varie de ±30 % d'un passage à l'autre ; les temps par passe
-(`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
-alternés par modèle, on garde le plus rapide.
-
-### Modèle k-ε RNG
-
-Cas : `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles par corde, 4°,
-4,38 M mailles sur toutes les grilles).
-
-| | Spalart–Allmaras | k-ε RNG |
-| --- | --- | --- |
-| Transport (veine + grille ×2 + grille ×4) | 0,45 + 0,11 + 0,33 = 0,89 ms | 0,52 + 0,16 + 0,45 = 1,13 ms |
-| Somme des passes d'un pas | 5,4 ms | 7,6 ms (collision de la veine 2,2 ms contre 1,6 : bruit, même noyau) |
-| Durée totale | 53 à 82 s | 53 à 80 s |
-| Mémoire | — | +8 octets par maille (k et ε au lieu de ν̃), ≈ +35 Mo |
-
-Surcoût attendu : celui du transport, +0,24 ms par pas, ≈ +4 % ; il n'est
-pas séparable du bruit sur la durée totale.
-
-### Raffinement automatique (`--raff-auto 64`)
-
-GTX 1070, demi-précision ; mémoire du GPU ≈ 100 octets par maille.
-
-| Cas | Avant (manuel) | Après (auto) |
-| --- | --- | --- |
-| AR 4, `banc3d ar4b`, t* = 6, GPU libre | 8,8 à 9,1 s de calcul, 4,27 M mailles (≈ 0,43 Go), 9,10 M mises à jour / pas | 9,4 s, 3,93 M mailles (≈ 0,39 Go), 8,58 M |
-| TR-1208 4°, `run3d`, t* = 20 | 9,59 M mailles (≈ 0,96 Go), 34,6 M mises à jour / pas | 9,95 M (≈ 1,0 Go), 37,4 M (+8 %) |
-| TR-1208 8°, `run3d`, t* = 20 | 10,29 M (≈ 1,03 Go), 37,1 M | 10,49 M (≈ 1,05 Go), 39,4 M (+6 %) |
-
-Les durées de TR-1208 ont été mesurées sur un GPU partagé avec d'autres
-calculs (215 à 560 millions de mailles par seconde selon la charge) : le
-coût y est donné par les mises à jour par pas, proportionnelles au temps à
-débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
-mailles du sillage ×8).
-
 ## Aéroacoustique : cylindre 2D, rayonnement direct et Ffowcs Williams–Hawkings
 
 Premier cas de validation acoustique. Avant cette série, le code n'avait ni
@@ -2952,16 +2913,6 @@ sans loi de paroi) diverge avant 12 D/U à D = 16 comme à D = 24
 la veine du cylindre (blocage 1/8, envergure non périodique malgré
 l'étiquette « 4D périodique ») sont à reprendre avant ce cas.
 
-## Coût de calcul des modifications
-
-- **Sondes GPU 2D** (`acoustique2d`, D = 16, ±40 D, 1,25 M mailles, 1 400
-  sondes relevées tous les 8 pas, 100 D/U) : avec / sans relevés, mesures
-  alternées sur GPU partagé, 1 574 / 1 524, 1 234 / 1 358, 1 339 / 1 148 M mailles/s :
-  écart dans la dispersion (±10 %), coût non mesurable.
-- **Couches absorbantes sur quatre côtés** : un mot de plus lu par maille et
-  par pas dans le noyau D2Q9 (coefficient par colonne, nul par défaut),
-  contre 72 octets de populations ; non mesuré séparément.
-
 ## Installation
 
 Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
@@ -3071,7 +3022,66 @@ soufflerie-rs/
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
 
+## Pistes
+
+Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
+Re = 3900, suites aéroacoustiques).
+
+- Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
+  egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
+- Stockage en demi-précision et propagation en place sur GPU (deux à quatre
+  fois moins de mémoire), raffinement local de maillage.
+- Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter
+  (cargo-apk / xbuild). Sur téléphone, l'application web reste la plus
+  simple à installer.
+
 ## Coût de calcul des modifications
+
+Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
+totale varie de ±30 % d'un passage à l'autre ; les temps par passe
+(`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
+alternés par modèle, on garde le plus rapide.
+
+### Modèle k-ε RNG
+
+Cas : `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles par corde, 4°,
+4,38 M mailles sur toutes les grilles).
+
+| | Spalart–Allmaras | k-ε RNG |
+| --- | --- | --- |
+| Transport (veine + grille ×2 + grille ×4) | 0,45 + 0,11 + 0,33 = 0,89 ms | 0,52 + 0,16 + 0,45 = 1,13 ms |
+| Somme des passes d'un pas | 5,4 ms | 7,6 ms (collision de la veine 2,2 ms contre 1,6 : bruit, même noyau) |
+| Durée totale | 53 à 82 s | 53 à 80 s |
+| Mémoire | — | +8 octets par maille (k et ε au lieu de ν̃), ≈ +35 Mo |
+
+Surcoût attendu : celui du transport, +0,24 ms par pas, ≈ +4 % ; il n'est
+pas séparable du bruit sur la durée totale.
+
+### Raffinement automatique (`--raff-auto 64`)
+
+GTX 1070, demi-précision ; mémoire du GPU ≈ 100 octets par maille.
+
+| Cas | Avant (manuel) | Après (auto) |
+| --- | --- | --- |
+| AR 4, `banc3d ar4b`, t* = 6, GPU libre | 8,8 à 9,1 s de calcul, 4,27 M mailles (≈ 0,43 Go), 9,10 M mises à jour / pas | 9,4 s, 3,93 M mailles (≈ 0,39 Go), 8,58 M |
+| TR-1208 4°, `run3d`, t* = 20 | 9,59 M mailles (≈ 0,96 Go), 34,6 M mises à jour / pas | 9,95 M (≈ 1,0 Go), 37,4 M (+8 %) |
+| TR-1208 8°, `run3d`, t* = 20 | 10,29 M (≈ 1,03 Go), 37,1 M | 10,49 M (≈ 1,05 Go), 39,4 M (+6 %) |
+
+Les durées de TR-1208 ont été mesurées sur un GPU partagé avec d'autres
+calculs (215 à 560 millions de mailles par seconde selon la charge) : le
+coût y est donné par les mises à jour par pas, proportionnelles au temps à
+débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
+mailles du sillage ×8).
+
+### Aéroacoustique : sondes et couches absorbantes
+
+- **Sondes GPU 2D** (`acoustique2d`, D = 16, ±40 D, 1,25 M mailles, 1 400
+  sondes relevées tous les 8 pas, 100 D/U) : avec / sans relevés, mesures
+  alternées sur GPU partagé, 1 574 / 1 524, 1 234 / 1 358, 1 339 / 1 148 M mailles/s :
+  écart dans la dispersion (±10 %), coût non mesurable.
+- **Couches absorbantes sur quatre côtés** : un mot de plus lu par maille et
+  par pas dans le noyau D2Q9 (coefficient par colonne, nul par défaut),
+  contre 72 octets de populations ; non mesuré séparément.
 
 ### Surfels : prétraitement géométrique (`lbm/src/surfel.rs`)
 
@@ -3090,21 +3100,6 @@ chacune une découpe de polyèdre). Pistes si cela gêne : volume nul ou
 plein sans découpe quand un voxel est entier d'un côté de tous les plans
 (déjà fait), mise en commun des découpes des directions opposées (déjà
 fait), poids en f32 sur le GPU.
-
-## Pistes
-
-Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
-Re = 3900, suites aéroacoustiques).
-
-- Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
-  egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
-- Stockage en demi-précision et propagation en place sur GPU (deux à quatre
-  fois moins de mémoire), raffinement local de maillage.
-- Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter
-  (cargo-apk / xbuild). Sur téléphone, l'application web reste la plus
-  simple à installer.
-
-## Coût de calcul des modifications
 
 ### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
 
