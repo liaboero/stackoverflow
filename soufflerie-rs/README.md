@@ -2512,6 +2512,9 @@ soufflerie-rs/
 
 ## Pistes
 
+Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
+Re = 3900, suites aéroacoustiques).
+
 - Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
   egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
 - Stockage en demi-précision et propagation en place sur GPU (deux à quatre
