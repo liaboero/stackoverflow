@@ -1558,7 +1558,10 @@ partout le long de la normale. Ladson (décrochage de bord de fuite) et
 SA (décollement remontant à 17 % de corde à 17,7° dans notre 2D) ont un
 retour d'écoulement étendu.
 
-**Diagnostic** (le solveur n'est pas modifié ici) :
+**Diagnostic** (le solveur n'est pas modifié ici ; essais et cause
+établie dans « Pourquoi la soufflerie ne décolle pas » : la couche
+limite n'est pas résolue au-dessus de h, ni le signe du glissement ni ν̃
+n'y sont pour quelque chose) :
 - *Loi de paroi d'équilibre* (Spalding, sans terme de gradient de
   pression) : elle impose un glissement dans le sens de u_τ, toujours
   positif ; la couche pariétale ne peut pas s'inverser, et le frottement
@@ -1917,6 +1920,117 @@ corde.
 La soufflerie 2D (`d2q9.wgsl` ; `wall.rs` ne fait que relever les profils)
 n'est pas modifiée.
 
+### Pourquoi la soufflerie ne décolle pas
+
+Trois validations le montrent : NACA 0012 sans décrochage (Cz plafonne
+vers 1,7 à 1,8 au-delà de 17°, voir « Décrochage »), corps d'Ahmed à
+lunette collée (35° : Cx 0,70 pour 0,26 mesuré), et gradient de pression
+dans la loi de paroi qui décolle tout (section précédente). Essais menés
+derrière des bits de `set_essai` (aile infinie, 64 mailles par corde,
+bilan sur boîte, 18° : 4 cordes de moyenne, sinon 1 ; script
+`tools/essais_decol.sh`).
+
+**Constat.** Sur tout l'extrados, le glissement imposé vaut 0,97 fois la
+vitesse du premier nœud (moyenne sur la corde, 18° à 64 mailles comme 4°
+à 128), et la vitesse relevée à h ne s'annule nulle part : 0,6 U∞ au bord
+de fuite à 18°. La paroi est presque glissante : u_s = u_h − u_τ²h/(ν + κu_τh)
+≈ u_h − u_τ/κ, soit 0,9 u_h à y⁺ ≈ 4000 (h = 2 mailles). Le fluide du
+premier nœud se comporte comme un filet non visqueux qui ne perd que le
+frottement ρu_τ² ; le gradient de pression adverse le ralentit comme
+Bernoulli, sans l'arrêter.
+
+**Pistes instruites** (18°, 64 mailles ; base : Cz 1,706, Cx 0,106, pas de
+décollement) :
+
+| Essai | Bit | Cz | Cx | Décollement |
+| --- | --- | --- | --- | --- |
+| Base | 0 | 1,706 | 0,106 | aucun |
+| Glissement signé, porté par u_h (piste 1) | 67108864 | 1,702 | 0,104 | aucun |
+| Idem sans plancher (le nœud peut refluer seul) | 201326592 | 1,662 | 0,119 | aucun |
+| ν_t de SA retirée hors premier nœud | 1 | 1,644 | 0,106 | aucun |
+| ν̃ plafonnée à 300 ν (piste 3) | 2048, `AILE_NUCAP=300` | 1,655 | 0,111 | aucun |
+| ν_t = max(ν_SA, ν_Smagorinsky) au lieu de la somme | 2097152 | 1,679 | 0,108 | aucun |
+
+- *Piste 1* (u_τ signé) : sans effet, puisque u_h ne s'inverse jamais ;
+  le signe du glissement ne peut pas créer le reflux qui le déclencherait.
+- *Piste 3* (ν̃/ν ≈ 2700 au bord de fuite) : écartée. Retirer toute la
+  viscosité de Spalart–Allmaras hors du premier nœud ne fait pas décoller
+  non plus ; ν_t ≈ 2000 à 3000 ν est d'ailleurs l'ordre de la couche
+  externe réelle (0,0168 U_e δ*, Clauser) à ce Reynolds. Smagorinsky
+  s'ajoutait à SA dans la couche limite (double compte, de l'ordre de
+  1000 ν) : le maximum des deux n'y change rien non plus.
+
+**Piste 2 : gradient de pression filtré** (bit 536870912, avec la loi de
+Townsend–Mellor 8388608 ; différence centrée de ρ interpolé à h, à ±2
+mailles le long de u_h, au lieu de la dérivée de l'interpolation sur une
+maille). Variante 1073741824 : gradient de la pression totale à h,
+d(p/ρ + |u|²/2)/ds, qui vaut (1/ρ) ∂τ/∂y le long d'une ligne de courant
+(nul si l'écoulement à h est non visqueux).
+
+| Essai (64 mailles) | Bits | 4° Cz / Cx | 8° Cz / Cx | 18° Cz / Cx | Décollement à 18° |
+| --- | --- | --- | --- | --- | --- |
+| Base | 0 | 0,458 / 0,016 | 0,971 / 0,028 | 1,706 / 0,106 | aucun |
+| Mellor filtré | 545259520 | 0,420 / 0,090 | — | 1,355 / 0,167 | aucun |
+| Mellor filtré, κu_τh gardé | 562036736 | 0,369 / 0,044 | 0,806 / 0,046 | **0,883** / 0,202 | x/c = 0,30 |
+| Profil seul, filtré | 578813952 | 0,397 / 0,074 | — | 1,235 / 0,181 | aucun |
+| Pression totale à h | 1619001344 | 0,302 / 0,083 | — | 0,718 / 0,256 | x/c = 0,28 |
+| Ladson | | 0,43–0,44 / 0,008 | 0,87–0,89 / 0,010 | 1,0–1,2 | |
+
+Le filtrage réduit bien le bruit (Mellor complet à 4° : Cz 0,42 au lieu
+de 0,28 sans filtre), et le gradient fait enfin décrocher à 18°. Mais
+toutes les variantes dégradent l'écoulement attaché (Cz −8 à −34 %, Cx ×3
+à ×6 à 4°), et pas moins en affinant : Mellor filtré à 128 mailles, 4° :
+Cz 0,317 ; 18° : 1,627 (attaché). Balayage de Mellor filtré à 64 mailles,
+Cz de 14 à 19° : 1,218 / 0,589 / 1,181 / 1,439 / 1,355 / 0,682 (décollement
+à x/c = 0,23 à 15°, 0,13 à 19°, sinon aucun). Le décrochage obtenu n'est ni monotone ni convergé en maillage.
+Corps d'Ahmed 35°, L = 64 : base Cx (surface) 0,670, C_S 0,348, pas de
+bulle de culot ; 562036736 : Cx 0,533, C_S 0,187 (la lunette se décharge,
+bulle de 196 mm), mais C_K passe de 0,109 à 0,180 ; 545259520 : Cx 0,617,
+C_S 0,213 (Cx boîte : 0,681 / 0,617 / 0,770). Mesure : 0,26. Résultats
+dans `validation/decollement/`.
+
+**Cause.** Elle tient à la résolution, pas à un terme de la loi. h = 2
+mailles vaut 1,6 % de corde à 128 mailles (3 % à 64), soit δ ou plus sur
+l'essentiel de l'aile : y⁺(h) ≈ 2000 à 5000, et P h / u_τ² ≈ 10 en
+gradient adverse modéré (déjà à 4°). La loi d'équilibre (Spalding) ignore
+le gradient de pression : la couche [0, h], qui porte tout le déficit de
+quantité de mouvement d'une couche limite réelle, devient un filet presque
+glissant que le gradient adverse ne peut pas arrêter. La loi de
+Townsend–Mellor l'ajoute, mais elle ne vaut que dans la couche interne
+(y ≲ 0,1 à 0,2 δ) : relevée à h ≥ δ, elle prête au gradient tout l'effet
+qu'il aurait sur la couche interne, alors qu'il est en grande partie
+équilibré par l'advection dans la couche externe. Elle décroche donc
+partout où le gradient adverse est notable, y compris à 4°. Un terme
+intermédiaire (gradient de pression totale à h) suit les pertes
+numériques du champ résolu (couche lente de 3 à 4 mailles, voir « Couche
+limite de la plaque plane ») et fait pire. Le décollement de bord de fuite
+est une réponse de la couche externe au gradient adverse ; il faut la
+résoudre au-dessus de h, soit une dizaine de mailles dans la couche
+limite (de l'ordre de 500 mailles par corde au voisinage du bord de fuite,
+par raffinement local de paroi), ou un modèle de couche limite intégrale
+hors équilibre (Park et Moin 2014 ; mais il suppose aussi h dans la
+couche limite). L'arête de toit d'Ahmed à 35° relève du même défaut :
+le glissement de la lunette laisse l'écoulement contourner l'arête.
+
+**Décision.** Défaut inchangé : toutes les variantes restent derrière des
+bits (`Gpu3D::set_essai`, `ahmed --essai`). Aucune n'est sans régression
+à 0–8°.
+
+**Non-régression du défaut.** La fusion de la branche du gradient de
+pression change le code compilé de la passe de paroi sans changer son
+calcul à bit nul, mais pas les résultats au bit près : aile infinie à 64
+mailles, 4° : Cz 0,4562 contre 0,4580 ; à 128 mailles, 0 / 4 / 8° :
+−0,013 / 0,462 / 0,899 et Cx 0,0147 / 0,0143 / 0,0222 (avant :
+−0,013 / 0,458 / 0,899 et 0,0142 / 0,0141 / 0,0226). Ce sont des écarts
+d'arrondi amplifiés par l'écoulement instationnaire : décaler la maquette
+de 10⁻⁶ maille avec l'ancien programme donne Cz 0,4598 à 128 mailles, 4°
+(+0,3 %) et Cx −3 % à 64. Corps d'Ahmed 35°, L = 64 : Cx 0,670 ici
+contre 0,606 sur sa branche (instationnaire, 4 t* de moyenne). Plaque plane (`plaque3d 64`) : frottement de
+l'extrados 0,00434 / 0,00433 (échange), loi de paroi 0,00407 des deux
+côtés ; θ instantané à ±7 % selon la station. Sans la fusion, les bits
+67108864 à 1073741824 et 2097152 ajoutés ici redonnent l'ancien résultat au bit près
+(64 mailles, 4° : 0,4580).
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -1944,6 +2058,7 @@ arguments en tête de chaque fichier) :
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
 | `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
+| `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
@@ -2548,7 +2663,8 @@ durée de moyenne change Cx d'environ 1 %.
   grilles et Cx 0,61 à L = 136. La loi de paroi (glissement à la
   paroi) et la résolution de l'arête (une maille) laissent l'écoulement
   franchir une arête vive à 35° ; c'est le défaut de fond à corriger
-  avant tout cas automobile.
+  avant tout cas automobile (voir « Pourquoi la soufflerie ne décolle
+  pas » ; `ahmed --essai` passe les variantes de `set_essai`).
 - *Boîte et surface* : 3 à 11 % d'écart, de signe variable selon la
   grille ; l'échange de quantité de mouvement (0,46 et 0,70 à L = 136)
   surestime nettement, comme sur l'aile.
@@ -2929,6 +3045,15 @@ d'Ahmed passe ainsi de 15 M mailles au plus (L = 96) à 43 M (L = 136, 3,7
 76 s sans la borne, 74 à 78 s avec 8 en vol, 77 s avec 32 : pas d'écart
 mesurable (les écarts entre relevés successifs sont du même ordre).
 
+## Coût de calcul des modifications
+
+Mesures sur la GTX 1070, minimum de trois passages (GPU partagé).
+
+| Modification | Cas | Avant | Après |
+| --- | --- | --- | --- |
+| Essais du décollement (bits 67108864 à 1073741824) et gradient de pression (8388608), bits à 0 | `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 12 cordes) | 27 s | 28 s (bruit de mesure ; les bits sont des constantes de compilation de la collision) |
+| Loi de Townsend–Mellor filtrée, κu_τh (562036736) | idem | 28 s | 98 s (×3,5 : fausse position sur la loi de Spalding dans la passe de paroi) |
+
 ## Installation
 
 Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
@@ -3040,6 +3165,10 @@ soufflerie-rs/
 
 ## Pistes
 
+- Décollement (voir « Pourquoi la soufflerie ne décolle pas ») :
+  raffinement local de paroi jusqu'à une dizaine de mailles dans la couche
+  limite là où le gradient est adverse (bord de fuite, lunette), puis loi
+  de paroi avec gradient de pression relevée dans la couche interne.
 Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
 Re = 3900, suites aéroacoustiques).
 

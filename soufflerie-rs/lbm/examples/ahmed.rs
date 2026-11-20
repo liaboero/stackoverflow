@@ -92,6 +92,8 @@ fn main() {
     let pieds = a.get("pieds", 1u32) == 1;
     let mem_max: f64 = a.get("memoire", 6.5);
     let sortie: String = a.get("sortie", "target/ahmed".to_string());
+    // Variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`).
+    let essai: u32 = a.get("essai", 0);
     let u = 0.1f32;
     std::fs::create_dir_all(&sortie).unwrap();
 
@@ -132,6 +134,9 @@ fn main() {
     }
     let nu = u as f64 * l as f64 / re;
     let mut sim = Gpu3D::with_turbulence(&body, nu, u, true, true).unwrap_or_else(|e| panic!("GPU : {e}"));
+    if essai != 0 {
+        sim.set_essai(essai, 0.0);
+    }
     println!("{} · τ₀ = {:.6} · liens de paroi {}", sim.adapter_name(), sim.tau0, sim.wall_count);
     let spt = l as f64 / u as f64;
     let ramp = Ramp { steps: (4.0 * spt) as u64, u };
