@@ -92,6 +92,71 @@ fn f32_to_f16(v: f32) -> u16 {
     sign | r as u16
 }
 const MACRO_WGSL: &str = include_str!("macros.wgsl");
+
+/// Sondes : ρ, u interpolés (bilinéaire) en des points quelconques, écrits à la
+/// suite dans `outp` (compteur d'échantillons dans le premier mot).
+const PROBE_WGSL: &str = "
+struct M {
+  nx: u32, ny: u32, n: u32, np: u32,
+};
+@group(0) @binding(0) var<uniform> P: M;
+@group(0) @binding(2) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> outp: array<u32>;
+
+fn node(x: u32, y: u32) -> vec3<f32> {
+  let c = y * P.nx + x;
+  var v: array<f32, 9>;
+  for (var i = 0u; i < 9u; i++) {
+    v[i] = ldm(i, c);
+  }
+  let rho = v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7] + v[8];
+  return vec3<f32>(rho, (v[1] - v[3] + v[5] - v[6] - v[7] + v[8]) / rho, (v[2] - v[4] + v[5] + v[6] - v[7] - v[8]) / rho);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let k = gid.x;
+  if (k >= P.np) {
+    return;
+  }
+  let p = pos[k];
+  let x0 = u32(floor(p.x));
+  let y0 = u32(floor(p.y));
+  let a = p.x - f32(x0);
+  let b = p.y - f32(y0);
+  let v = (1.0 - a) * (1.0 - b) * node(x0, y0) + a * (1.0 - b) * node(x0 + 1u, y0)
+    + (1.0 - a) * b * node(x0, y0 + 1u) + a * b * node(x0 + 1u, y0 + 1u);
+  let o = 1u + 3u * (outp[0] * P.np + k);
+  outp[o] = bitcast<u32>(v.x);
+  outp[o + 1u] = bitcast<u32>(v.y);
+  outp[o + 2u] = bitcast<u32>(v.z);
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn advance() {
+  outp[0] = outp[0] + 1u;
+}
+";
+
+/// Sondes enregistrées sur GPU, relues par paquets.
+struct Probes {
+    np: usize,
+    every: u64,
+    cap: usize,
+    /// Échantillons en attente dans `out`.
+    count: usize,
+    probe_pipe: wgpu::ComputePipeline,
+    adv_pipe: wgpu::ComputePipeline,
+    /// Par tampon de populations.
+    bind: [wgpu::BindGroup; 2],
+    adv_bind: wgpu::BindGroup,
+    out: wgpu::Buffer,
+    read: wgpu::Buffer,
+    _pos: wgpu::Buffer,
+    _params: wgpu::Buffer,
+    times: Vec<u64>,
+    data: Vec<f32>,
+}
 const SA_WGSL: &str = include_str!("sa.wgsl");
 /// Pas par soumission (emplacements de paramètres).
 pub(crate) const BATCH: usize = 256;
@@ -162,6 +227,7 @@ pub struct GpuSolver {
     /// Grille fine imbriquée : ni éponge ni bandes absorbantes, pourtour
     /// en mailles fantômes (type 3) remplies depuis la grille parente.
     pub(crate) nested: bool,
+    probes: Option<Probes>,
 }
 
 /// Copie des efforts cumulés en cours de lecture.
@@ -267,7 +333,7 @@ impl GpuSolver {
         let f = [mk("f0", fbytes, st), mk("f1", fbytes, st)];
         let kind = mk("kind", 4 * n as u64, st);
         let wq = mk("wq", 36 * n as u64, st);
-        let aux = mk("aux", 4 * (nx + ny) as u64, st);
+        let aux = mk("aux", 4 * (2 * nx + ny) as u64, st);
         let cell = mk("cell", 16 * n as u64, st);
         // Alloués à la première activation de Spalart–Allmaras.
         let sa = [mk("sa0", 16, st), mk("sa1", 16, st)];
@@ -436,6 +502,7 @@ impl GpuSolver {
             force_pending: VecDeque::new(),
             force_free: Vec::new(),
             nested,
+            probes: None,
         };
         s.set_viscosity(s.cfg.nu);
         s.upload_geometry();
@@ -642,7 +709,19 @@ impl GpuSolver {
         };
         let tau_sponge = self.tau0.max(0.9);
         let len = (nx - 1).saturating_sub(s0).max(1) as f64;
-        let absorb = if self.nested { 0.0 } else { (ny as f64 / 8.0).round() };
+        let absorb = match (self.nested, self.cfg.absorb) {
+            (true, _) => 0.0,
+            (false, None) => (ny as f64 / 8.0).round(),
+            (false, Some(w)) => w as f64,
+        };
+        let sigma = |d: usize| {
+            let s = if absorb > 0.0 { 1.0 - d as f64 / absorb } else { 0.0 };
+            if s > 0.0 {
+                (0.05 * s * s) as f32
+            } else {
+                0.0
+            }
+        };
         let mut aux: Vec<f32> = (0..nx)
             .map(|x| {
                 let mut tau = self.tau0;
@@ -653,15 +732,10 @@ impl GpuSolver {
                 tau as f32
             })
             .collect();
-        aux.extend((0..ny).map(|y| {
-            let d = y.min(ny - 1 - y) as f64;
-            let s = if absorb > 0.0 { 1.0 - d / absorb } else { 0.0 };
-            if s > 0.0 {
-                (0.05 * s * s) as f32
-            } else {
-                0.0
-            }
-        }));
+        aux.extend((0..ny).map(|y| sigma(y.min(ny - 1 - y))));
+        // Entrée et sortie : seulement pour les couches sur quatre côtés.
+        let cols = !self.nested && self.cfg.absorb.is_some();
+        aux.extend((0..nx).map(|x| if cols { sigma(x.min(nx - 1 - x)) } else { 0.0 }));
         self.queue.write_buffer(&self.aux, 0, bytemuck::cast_slice(&aux));
     }
 
@@ -809,6 +883,12 @@ impl GpuSolver {
         let per_submit = (30_000_000 / (nx * ny).max(1) as usize).clamp(1, BATCH);
         while left > 0 {
             let k = left.min(per_submit);
+            if let Some(pr) = &self.probes {
+                let due = (self.time + k as u64) / pr.every - self.time / pr.every;
+                if pr.count + due as usize > pr.cap {
+                    self.flush_probes();
+                }
+            }
             let mut bytes = vec![0u8; SLOT as usize * k];
             for s in 0..k {
                 let (u, a) = ramp.at(self.time + s as u64);
@@ -831,6 +911,19 @@ impl GpuSolver {
                         pass.set_pipeline(&self.sa_pipe);
                         pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
                         pass.dispatch_workgroups(nx.div_ceil(64), ny, 1);
+                    }
+                    if let Some(pr) = &mut self.probes {
+                        let t = self.time + s as u64 + 1;
+                        if t % pr.every == 0 {
+                            pass.set_pipeline(&pr.probe_pipe);
+                            pass.set_bind_group(0, &pr.bind[1 - self.cur], &[]);
+                            pass.dispatch_workgroups((pr.np as u32).div_ceil(64), 1, 1);
+                            pass.set_pipeline(&pr.adv_pipe);
+                            pass.set_bind_group(0, &pr.adv_bind, &[]);
+                            pass.dispatch_workgroups(1, 1, 1);
+                            pr.count += 1;
+                            pr.times.push(t);
+                        }
                     }
                     self.cur = 1 - self.cur;
                 }
@@ -982,5 +1075,125 @@ impl GpuSolver {
 
     pub fn is_finite(&mut self) -> bool {
         self.finite
+    }
+
+    /// Sondes aux points `pos` (réseau, coordonnées réelles, interpolation
+    /// bilinéaire de ρ, u), relevées tous les `every` pas (après le pas).
+    pub fn set_probes(&mut self, pos: &[[f32; 2]], every: u64) {
+        let np = pos.len().max(1);
+        let d = &self.device;
+        // Au plus ≈ 64 Mo en attente sur le GPU.
+        let cap = (16_000_000 / (3 * np)).clamp(1, 1 << 16);
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("probes"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", if self.cfg.half { MACRO_F16 } else { MACRO_F32 }, PROBE_WGSL).into(),
+            ),
+        });
+        let pipe = |entry: &str| {
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let probe_pipe = pipe("probe");
+        let adv_pipe = pipe("advance");
+        let params = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("probe_params"),
+            contents: bytemuck::cast_slice(&[
+                self.cfg.nx as u32,
+                self.cfg.ny as u32,
+                (self.cfg.nx * self.cfg.ny) as u32,
+                pos.len() as u32,
+            ]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let mut flat: Vec<f32> = pos.iter().flat_map(|p| [p[0], p[1]]).collect();
+        if flat.is_empty() {
+            flat = vec![1.0, 1.0];
+        }
+        let pbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("probe_pos"),
+            contents: bytemuck::cast_slice(&flat),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let size = 4 * (1 + 3 * np * cap) as u64;
+        let out = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_out"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let read = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = |f: &wgpu::Buffer| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("probe"),
+                layout: &probe_pipe.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: f.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: pbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: out.as_entire_binding() },
+                ],
+            })
+        };
+        let bind = [group(&self.f[0]), group(&self.f[1])];
+        let adv_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("probe_advance"),
+            layout: &adv_pipe.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 3, resource: out.as_entire_binding() }],
+        });
+        self.queue.write_buffer(&out, 0, bytemuck::cast_slice(&[0u32]));
+        self.probes = Some(Probes {
+            np: pos.len(),
+            every: every.max(1),
+            cap,
+            count: 0,
+            probe_pipe,
+            adv_pipe,
+            bind,
+            adv_bind,
+            out,
+            read,
+            _pos: pbuf,
+            _params: params,
+            times: Vec::new(),
+            data: Vec::new(),
+        });
+    }
+
+    /// Relit les échantillons en attente sur le GPU.
+    fn flush_probes(&mut self) {
+        let Some(pr) = &self.probes else { return };
+        if pr.count == 0 {
+            return;
+        }
+        let size = 4 * (1 + 3 * pr.np * pr.count) as u64;
+        let v = self.read_buffer(&pr.out, &pr.read, size);
+        let pr = self.probes.as_mut().unwrap();
+        if v.len() > 1 {
+            pr.data.extend_from_slice(&v[1..]);
+        }
+        pr.count = 0;
+        self.queue.write_buffer(&pr.out, 0, bytemuck::cast_slice(&[0u32]));
+    }
+
+    /// Échantillons relevés depuis le dernier appel : pas de chaque relevé et
+    /// valeurs [relevé][sonde][ρ, u_x, u_y].
+    pub fn take_probes(&mut self) -> (Vec<u64>, Vec<f32>) {
+        self.flush_probes();
+        match &mut self.probes {
+            Some(pr) => (std::mem::take(&mut pr.times), std::mem::take(&mut pr.data)),
+            None => (Vec::new(), Vec::new()),
+        }
     }
 }

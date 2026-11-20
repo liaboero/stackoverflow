@@ -2662,6 +2662,141 @@ coût y est donné par les mises à jour par pas, proportionnelles au temps à
 débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
 mailles du sillage ×8).
 
+## Aéroacoustique : cylindre 2D, rayonnement direct et Ffowcs Williams–Hawkings
+
+Premier cas de validation acoustique. Avant cette série, le code n'avait ni
+sondes temporelles, ni transformée de Fourier, ni analogie acoustique
+(`noise3d` et `pwh3d` sont des diagnostics d'efforts). Ajouts :
+
+- **Sondes GPU 2D** (`GpuSolver::set_probes`, `take_probes`) : ρ et u
+  interpolés (bilinéaire) en des points quelconques, écrits sur le GPU tous les
+  `every` pas et relus par paquets.
+- **Couches absorbantes sur les quatre côtés** (`SolverConfig::absorb =
+  Some(w)`, GPU) : le rappel vers l'écoulement amont des bandes haute et basse
+  s'applique aussi à l'entrée et à la sortie, sur w mailles (profil
+  quadratique, 0,05 par pas au bord). `None` garde la veine ordinaire
+  (résultats inchangés : la colonne ajoutée au noyau vaut zéro).
+- **`lbm::fwh`** (processeur, post-traitement) : analogie de Ffowcs
+  Williams–Hawkings 2D sur surface fixe dans un écoulement uniforme, dans le
+  domaine fréquentiel (Lockard 2000, fonction de Green convectée
+  −i/(4β)·e^{iMkd₁/β²}·H₀⁽²⁾(kr̄/β²)) ; Curle compact à partir des efforts ;
+  transformée de Fourier discrète fenêtrée (Hann). La formulation 1A de
+  Farassat est temporelle et tridimensionnelle (un seul temps retardé) ; en
+  2D la fonction de Green a une queue et la forme fréquentielle en est
+  l'équivalent exact. Tests : la fonction de Green vérifie l'opérateur
+  convecté, et une source ponctuelle synthétique (champs linéaires p′, u′)
+  intégrée sur un cercle redonne la pression extérieure à 2 % près et zéro à
+  l'intérieur.
+
+```sh
+cargo run --release -p lbm --example acoustique2d -- --d 16 --rmax 75 --couche 30 --t 300 --rec 120 --sortie re150
+cargo run --release -p lbm --example acoustique2d -- --relire re150     # analyse seule
+cargo run --release -p lbm --example onde2d -- 0.0123 0.2               # atténuation d'une onde plane
+```
+
+**Montage** (Inoue & Hatakeyama 2002) : Re = 150, M = 0,2 (u = 0,1155),
+domaine carré de ±(rmax + 5 + couche) D, cylindre au centre, collision
+régularisée, Bouzidi. Relevés sur les 120 derniers D/U de 300 (22 périodes),
+tous les 8 pas. Cercles de sondes de 5 à 75 D tous les 10°, ligne θ = 90°
+tous les D (θ compté depuis l'aval), quatre surfaces FW-H circulaires
+(0,75 / 1,5 / 3 / 6 D, 256 points). Amplitudes : |p̂|/(ρ₀c²) à la
+fréquence de détachement f₀ (portance) et à 2f₀ (traînée).
+
+**Efforts** (couches absorbantes de 30 D ; Re = 100 sur ±40 D avec couches de 15 D) :
+
+| Cas | D (mailles) | St | Cd moyen | Cd′ (½ crête à crête) | Cl′ (½ crête à crête) |
+| --- | --- | --- | --- | --- | --- |
+| Re = 100, M = 0,2 | 16 | 0,1651 | 1,366 | 0,0095 | 0,333 |
+| Re = 100, M = 0,2 | 32 | 0,1660 | 1,360 | 0,0097 | 0,337 |
+| Référence Re = 100 | | 0,164 (Williamson) | 1,33 (Park et al. 1998) | | 0,33 |
+| Re = 150, M = 0,2 | 16 | 0,1828 | 1,343 | 0,026 | 0,517 |
+| Re = 150, M = 0,2 | 24 | 0,1843 | 1,348 | 0,027 | 0,533 |
+| Référence Re = 150 (Inoue & Hatakeyama, cités par Wang et al. 2019) | | 0,183 | 1,39 | | 0,520 |
+
+**Rayonnement** (Re = 150, M = 0,2, 12,4 M mailles, 9,5 min sur GTX 1070,
+912 M mailles/s) : |p̂|/(ρ₀c²) × 10⁵ à r = 75 D, f₀ (dipôle de portance).
+
+| θ | direct | FW-H 0,75 D | FW-H 1,5 D | FW-H 3 D | FW-H 6 D | Curle compact |
+| --- | --- | --- | --- | --- | --- | --- |
+| 30° | 5,56 | 6,04 | 7,87 | 5,21 | 6,75 | 5,74 |
+| 60° | 9,66 | 10,45 | 11,68 | 8,80 | 10,16 | 10,10 |
+| 90° | 11,65 | 11,84 | 10,53 | 12,85 | 10,68 | 11,75 |
+| 120° | 11,01 | 9,88 | 7,33 | 13,95 | 11,17 | 10,10 |
+| 150° | 5,57 | 5,49 | 4,01 | 8,94 | 7,55 | 5,74 |
+
+- **Décroissance** selon θ = 90°, de 10 à 68 D : pente log–log −0,518
+  (−½ attendu) ; |p̂|√(r/D) constant à ±3 % de 10 à 68 D (98–101 × 10⁻⁵).
+- **Directivité** : dipôle de portance, nul en amont et en aval (θ = 0 et
+  180°), maximum à θ = 90,5° à 75 D (98,5° à 40 D, encore en champ proche),
+  comme Curle (90°) : pour des observateurs liés au corps, la fonction de
+  Green convectée donne un diagramme symétrique amont/aval en amplitude.
+  Rapport des moyennes quadratiques prédiction/direct sur le cercle de 75 D :
+  Curle 1,00, FW-H 0,75 D 1,01, 1,5 D 0,97, 3 D 1,16, 6 D 1,05.
+- **Dipôle de traînée (2f₀)**, cinquante fois plus faible : Curle et FW-H
+  0,75 D à 12–17 % du direct (moyenne quadratique) ; les surfaces de 1,5 à
+  6 D le surestiment de ×1,8 à ×3,2 : le sillage tourbillonnaire les traverse (quadripôles non
+  compris dans la surface). Une surface « ouverte » privée de l'arc aval
+  (essai) est pire encore (×2,5 à f₀) : le bord libre rayonne. Pour ce
+  cas, la surface doit rester serrée autour du corps.
+
+**Atténuation numérique des ondes** (`onde2d`, ligne périodique, collisions
+du solveur, ν = 0,0123, M = 0,2) : le LBM isotherme transporte
+Navier–Stokes avec une viscosité de volume 2ν/D, d'où une décroissance
+théorique exp(−νk²t).
+
+| Points par λ | 4 | 6 | 8 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- | --- |
+| γ/(νk²), BGK | 1,07 | 1,01 | 0,98 | 0,95 | 0,94 | 0,94 |
+| γ/(νk²), RR | 1,06 | 1,01 | 0,98 | 0,95 | 0,94 | 0,95 |
+| célérité / (c + U) | 0,902 | 0,960 | 0,978 | 0,995 | 0,999 | 1,000 |
+| perte RR par λ parcourue (dB) | 1,6 | 1,0 | 0,75 | 0,36 | 0,18 | 0,09 |
+
+L'atténuation est la viscosité physique (à 6 % près, 6 % de moins à M = 0,2),
+sans dissipation numérique supplémentaire jusqu'à 4 points par λ ; la
+dispersion domine en dessous de 8 points par λ (2 % de retard de phase).
+Au-delà de 64 points, la simple précision limite la mesure. Dans le cas du
+cylindre, λ = 27 D = 440 mailles : perte < 0,01 dB par λ.
+
+**Couches et sorties.** Sans rappel à l'entrée et à la sortie, l'entrée de
+Guo (vitesse imposée) réfléchit la pression et la sortie (ρ = 1) la renvoie
+inversée. Même domaine (±75 D, D = 16, r ≤ 40 D), avec et sans couches sur
+les quatre côtés (`--sans-couche` : bandes haute et basse de ny/8 et éponge
+visqueuse de sortie, comme la veine ordinaire) :
+
+| Bords | ondulation de \|p̂\|√r (f₀, 10–36 D) | pente log–log | direct / Curle |
+| --- | --- | --- | --- |
+| couches de 30 D sur 4 côtés | ±2,8 % | −0,532 | 1,00 |
+| veine ordinaire | ±20 % | −0,32 | 1,06 |
+| couches de 15 D (½ λ), domaine ±40 D, Re = 100 | ±21 % (D 16), ±29 % (D 32) | −1,24 / −0,93 | 1,26 / 1,71 |
+
+Une couche plus mince qu'une longueur d'onde (λ = D/(St·M) ≈ 27 à 30 D)
+réfléchit autant que l'absence de couche : il faut au moins une longueur
+d'onde. Les efforts, eux, n'y sont pas sensibles (St à 0,2 % près).
+Le rayonnement de traînée (2f₀), cinquante fois plus faible, reste sensible
+aux réflexions et au sillage : ondulation ±14 à ±19 % même avec couches.
+
+**Convergence.** De D = 16 à D = 24 (Re = 150, r ≤ 40 D) : St +0,8 %,
+Cl′ +2,7 %, et les rapports Curle/direct (1,00) et FW-H/direct (1,01 /
+0,96 / 1,15 / 1,05) inchangés au centième.
+
+**Cylindre 3D à Re = 3900 (Parnaudeau 2008) : non fait.** L'exemple
+`cylindre3d` (veine 3D existante 16 × 4 × 8 D, sous-maille de Smagorinsky,
+sans loi de paroi) diverge avant 12 D/U à D = 16 comme à D = 24
+(τ₀ = 0,5012 / 0,5018) ; à Re = 1000, D = 16, il tient mais donne Cd = 2,0
+(attendu ≈ 1). La stabilité de la paroi 3D à τ ≈ 0,5 sans loi de paroi et
+la veine du cylindre (blocage 1/8, envergure non périodique malgré
+l'étiquette « 4D périodique ») sont à reprendre avant ce cas.
+
+## Coût de calcul des modifications
+
+- **Sondes GPU 2D** (`acoustique2d`, D = 16, ±40 D, 1,25 M mailles, 1 400
+  sondes relevées tous les 8 pas, 100 D/U) : avec / sans relevés, mesures
+  alternées sur GPU partagé, 1 574 / 1 524, 1 234 / 1 358, 1 339 / 1 148 M mailles/s :
+  écart dans la dispersion (±10 %), coût non mesurable.
+- **Couches absorbantes sur quatre côtés** : un mot de plus lu par maille et
+  par pas dans le noyau D2Q9 (coefficient par colonne, nul par défaut),
+  contre 72 octets de populations ; non mesuré séparément.
+
 ## Installation
 
 Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
@@ -2757,6 +2892,7 @@ soufflerie-rs/
 │   ├── src/shapes.rs   maquettes
 │   ├── src/tunnel.rs   veine d'essai, mise en vitesse, turbulence, transition, coefficients
 │   ├── src/stats.rs    moyennes, périodes, Strouhal
+│   ├── src/fwh.rs      Ffowcs Williams–Hawkings 2D, Curle compact, Fourier fenêtrée
 │   ├── examples/       programmes de diagnostic (voir « Programmes de diagnostic »)
 │   └── tests/          validation, panneaux, aile finie, 3D, comparaison GPU/CPU
 ├── banc/               banc de mesure de la vitesse 3D : maquette, références, comparaisons
@@ -2791,6 +2927,9 @@ plein sans découpe quand un voxel est entier d'un côté de tous les plans
 fait), poids en f32 sur le GPU.
 
 ## Pistes
+
+Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
+Re = 3900, suites aéroacoustiques).
 
 - Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
   egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
