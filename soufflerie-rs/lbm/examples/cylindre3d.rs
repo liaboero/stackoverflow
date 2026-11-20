@@ -26,9 +26,8 @@ fn main() {
     for k in 0..n {
         sim.run((dt * spt) as usize, &ramp);
         let f = sim.take_forces();
-        let s = f.steps.max(1) as f64;
-        cx.push(f.fx / s / q);
-        cz.push(f.fz / s / q);
+        cx.push(f.fx / q);
+        cz.push(f.fz / q);
         ts.push((k as f64 + 0.5) * dt);
     }
     let el = clock.elapsed().as_secs_f64();

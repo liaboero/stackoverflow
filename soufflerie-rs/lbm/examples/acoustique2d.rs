@@ -278,7 +278,11 @@ fn analyze(r: &Run) {
     for (h, name) in [(0usize, "f0 (portance)"), (1, "2f0 (traînée)")] {
         let w = if h == 0 { w0 } else { 2.0 * w0 };
         let rmax = r.probes.iter().filter(|p| p.kind == 0).map(|p| p.a).fold(0.0, f64::max);
-        for rr in [40.0, rmax].into_iter().filter(|&x| x <= rmax) {
+        let mut radii = vec![rmax];
+        if rmax > 40.0 {
+            radii.insert(0, 40.0);
+        }
+        for rr in radii {
             println!("\n### Directivité à r = {rr} D, {name} : |p̂|/(ρ0c²) × 10⁵");
             println!("| θ | direct | {} | Curle compact |", surf_names.join(" | "));
             println!("|---|---|{}---|", "---|".repeat(surf_names.len()));

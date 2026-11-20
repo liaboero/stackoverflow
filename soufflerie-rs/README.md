@@ -2307,12 +2307,16 @@ tous les D (θ compté depuis l'aval), quatre surfaces FW-H circulaires
 (0,75 / 1,5 / 3 / 6 D, 256 points). Amplitudes : |p̂|/(ρ₀c²) à la
 fréquence de détachement f₀ (portance) et à 2f₀ (traînée).
 
-**Efforts** (D = 16 mailles, couches absorbantes de 30 D ; Re = 100 sur ±40 D) :
+**Efforts** (couches absorbantes de 30 D ; Re = 100 sur ±40 D avec couches de 15 D) :
 
-| Cas | St | Cd moyen | Cd′ (½ crête à crête) | Cl′ (½ crête à crête) | Référence |
+| Cas | D (mailles) | St | Cd moyen | Cd′ (½ crête à crête) | Cl′ (½ crête à crête) |
 | --- | --- | --- | --- | --- | --- |
-| Re = 100, M = 0,2 | 0,1651 | 1,366 | 0,0095 | 0,333 | St 0,164 (Williamson), Cd 1,33, Cl′ 0,33 (Park et al. 1998) |
-| Re = 150, M = 0,2 | 0,1828 | 1,343 | 0,026 | 0,517 | St 0,183, Cd 1,39, Cl′ 0,520 (Inoue & Hatakeyama, cités par Wang et al. 2019) |
+| Re = 100, M = 0,2 | 16 | 0,1651 | 1,366 | 0,0095 | 0,333 |
+| Re = 100, M = 0,2 | 32 | 0,1660 | 1,360 | 0,0097 | 0,337 |
+| Référence Re = 100 | | 0,164 (Williamson) | 1,33 (Park et al. 1998) | | 0,33 |
+| Re = 150, M = 0,2 | 16 | 0,1828 | 1,343 | 0,026 | 0,517 |
+| Re = 150, M = 0,2 | 24 | 0,1843 | 1,348 | 0,027 | 0,533 |
+| Référence Re = 150 (Inoue & Hatakeyama, cités par Wang et al. 2019) | | 0,183 | 1,39 | | 0,520 |
 
 **Rayonnement** (Re = 150, M = 0,2, 12,4 M mailles, 9,5 min sur GTX 1070,
 912 M mailles/s) : |p̂|/(ρ₀c²) × 10⁵ à r = 75 D, f₀ (dipôle de portance).
@@ -2326,15 +2330,16 @@ fréquence de détachement f₀ (portance) et à 2f₀ (traînée).
 | 150° | 5,57 | 5,49 | 4,01 | 8,94 | 7,55 | 5,74 |
 
 - **Décroissance** selon θ = 90°, de 10 à 68 D : pente log–log −0,518
-  (−½ attendu) ; |p̂|√(r/D) constant à ±1,5 % de 10 à 75 D (99–101 × 10⁻⁵).
-- **Directivité** : dipôle de portance, nul en amont et en aval, maximum
-  incliné vers l'amont (θ ≈ 100° à 40 D), comme l'effet Doppler de la
-  fonction de Green convectée (Curle). Rapport moyen prédiction/direct sur le
-  cercle de 75 D : Curle 0,95, FW-H 0,75 D 0,96, 1,5 D 0,94, 3 D 1,11,
-  6 D 1,07.
+  (−½ attendu) ; |p̂|√(r/D) constant à ±3 % de 10 à 68 D (98–101 × 10⁻⁵).
+- **Directivité** : dipôle de portance, nul en amont et en aval (θ = 0 et
+  180°), maximum à θ = 90,5° à 75 D (98,5° à 40 D, encore en champ proche),
+  comme Curle (90°) : pour des observateurs liés au corps, la fonction de
+  Green convectée donne un diagramme symétrique amont/aval en amplitude.
+  Rapport des moyennes quadratiques prédiction/direct sur le cercle de 75 D :
+  Curle 1,00, FW-H 0,75 D 1,01, 1,5 D 0,97, 3 D 1,16, 6 D 1,05.
 - **Dipôle de traînée (2f₀)**, cinquante fois plus faible : Curle et FW-H
-  0,75 D à 20–30 % du direct ; les surfaces de 1,5 à 6 D le surestiment
-  de ×3 à ×6 : le sillage tourbillonnaire les traverse (quadripôles non
+  0,75 D à 12–17 % du direct (moyenne quadratique) ; les surfaces de 1,5 à
+  6 D le surestiment de ×1,8 à ×3,2 : le sillage tourbillonnaire les traverse (quadripôles non
   compris dans la surface). Une surface « ouverte » privée de l'arc aval
   (essai) est pire encore (×2,5 à f₀) : le bord libre rayonne. Pour ce
   cas, la surface doit rester serrée autour du corps.
@@ -2359,21 +2364,43 @@ cylindre, λ = 27 D = 440 mailles : perte < 0,01 dB par λ.
 
 **Couches et sorties.** Sans rappel à l'entrée et à la sortie, l'entrée de
 Guo (vitesse imposée) réfléchit la pression et la sortie (ρ = 1) la renvoie
-inversée : les couches sur les quatre côtés sont nécessaires aux calculs
-acoustiques. Avec 30 D (plus d'une longueur d'onde), l'ondulation de
-|p̂|√r le long de θ = 90° (±1,5 %) borne le taux de réflexion à quelques
-pour cent. Comparaison chiffrée sans couche (`--sans-couche`) et avec des
-couches plus minces : non faite.
+inversée. Même domaine (±75 D, D = 16, r ≤ 40 D), avec et sans couches sur
+les quatre côtés (`--sans-couche` : bandes haute et basse de ny/8 et éponge
+visqueuse de sortie, comme la veine ordinaire) :
 
-**Non fait** : convergence en maillage (D = 24, D = 32), mesure du coût des
-sondes, cylindre 3D à Re = 3900 (exemple `cylindre3d` écrit, non lancé).
+| Bords | ondulation de \|p̂\|√r (f₀, 10–36 D) | pente log–log | direct / Curle |
+| --- | --- | --- | --- |
+| couches de 30 D sur 4 côtés | ±2,8 % | −0,532 | 1,00 |
+| veine ordinaire | ±20 % | −0,32 | 1,06 |
+| couches de 15 D (½ λ), domaine ±40 D, Re = 100 | ±21 % (D 16), ±29 % (D 32) | −1,24 / −0,93 | 1,26 / 1,71 |
+
+Une couche plus mince qu'une longueur d'onde (λ = D/(St·M) ≈ 27 à 30 D)
+réfléchit autant que l'absence de couche : il faut au moins une longueur
+d'onde. Les efforts, eux, n'y sont pas sensibles (St à 0,2 % près).
+Le rayonnement de traînée (2f₀), cinquante fois plus faible, reste sensible
+aux réflexions et au sillage : ondulation ±14 à ±19 % même avec couches.
+
+**Convergence.** De D = 16 à D = 24 (Re = 150, r ≤ 40 D) : St +0,8 %,
+Cl′ +2,7 %, et les rapports Curle/direct (1,00) et FW-H/direct (1,01 /
+0,96 / 1,15 / 1,05) inchangés au centième.
+
+**Cylindre 3D à Re = 3900 (Parnaudeau 2008) : non fait.** L'exemple
+`cylindre3d` (veine 3D existante 16 × 4 × 8 D, sous-maille de Smagorinsky,
+sans loi de paroi) diverge avant 12 D/U à D = 16 comme à D = 24
+(τ₀ = 0,5012 / 0,5018) ; à Re = 1000, D = 16, il tient mais donne Cd = 2,0
+(attendu ≈ 1). La stabilité de la paroi 3D à τ ≈ 0,5 sans loi de paroi et
+la veine du cylindre (blocage 1/8, envergure non périodique malgré
+l'étiquette « 4D périodique ») sont à reprendre avant ce cas.
 
 ## Coût de calcul des modifications
 
-- Sondes GPU 2D et couches absorbantes sur quatre côtés : coût non mesuré.
-  Le noyau D2Q9 lit un coefficient par colonne de plus (un mot par maille et
-  par pas, négligeable devant les 72 octets des populations) ; les sondes
-  sont une passe de quelques milliers de fils tous les `every` pas.
+- **Sondes GPU 2D** (`acoustique2d`, D = 16, ±40 D, 1,25 M mailles, 1 400
+  sondes relevées tous les 8 pas, 100 D/U) : avec / sans relevés, mesures
+  alternées sur GPU partagé, 1 574 / 1 524, 1 234 / 1 358, 1 339 / 1 148 M mailles/s :
+  écart dans la dispersion (±10 %), coût non mesurable.
+- **Couches absorbantes sur quatre côtés** : un mot de plus lu par maille et
+  par pas dans le noyau D2Q9 (coefficient par colonne, nul par défaut),
+  contre 72 octets de populations ; non mesuré séparément.
 
 ## Installation
 
