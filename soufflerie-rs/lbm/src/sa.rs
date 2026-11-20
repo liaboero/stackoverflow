@@ -55,6 +55,19 @@ pub fn nu_ke(k: f32, e: f32) -> f32 {
     }
 }
 
+/// VLES (`Turbulence::Vles`) : ν_t de k-ε réduit par le filtre de maille de
+/// Johansen et al. (2004), F = min(1, Δ ε/k^{3/2}) (Δ = 1, pas du réseau),
+/// pondéré par la fonction f_d de la DDES (0 en couche limite attachée),
+/// comme `nu_vles` de `KE_FNS` (gpu3d).
+pub fn nu_vles(k: f32, e: f32, fd: f32) -> f32 {
+    let nr = nu_ke(k, e);
+    if nr <= 0.0 {
+        return 0.0;
+    }
+    let f = (e / (k * k.sqrt())).min(1.0);
+    nr * (1.0 - fd * (1.0 - f))
+}
+
 /// Viscosité turbulente ν_t = ν̃ f_v1(ν̃/ν).
 #[inline(always)]
 pub fn nu_turb(v: f32, inv_nu: f32) -> f32 {
@@ -336,6 +349,20 @@ mod tests {
         let (ut, h) = (0.004f32, 2.0f32);
         let (k, e) = (ut * ut / CMU.sqrt(), ut * ut * ut / (KAPPA * h));
         assert!((nu_ke(k, e) - KAPPA * ut * h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vles_filtre() {
+        // Zone logarithmique à y = 10 mailles : l = k^{3/2}/ε = κ y/C_μ^{3/4}
+        // dépasse la maille ; protégée (f_d = 0) le RANS reste entier, sinon
+        // ν_t → C_μ Δ √k = C_μ^{3/4} u_τ.
+        let (ut, y) = (0.004f32, 10.0f32);
+        let (k, e) = (ut * ut / CMU.sqrt(), ut * ut * ut / (KAPPA * y));
+        assert!((nu_vles(k, e, 0.0) - nu_ke(k, e)).abs() < 1e-9);
+        assert!((nu_vles(k, e, 1.0) - CMU.powf(0.75) * ut).abs() < 1e-7);
+        // Amont : échelle k^{3/2}/ε ≪ Δ, aucun effet.
+        let (k, e) = ke_inf(0.1, 2e-6);
+        assert_eq!(nu_vles(k, e, 1.0), nu_ke(k, e));
     }
 
     #[test]

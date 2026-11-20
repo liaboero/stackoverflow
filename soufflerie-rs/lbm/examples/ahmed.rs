@@ -133,7 +133,7 @@ fn main() {
         std::process::exit(1);
     }
     let nu = u as f64 * l as f64 / re;
-    let mut sim = Gpu3D::with_turbulence(&body, nu, u, true, true).unwrap_or_else(|e| panic!("GPU : {e}"));
+    let mut sim = Gpu3D::with_turbulence(&body, nu, u, true, lbm::gpu3d::Turbulence::rans_from_env()).unwrap_or_else(|e| panic!("GPU : {e}"));
     if essai != 0 {
         sim.set_essai(essai, 0.0);
     }
@@ -415,6 +415,25 @@ fn main() {
         x += 0.5 * h;
     }
     println!("Bulle de culot (U < 0 à z = {zb:.0} mm, y = 0) jusqu'à x = {lrec:.0} mm derrière le culot");
+    if sim.vles {
+        // VLES : réduction de ν_t (filtre de maille) là où le k-ε RANS est
+        // actif (ν_t > 10 ν), en avant et en arrière du culot.
+        let (vt, ke) = (sim.nu_tilde(), sim.k_eps());
+        let xc = bb.x0 + ahmed::LONGUEUR / h;
+        let (mut av, mut ar) = ([0.0f64; 3], [0.0f64; 3]);
+        for (i, (&v, &[k, e])) in vt.iter().zip(&ke).enumerate() {
+            let nr = lbm::sa::nu_ke(k, e) as f64;
+            if nr > 10.0 * nu {
+                let acc = if (i % sim.nx) as f64 > xc { &mut ar } else { &mut av };
+                acc[0] += 1.0;
+                acc[1] += v as f64 / nr;
+                acc[2] += ((v as f64) < 0.5 * nr) as u8 as f64;
+            }
+        }
+        for (nom, a) in [("devant le culot", av), ("derrière", ar)] {
+            println!("VLES {nom} : {:.0} mailles à ν_t RANS > 10 ν, ν_t/ν_RANS moyen {:.3}, {:.0} % réduites de plus de moitié", a[0], a[1] / a[0].max(1.0), 100.0 * a[2] / a[0].max(1.0));
+        }
+    }
     let res = format!("{sortie}/resultats.csv");
     let neuf = !std::path::Path::new(&res).exists();
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&res).unwrap();

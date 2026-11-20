@@ -3,6 +3,9 @@
 //! veine 16 × 4 × 8 D (blocage D/h = 1/8).
 //!
 //! cylindre3d [D=16] [Re=3900] [t=150] [moyenne=100] [fp16=0]
+//!
+//! `SOUFFLERIE_RANS=sa|keps|vles` : modèle RANS avec loi de paroi en plus de
+//! la sous-maille (sans cette variable : sous-maille seule, comme avant).
 use lbm::bodies3d::{Body3D, Shape3D};
 use lbm::fwh::refine_peak;
 use lbm::gpu3d::Gpu3D;
@@ -14,7 +17,8 @@ fn main() {
     let u = 0.1f32;
     let spt = l as f64 / u as f64;
     let body = Body3D::new(Shape3D::Cylinder, l, 0.0);
-    let mut sim = Gpu3D::with_turbulence(&body, u as f64 * l as f64 / re, u, half, false).expect("GPU");
+    let turb = if std::env::var("SOUFFLERIE_RANS").is_ok() { lbm::gpu3d::Turbulence::rans_from_env() } else { lbm::gpu3d::Turbulence::Laminar };
+    let mut sim = Gpu3D::with_turbulence(&body, u as f64 * l as f64 / re, u, half, turb).expect("GPU");
     let ramp = lbm::cpu::Ramp { steps: (4.0 * spt) as u64, u };
     let q = 0.5 * (u as f64).powi(2) * body.area;
     let clock = std::time::Instant::now();

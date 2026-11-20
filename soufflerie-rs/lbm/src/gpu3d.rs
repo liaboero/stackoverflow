@@ -423,11 +423,22 @@ const NUT_KE_MAX = 0.08;
 // Amont : intensité Tu = 0,1 % et ν_t/ν = 0,2 (celui de ν̃ = 3ν en SA).
 const TU_INF = 0.001;
 const RNUT_INF = 0.2;
-// ν_t = C_μ k²/ε. Point d'accroche de la réduction VLES (filtre selon la
-// résolution et le tourbillonnement) : seule définition de ν_t du modèle.
+// ν_t = C_μ k²/ε : seule définition de ν_t du modèle RANS.
 fn nu_ke(k: f32, e: f32) -> f32 {
   if (k <= 0.0 || e <= 0.0) { return 0.0; }
   return min(NUT_KE_MAX, CMU * k * k / e);
+}
+// VLES : filtre de maille de Johansen, Wu et Shyy (2004),
+// F = min(1, C3 Δ ε/k^{3/2}), C3 = 1, Δ = 1 (pas du réseau local) : là où
+// l'échelle des tourbillons porteurs k^{3/2}/ε dépasse la maille, seule la
+// part non résolue est modélisée (ν_t → C_μ Δ √k). Hors couche limite
+// attachée seulement : f_d de la DDES (Spalart et al. 2006, voir `ke3d`),
+// ν_t = ν_RANS (1 − f_d (1 − F)) ; f_d = 0 garde le RANS en paroi.
+fn nu_vles(k: f32, e: f32, fd: f32) -> f32 {
+  let nr = nu_ke(k, e);
+  if (nr <= 0.0) { return 0.0; }
+  let f = min(1.0, e / (k * sqrt(k)));
+  return nr * (1.0 - fd * (1.0 - f));
 }
 fn k_inf() -> f32 {
   let t = TU_INF * P.uIn;
@@ -478,6 +489,19 @@ const BETA = 0.012;
 fn ke(i: u32) -> vec2<f32> {
   return vec2<f32>(keIn[2u * i], keIn[2u * i + 1u]);
 }
+// VLES (remplacé à la compilation) : ν_t réduit rangé dans le dernier tiers.
+const VLES = false;
+// ν_t réduit aussi dans le transport de k et ε (production, diffusion) :
+// essai écarté (README, « VLES »). Par défaut k et ε suivent le k-ε RNG
+// complet ; seule la collision prend le ν_t filtré (le τ_turb de Chen et
+// al. 2003 n'entre que dans l'équation de Boltzmann).
+const VLES_TR = false;
+// ν_t d'une maille au pas précédent (diffusion).
+fn nt_of(i: u32) -> f32 {
+  if (VLES && VLES_TR) { return keIn[arrayLength(&keIn) / 3u * 2u + i]; }
+  let v = ke(i);
+  return nu_ke(v.x, v.y);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -494,6 +518,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let kin = k_inf();
   let ein = e_inf();
   var out: vec2<f32>;
+  // VLES : ν_t réduit de la maille (< 0 : celui de k-ε, hors cœur).
+  var vt_out = -1.0;
   if (wk0 == 0xffffffffu) {
     out = vec2<f32>(0.0);
   } else if (wk0 == 0xfffffffeu) {
@@ -535,11 +561,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     adv += select(u.y * (vyp - v), u.y * (v - vym), u.y > 0.0);
     adv += select(u.z * (vzp - v), u.z * (v - vzm), u.z > 0.0);
     // Diffusion : (ν + ν_t/σ) aux faces, ν_t moyen des deux mailles.
-    let nt = nu_ke(v.x, v.y);
+    let n0 = nt_of(idx);
     let s = vec2<f32>(1.0 / SIGK, 1.0 / SIGE);
-    let diff = (nu + 0.5 * (nt + nu_ke(vxp.x, vxp.y)) * s) * (vxp - v) - (nu + 0.5 * (nt + nu_ke(vxm.x, vxm.y)) * s) * (v - vxm)
-      + (nu + 0.5 * (nt + nu_ke(vyp.x, vyp.y)) * s) * (vyp - v) - (nu + 0.5 * (nt + nu_ke(vym.x, vym.y)) * s) * (v - vym)
-      + (nu + 0.5 * (nt + nu_ke(vzp.x, vzp.y)) * s) * (vzp - v) - (nu + 0.5 * (nt + nu_ke(vzm.x, vzm.y)) * s) * (v - vzm);
+    let diff = (nu + 0.5 * (n0 + nt_of(ixp)) * s) * (vxp - v) - (nu + 0.5 * (n0 + nt_of(ixm)) * s) * (v - vxm)
+      + (nu + 0.5 * (n0 + nt_of(iyp)) * s) * (vyp - v) - (nu + 0.5 * (n0 + nt_of(iym)) * s) * (v - vym)
+      + (nu + 0.5 * (n0 + nt_of(izp)) * s) * (vzp - v) - (nu + 0.5 * (n0 + nt_of(izm)) * s) * (v - vzm);
     // Taux de déformation S = √(2 S_ij S_ij), différences centrées.
     let gx = 0.5 * (macroBuf[ixp].xyz - macroBuf[ixm].xyz);
     let gy = 0.5 * (macroBuf[iyp].xyz - macroBuf[iym].xyz);
@@ -548,6 +574,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let sxz = gx.z + gz.x;
     let syz = gy.z + gz.y;
     let s2 = 2.0 * (gx.x * gx.x + gy.y * gy.y + gz.z * gz.z) + sxy * sxy + sxz * sxz + syz * syz;
+    var nt = nu_ke(v.x, v.y);
+    if (VLES) {
+      // DDES : r_d = (ν_t + ν)/(κ² d² √(U_ij U_ij)) ≈ 1 dans la zone
+      // logarithmique, → 0 loin des parois ; f_d = 1 − tanh((8 r_d)³).
+      let gn = sqrt(dot(gx, gx) + dot(gy, gy) + dot(gz, gz));
+      let dw = max(0.5, dist[idx]);
+      let rd = (nt + nu) / max(KAPPA * KAPPA * dw * dw * gn, 1e-20);
+      let a = 8.0 * rd;
+      let fd = 1.0 - tanh(min(a * a * a, 20.0));
+      vt_out = nu_vles(v.x, v.y, fd);
+      if (VLES_TR) { nt = vt_out; }
+    }
     var prod = nt * s2;
     if (P.xtr > 0.0 && dist[idx] < P.band) {
       let xl = lam_xl(x, y);
@@ -575,6 +613,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   }
   keOut[2u * idx] = out.x;
   keOut[2u * idx + 1u] = out.y;
+  if (VLES) {
+    if (vt_out < 0.0) { vt_out = nu_ke(out.x, out.y); }
+    keOut[arrayLength(&keOut) / 3u * 2u + idx] = vt_out;
+  }
 }
 ";
 
@@ -1150,6 +1192,8 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
 // Viscosité turbulente d'une maille : SA (ν̃) ou k-ε RNG (paires k, ε).
 fn nut_cell(i: u32) -> f32 {{
   if (P.sa == 2u) {{ return nu_ke(nut[2u * i], nut[2u * i + 1u]); }}
+  // VLES : ν_t réduit de la passe `ke3d`, dernier tiers du tampon.
+  if (P.sa == 3u) {{ return nut[arrayLength(&nut) / 3u * 2u + i]; }}
   return nu_turb(nut[i]);
 }}
 {load}
@@ -2123,14 +2167,21 @@ pub enum Turbulence {
     Sa,
     /// k-ε RNG (Yakhot et al. 1992), voir `KE3_WGSL`.
     KEpsRng,
+    /// VLES sur la base k-ε RNG : ν_t = C_μ k²/ε réduit par le filtre de
+    /// maille de Johansen et al. (2004), min(1, Δ ε/k^{3/2}), hors de la
+    /// couche limite attachée (protection f_d de la DDES, Spalart et al.
+    /// 2006). Voir `KE_FNS` et la section « VLES » du README.
+    Vles,
 }
 
 impl Turbulence {
     /// Modèle RANS des bancs : `SOUFFLERIE_RANS=keps` choisit k-ε RNG,
+    /// `SOUFFLERIE_RANS=vles` sa réduction VLES,
     /// sinon Spalart–Allmaras.
     pub fn rans_from_env() -> Turbulence {
         match std::env::var("SOUFFLERIE_RANS").as_deref() {
             Ok("keps") => Turbulence::KEpsRng,
+            Ok("vles") => Turbulence::Vles,
             _ => Turbulence::Sa,
         }
     }
@@ -2172,6 +2223,9 @@ pub struct Gpu3D {
     /// Modèle k-ε RNG au lieu de Spalart–Allmaras (`sa` vrai aussi) :
     /// tampons `nut` à deux valeurs (k, ε) par maille.
     pub keps: bool,
+    /// VLES (`keps` vrai aussi) : ν_t réduit, rangé après les paires (k, ε)
+    /// (dernier tiers des tampons `nut`), écrit par la passe `ke3d`.
+    pub vles: bool,
     pub(crate) nu: f64,
     /// Transition imposée (fraction de la corde locale ; 0 : turbulent partout).
     xtr: f64,
@@ -3785,7 +3839,8 @@ impl Gpu3D {
         layer: &LayerSpec,
     ) -> Result<Gpu3D, String> {
         let sa = turb != Turbulence::Laminar;
-        let keps = turb == Turbulence::KEpsRng;
+        let vles = turb == Turbulence::Vles;
+        let keps = turb == Turbulence::KEpsRng || vles;
         let band = layer.band;
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
         let al = device.limits();
@@ -3975,11 +4030,16 @@ impl Gpu3D {
         // (à la suite, une valeur par maille) la vitesse de transpiration,
         // puis la viscosité de la couche pariétale (passe `wall3d`).
         let utau_buf = mk("utau3d", (24 * wall_count) as u64, st);
-        let nsa = if sa { 4 * ns as u64 * (1 + keps as u64) } else { 16 };
+        let nsa = if sa { 4 * ns as u64 * (1 + keps as u64 + vles as u64) } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if keps {
             let (k, e) = crate::sa::ke_inf(u_in as f64, nu);
-            wall_gpu.iter().flat_map(|&w| if w == SOLID { [0.0, 0.0] } else { [k, e] }).collect()
+            let mut v: Vec<f32> = wall_gpu.iter().flat_map(|&w| if w == SOLID { [0.0, 0.0] } else { [k, e] }).collect();
+            if vles {
+                // ν_t amont : le filtre n'agit pas (Δ ε∞/k∞^{3/2} ≫ 1).
+                v.extend(wall_gpu.iter().map(|&w| if w == SOLID { 0.0 } else { crate::sa::nu_ke(k, e) }));
+            }
+            v
         } else if sa {
             let inf = crate::sa::nu_tilde_inf(nu);
             wall_gpu.iter().map(|&w| if w == SOLID { 0.0 } else { inf }).collect()
@@ -4103,11 +4163,13 @@ impl Gpu3D {
             &step_layout,
             fp16,
             wall_count > 0,
-            [sa as u32 + keps as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
+            [sa as u32 + keps as u32 + vles as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
         );
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
         let sa_pipe = if keps {
-            pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{}", KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS)), true)
+            let ke = KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS);
+            let ke = if vles { ke.replace("const VLES = false;", "const VLES = true;") } else { ke };
+            pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{ke}"), true)
         } else {
             pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true)
         };
@@ -4265,6 +4327,7 @@ impl Gpu3D {
             _qbuf: qbuf,
             sa,
             keps,
+            vles,
             nu,
             l: body.l,
             les_a: 1.0,
@@ -4531,7 +4594,7 @@ impl Gpu3D {
             write_macro: write_macro as u32,
             les: self.les as u32,
             rows: self.nested as u32 | ((self.ground as u32) << 1) | ((self.periodic_span as u32) << 2) | ((self.periodic_x as u32) << 3),
-            sa: self.sa as u32 + self.keps as u32,
+            sa: self.sa as u32 + self.keps as u32 + self.vles as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
             xtr: self.xtr as f32,
@@ -4640,8 +4703,12 @@ impl Gpu3D {
     }
 
     fn read(&self, src: &wgpu::Buffer, staging: &wgpu::Buffer, size: u64) -> Vec<f32> {
+        self.read_at(src, 0, staging, size)
+    }
+
+    fn read_at(&self, src: &wgpu::Buffer, offset: u64, staging: &wgpu::Buffer, size: u64) -> Vec<f32> {
         let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(src, 0, staging, 0, size);
+        enc.copy_buffer_to_buffer(src, offset, staging, 0, size);
         self.queue.submit([enc.finish()]);
         let (tx, rx) = mpsc::channel();
         staging.map_async(wgpu::MapMode::Read, 0..size, move |r| {
@@ -4756,6 +4823,17 @@ impl Gpu3D {
     pub fn nu_tilde(&self) -> Vec<f32> {
         if !self.sa {
             return Vec::new();
+        }
+        if self.vles {
+            let ns = self.nut[self.cur].size() / 12;
+            let size = 4 * self.n as u64;
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nut3d_read"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            return self.read_at(&self.nut[self.cur], 8 * ns, &staging, size);
         }
         if self.keps {
             return self.k_eps().iter().map(|&[k, e]| crate::sa::nu_ke(k, e)).collect();
