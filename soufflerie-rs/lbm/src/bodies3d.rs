@@ -115,6 +115,10 @@ pub struct Body3D {
     /// Arêtes vives du maillage (coordonnées réseau), si la mise en place les
     /// demande (`MeshSetup::mesh_edges`).
     pub features: Option<Arc<crate::geom3d::FeatureSet>>,
+    /// Paroi volumique par surfels (Chen et al. 1998, `surfel3d`) au lieu
+    /// du rebond interpolé de Bouzidi ; maquette maillée seulement. Gardée
+    /// par les grilles fines (`refined`).
+    pub surfels: bool,
 }
 
 use std::sync::Arc;
@@ -221,6 +225,7 @@ impl Body3D {
             mesh_volume: 0.0,
             ground: false,
             features: None,
+            surfels: false,
         }
     }
 
@@ -378,6 +383,7 @@ impl Body3D {
             mesh_volume: volume * s * s * s,
             ground: setup.ground.is_some(),
             features,
+            surfels: false,
         };
         Ok((b, info))
     }
@@ -462,6 +468,7 @@ impl Body3D {
             mesh_volume: 8.0 * self.mesh_volume,
             ground: false,
             features: self.features.as_ref().map(|f| Arc::new(f.transformed(|p| t(p)))),
+            surfels: self.surfels,
         }
     }
 
