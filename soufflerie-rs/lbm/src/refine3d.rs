@@ -72,6 +72,17 @@ fn nu_turb(v: f32, nu: f32) -> f32 {
   let c3 = chi * chi * chi;
   return v * c3 / (c3 + CV1_3);
 }
+// k-ε RNG (P.sa = 2) : ν_t = C_μ k²/ε, comme `KE_FNS` de gpu3d.
+const CMU = 0.0845;
+fn nu_ke(k: f32, e: f32) -> f32 {
+  if (k <= 0.0 || e <= 0.0) { return 0.0; }
+  return min(0.08, CMU * k * k / e);
+}
+// Avec k-ε, b.w = k et c.w = ε (grille fine) ; τ s'en déduit.
+fn tau_of(b: vec4<f32>, c: vec4<f32>) -> f32 {
+  if (P.sa == 2u) { return 0.5 + 3.0 * (P.nu_c + nu_ke(b.w, c.w)); }
+  return c.w;
+}
 // a = (ρ, u), b = (Π_xx, Π_yy, Π_zz hors équilibre, ν̃), c = (Π_xy, Π_xz, Π_yz, τ).
 struct Mom {
   a: vec4<f32>,
@@ -267,15 +278,23 @@ fn pre_at(x: i32, y: i32, z: i32) -> Mom {
   var m = moments(f);
   var v = 3.0 * P.nu_p;
   var vt = 0.0;
-  if (P.sa != 0u) {
+  var ef = 0.0;
+  if (P.sa == 1u) {
     v = pnut[pcell(x, y, z)];
     vt = nu_turb(v, P.nu_p);
+  }
+  if (P.sa == 2u) {
+    // k inchangé d'une grille à l'autre (Δt ∝ Δx), ε réseau divisé par 2.
+    let pc = pcell(x, y, z);
+    v = 0.5 * pnut[2u * pc];
+    ef = 0.5 * pnut[2u * pc + 1u];
+    vt = nu_ke(2.0 * v, 2.0 * ef);
   }
   let tau_p = 0.5 + 3.0 * (P.nu_p + vt);
   let tau_c = 0.5 + 3.0 * (P.nu_c + 2.0 * vt);
   let k = tau_c / (2.0 * tau_p);
   m.b = vec4<f32>(m.b.xyz * k, 2.0 * v);
-  m.c = vec4<f32>(m.c.xyz * k, tau_c);
+  m.c = vec4<f32>(m.c.xyz * k, select(tau_c, ef, P.sa == 2u));
   return m;
 }
 
@@ -401,11 +420,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let a = mix(oa, m.a, P.alpha);
   let b = mix(ob, m.b, P.alpha);
   let c3 = mix(oc, m.c, P.alpha);
-  let kk = 1.0 - 1.0 / c3.w;
+  let kk = 1.0 - 1.0 / tau_of(b, c3);
   let p = regul(a.x, a.yzw, kk * b.x, kk * b.y, kk * b.z, kk * c3.x, kk * c3.y, kk * c3.z);
   let idx = gidx[g];
   st_cf(idx, p);
-  if (P.sa != 0u) { cnut[idx] = b.w; }
+  if (P.sa == 1u) { cnut[idx] = b.w; }
+  if (P.sa == 2u) {
+    cnut[2u * idx] = max(b.w, 0.0);
+    cnut[2u * idx + 1u] = max(c3.w, 0.0);
+  }
   cmacro[idx] = vec4<f32>(a.yzw, a.x);
 }
 ";
@@ -423,11 +446,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let a = mix(gm[6u * g], gm[6u * g + 3u], P.alpha);
   let b = mix(gm[6u * g + 1u], gm[6u * g + 4u], P.alpha);
   let c = mix(gm[6u * g + 2u], gm[6u * g + 5u], P.alpha);
-  let k = 1.0 - 1.0 / c.w;
+  let k = 1.0 - 1.0 / tau_of(b, c);
   let p = regul(a.x, a.yzw, k * b.x, k * b.y, k * b.z, k * c.x, k * c.y, k * c.z);
   let idx = gidx[g];
   st_cf(idx, p);
-  if (P.sa != 0u) { cnut[idx] = b.w; }
+  if (P.sa == 1u) { cnut[idx] = b.w; }
+  if (P.sa == 2u) {
+    cnut[2u * idx] = max(b.w, 0.0);
+    cnut[2u * idx + 1u] = max(c.w, 0.0);
+  }
   cmacro[idx] = vec4<f32>(a.yzw, a.x);
 }
 ";
@@ -475,9 +502,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let cidx = cid(cx, cy, cz);
   var v = 0.0;
   var vt = 0.0;
-  if (P.sa != 0u) {
+  var ev = 0.0;
+  if (P.sa == 1u) {
     v = cnut[cidx];
     vt = nu_turb(v, P.nu_c);
+  }
+  if (P.sa == 2u) {
+    v = cnut[2u * cidx];
+    ev = cnut[2u * cidx + 1u];
+    vt = nu_ke(v, ev);
   }
   var f: array<f32, 19>;
   var p: array<f32, 19>;
@@ -519,7 +552,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     p = regul(m.a.x, m.a.yzw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
   st_pf(pidx, p);
-  if (P.sa != 0u) { pnut[pidx] = 0.5 * v; }
+  if (P.sa == 1u) { pnut[pidx] = 0.5 * v; }
+  if (P.sa == 2u) {
+    pnut[2u * pidx] = v;
+    pnut[2u * pidx + 1u] = 2.0 * ev;
+  }
   pmacro[pidx] = vec4<f32>(m.a.yzw, m.a.x);
 }
 ";
@@ -802,7 +839,7 @@ impl Link3 {
                 ry: 1,
                 rz: 1,
                 margin: MARGIN as u32,
-                sa: (p.sa && c.sa) as u32,
+                sa: if p.sa && c.sa { 1 + p.keps as u32 } else { 0 },
                 alpha: 0.5 * a as f32,
                 nu_p: p.nu as f32,
                 nu_c: c.nu as f32,

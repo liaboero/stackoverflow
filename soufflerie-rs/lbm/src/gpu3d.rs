@@ -352,6 +352,170 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ";
 
+/// k-ε RNG (Yakhot et al. 1992) : constantes, viscosité turbulente et état
+/// amont, communs au transport, à la collision et aux raccords.
+const KE_FNS: &str = "
+const CMU = 0.0845;
+// Plafond de ν_t (réseau) : stabilité de la diffusion explicite (6 voisins).
+const NUT_KE_MAX = 0.08;
+// Amont : intensité Tu = 0,1 % et ν_t/ν = 0,2 (celui de ν̃ = 3ν en SA).
+const TU_INF = 0.001;
+const RNUT_INF = 0.2;
+// ν_t = C_μ k²/ε. Point d'accroche de la réduction VLES (filtre selon la
+// résolution et le tourbillonnement) : seule définition de ν_t du modèle.
+fn nu_ke(k: f32, e: f32) -> f32 {
+  if (k <= 0.0 || e <= 0.0) { return 0.0; }
+  return min(NUT_KE_MAX, CMU * k * k / e);
+}
+fn k_inf() -> f32 {
+  let t = TU_INF * P.uIn;
+  return 1.5 * t * t;
+}
+fn e_inf() -> f32 {
+  let k = k_inf();
+  return CMU * k * k / (RNUT_INF * P.nu);
+}
+";
+
+/// Transport explicite de k et ε (k-ε RNG), même schéma que ν̃ (`SA3_WGSL`) :
+/// advection décentrée amont, diffusion conservative, production ν_t S²,
+/// destructions semi-implicites, terme R de RNG dans C_ε2*. Termes
+/// d'entretien amont (Spalart et Rumsey 2007) : k et ε n'y décroissent pas
+/// entre l'entrée et la maquette. Paroi : k = u_τ²/√C_μ, ε = u_τ³/(κ h),
+/// ν_t = κ u_τ h comme la couche pariétale de la loi de paroi. Champs rangés
+/// par paires (k, ε) dans les tampons de ν̃.
+const KE3_WGSL: &str = "
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> wall: array<u32>;
+@group(0) @binding(3) var<storage, read> wallGeo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> utau: array<f32>;
+@group(0) @binding(5) var<storage, read> dist: array<f32>;
+@group(0) @binding(6) var<storage, read> keIn: array<f32>;
+@group(0) @binding(7) var<storage, read_write> keOut: array<f32>;
+@group(0) @binding(8) var<storage, read> slab: array<vec2<f32>>;
+@group(0) @binding(9) var<storage, read> blk: array<u32>;
+@group(0) @binding(10) var<storage, read> plain: array<u32>;
+SPARSE_FNS
+KE_FNS
+fn lam_xl(x: i32, y: i32) -> vec2<f32> {
+  let e = slab[u32(y)];
+  return vec2<f32>(f32(x) - e.x, e.y - e.x);
+}
+
+const KAPPA = 0.41;
+const WM_H = 2.0;
+// Yakhot et al. (1992) : σ_k = σ_ε = 1/1,393, C_ε1, C_ε2, η₀, β.
+const SIGK = 0.7194;
+const SIGE = 0.7194;
+const CE1 = 1.42;
+const CE2 = 1.68;
+const ETA0 = 4.38;
+const BETA = 0.012;
+
+fn ke(i: u32) -> vec2<f32> {
+  return vec2<f32>(keIn[2u * i], keIn[2u * i + 1u]);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let idx = gid.x + gid.y * nwg.x * 64u;
+  if (idx >= P.N) { return; }
+  let pp = pos_of(idx);
+  let x = pp.x;
+  let y = pp.y;
+  let z = pp.z;
+  var wk0 = 0u;
+  if (((plain[idx >> 5u] >> (idx & 31u)) & 1u) == 0u) { wk0 = wall[idx]; }
+  if (wk0 == 0xfffffffdu) { return; }
+  let nu = P.nu;
+  let kin = k_inf();
+  let ein = e_inf();
+  var out: vec2<f32>;
+  if (wk0 == 0xffffffffu) {
+    out = vec2<f32>(0.0);
+  } else if (wk0 == 0xfffffffeu) {
+    out = ke(idx);
+  } else if (x == 0) {
+    out = vec2<f32>(kin, ein);
+  } else if (x == i32(P.nx) - 1) {
+    out = ke(idx - 1u);
+  } else if (wk0 != 0u) {
+    // Premier nœud : équilibre de la zone logarithmique à la hauteur de
+    // raccord h de la loi de paroi (ν_t = C_μ k²/ε = κ u_τ h).
+    let ut = utau[4u * (wk0 - 1u)];
+    out = vec2<f32>(ut * ut / sqrt(CMU), ut * ut * ut / (KAPPA * WM_H));
+    out = max(out, vec2<f32>(kin, ein));
+  } else {
+    let xc = u32(x);
+    let yc = u32(y);
+    let zc = u32(z);
+    let ground = (P.rows & 2u) != 0u;
+    let ym = select(yc - 1u, P.ny - 1u, y == 0);
+    let yp = select(yc + 1u, 0u, yc + 1u == P.ny);
+    let zm = select(zc - 1u, select(P.nz - 1u, 0u, ground), z == 0);
+    let zp = select(zc + 1u, select(0u, zc, ground), zc + 1u == P.nz);
+    let ixm = id_of(xc - 1u, yc, zc);
+    let ixp = id_of(xc + 1u, yc, zc);
+    let iym = id_of(xc, ym, zc);
+    let iyp = id_of(xc, yp, zc);
+    let izm = id_of(xc, yc, zm);
+    let izp = id_of(xc, yc, zp);
+    let v = ke(idx);
+    let vxm = ke(ixm);
+    let vxp = ke(ixp);
+    let vym = ke(iym);
+    let vyp = ke(iyp);
+    let vzm = ke(izm);
+    let vzp = ke(izp);
+    let u = macroBuf[idx].xyz;
+    var adv = select(u.x * (vxp - v), u.x * (v - vxm), u.x > 0.0);
+    adv += select(u.y * (vyp - v), u.y * (v - vym), u.y > 0.0);
+    adv += select(u.z * (vzp - v), u.z * (v - vzm), u.z > 0.0);
+    // Diffusion : (ν + ν_t/σ) aux faces, ν_t moyen des deux mailles.
+    let nt = nu_ke(v.x, v.y);
+    let s = vec2<f32>(1.0 / SIGK, 1.0 / SIGE);
+    let diff = (nu + 0.5 * (nt + nu_ke(vxp.x, vxp.y)) * s) * (vxp - v) - (nu + 0.5 * (nt + nu_ke(vxm.x, vxm.y)) * s) * (v - vxm)
+      + (nu + 0.5 * (nt + nu_ke(vyp.x, vyp.y)) * s) * (vyp - v) - (nu + 0.5 * (nt + nu_ke(vym.x, vym.y)) * s) * (v - vym)
+      + (nu + 0.5 * (nt + nu_ke(vzp.x, vzp.y)) * s) * (vzp - v) - (nu + 0.5 * (nt + nu_ke(vzm.x, vzm.y)) * s) * (v - vzm);
+    // Taux de déformation S = √(2 S_ij S_ij), différences centrées.
+    let gx = 0.5 * (macroBuf[ixp].xyz - macroBuf[ixm].xyz);
+    let gy = 0.5 * (macroBuf[iyp].xyz - macroBuf[iym].xyz);
+    let gz = 0.5 * (macroBuf[izp].xyz - macroBuf[izm].xyz);
+    let sxy = gx.y + gy.x;
+    let sxz = gx.z + gz.x;
+    let syz = gy.z + gz.y;
+    let s2 = 2.0 * (gx.x * gx.x + gy.y * gy.y + gz.z * gz.z) + sxy * sxy + sxz * sxz + syz * syz;
+    var prod = nt * s2;
+    if (P.xtr > 0.0 && dist[idx] < P.band) {
+      let xl = lam_xl(x, y);
+      if (xl.y > 0.0 && xl.x < P.xtr * xl.y) { prod = 0.0; }
+    }
+    let kk = max(v.x, 1e-20);
+    let ee = max(v.y, 1e-30);
+    // RNG : C_ε2* = C_ε2 + C_μ η³ (1 − η/η₀)/(1 + β η³), η = S k/ε.
+    let eta = sqrt(s2) * kk / ee;
+    let e3 = eta * eta * eta;
+    let ce2s = CE2 + CMU * e3 * (1.0 - eta / ETA0) / (1.0 + BETA * e3);
+    let tinv = ee / kk;
+    // Entretien amont (Spalart et Rumsey 2007) : ε∞ dans l'équation de k,
+    // C_ε2 ε∞²/k∞ dans celle de ε.
+    var sk = 0.0;
+    var se = 0.0;
+    if (kin > 0.0) {
+      sk = ein;
+      se = CE2 * ein * ein / kin;
+    }
+    let kn = (v.x + prod + sk + diff.x - adv.x) / (1.0 + tinv);
+    // Destruction implicite pour C_ε2* > 0, explicite (source) sinon.
+    let en = (v.y + CE1 * tinv * prod + se + max(-ce2s, 0.0) * ee * tinv + diff.y - adv.y) / (1.0 + max(ce2s, 0.0) * tinv);
+    out = max(vec2<f32>(kn, en), 1e-4 * vec2<f32>(kin, ein));
+  }
+  keOut[2u * idx] = out.x;
+  keOut[2u * idx + 1u] = out.y;
+}
+";
+
 /// Loi de paroi (Spalart–Allmaras) : une passe sur les seules mailles
 /// pariétales, avant chaque pas de collision. Tout ce qu'elle lit vient du
 /// pas précédent (vitesse des nœuds, u_τ et glissement relaxé) : la
@@ -400,7 +564,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var uw = vec3<f32>(0.0);
   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
   var nuw = -1.0;
-  if (P.sa == 1u && hasWall) {
+  if (P.sa != 0u && hasWall) {
     let gw0 = wallGeo[wk];
     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
     // Diagnostic : loi de paroi aussi aux arêtes vives (262144).
@@ -622,7 +786,7 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
       // la normale de la maille n'est celle d'aucune face : sa composante
       // normale ferait souffler la paroi).
       var uwl = uw;
-      if (P.sa == 1u) {{
+      if (P.sa != 0u) {{
         let nf = oct_decode(ca[{im1}]);
         // Transpiration : vitesse normale de la face (déplacement de la
         // couche limite) ; la paroi mobile de Bouzidi injecte ce débit.
@@ -815,6 +979,12 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
 {SPARSE_FNS}
 {lam_fns}
 {sa_fns}
+{ke_fns}
+// Viscosité turbulente d'une maille : SA (ν̃) ou k-ε RNG (paires k, ε).
+fn nut_cell(i: u32) -> f32 {{
+  if (P.sa == 2u) {{ return nu_ke(nut[2u * i], nut[2u * i + 1u]); }}
+  return nu_turb(nut[i]);
+}}
 {load}
 {store}
 
@@ -922,14 +1092,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var uw = vec3<f32>(0.0);
   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
   var nuw = -1.0;
-  if (P.sa == 1u && hasWall) {{
+  if (P.sa != 0u && hasWall) {{
     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
     nuw = utau[arrayLength(&utau) / 6u * 5u + wk];
   }}
   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
   var vn = 0.0;
-  if (P.sa == 1u && hasWall) {{
+  if (P.sa != 0u && hasWall) {{
     vn = utau[arrayLength(&utau) / 6u * 4u + wk];
   }}
 {prefetch}  g[0] = pop(0u, idx);
@@ -947,14 +1117,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let pxz = {pxz} - rho * u.x * u.z;
   let pyz = {pyz} - rho * u.y * u.z;
   var tau = P.tau0;
-  if (P.sa == 1u) {{
+  if (P.sa != 0u) {{
     // Nœud pariétal : la viscosité de la couche [0, h] supposée par le
     // glissement, pour que la contrainte transmise soit τ_p.
-    var nuc = select(nu_turb(nut[idx]), nuw, nuw >= 0.0);
+    var nuc = select(nut_cell(idx), nuw, nuw >= 0.0);
     // Diagnostics : ν_t de Spalart–Allmaras hors premier nœud retiré (1),
     // premier nœud à la viscosité de Spalart–Allmaras (4).
     if ((P.essai & 1u) != 0u && nuw < 0.0) {{ nuc = 0.0; }}
-    if ((P.essai & 4u) != 0u && nuw >= 0.0) {{ nuc = nu_turb(nut[idx]); }}
+    if ((P.essai & 4u) != 0u && nuw >= 0.0) {{ nuc = nut_cell(idx); }}
     tau += 3.0 * nuc;
   }}
   if (u32(x) > P.spongeStart) {{
@@ -1002,7 +1172,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (hasWall) {{
     force[wk] += vec4<f32>(fsum, 0.0);
   }}
-  if (P.writeMacro == 1u || P.sa == 1u) {{
+  if (P.writeMacro == 1u || P.sa != 0u) {{
     macroBuf[idx] = vec4<f32>(u, rho);
   }}
 }}
@@ -1032,7 +1202,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   // sa vitesse tangentielle, A = 6 Σ w_i |c_i · n| sur ses liens de paroi
   // (aire exacte en moyenne pour un plan quelconque). Le corps reçoit
   // l'opposé : conservatif par construction.
-  if ((P.essai & 16384u) != 0u && P.sa == 1u && nuw >= 0.0) {{
+  if ((P.essai & 16384u) != 0u && P.sa != 0u && nuw >= 0.0) {{
     var aw = 0.0;
 {a}    let nw = wallGeo[wk].xyz;
     let ut3 = u - dot(u, nw) * nw;
@@ -1051,6 +1221,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
             String::new()
         },
         sa_fns = SA_FNS,
+        ke_fns = KE_FNS,
         lam_fns = LAM_FNS,
         head = if walls {
             "  let kw = gid.x + gid.y * nwg.x * 64u;\n  if (kw >= WALLN_C) { return; }\n  let idx = wcell[kw];\n  let wk0 = wall[idx];"
@@ -1744,6 +1915,35 @@ pub fn bytes_per_cell(fp16: bool) -> usize {
     (if fp16 { 2 * 10 * 4 } else { 2 * 19 * 4 }) + 4 + 16
 }
 
+/// Modèle de turbulence RANS (avec loi de paroi), ou aucun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turbulence {
+    /// Sans modèle ni loi de paroi (sous-maille seule).
+    Laminar,
+    /// Spalart–Allmaras (défaut).
+    Sa,
+    /// k-ε RNG (Yakhot et al. 1992), voir `KE3_WGSL`.
+    KEpsRng,
+}
+
+impl Turbulence {
+    /// Modèle RANS des bancs : `SOUFFLERIE_RANS=keps` choisit k-ε RNG,
+    /// sinon Spalart–Allmaras.
+    pub fn rans_from_env() -> Turbulence {
+        match std::env::var("SOUFFLERIE_RANS").as_deref() {
+            Ok("keps") => Turbulence::KEpsRng,
+            _ => Turbulence::Sa,
+        }
+    }
+}
+
+/// `true` : Spalart–Allmaras, `false` : aucun modèle (appels existants).
+impl From<bool> for Turbulence {
+    fn from(sa: bool) -> Turbulence {
+        if sa { Turbulence::Sa } else { Turbulence::Laminar }
+    }
+}
+
 pub struct Gpu3D {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
@@ -1770,6 +1970,9 @@ pub struct Gpu3D {
     /// Spalart–Allmaras avec loi de paroi : ν̃ (deux tampons alternés),
     /// distance à la paroi, géométrie pariétale et u_τ.
     pub sa: bool,
+    /// Modèle k-ε RNG au lieu de Spalart–Allmaras (`sa` vrai aussi) :
+    /// tampons `nut` à deux valeurs (k, ε) par maille.
+    pub keps: bool,
     pub(crate) nu: f64,
     /// Transition imposée (fraction de la corde locale ; 0 : turbulent partout).
     xtr: f64,
@@ -2867,7 +3070,7 @@ impl Gpu3D {
     }
 
     /// Idem, avec Spalart–Allmaras et loi de paroi si `sa`.
-    pub fn with_turbulence(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: bool) -> Result<Gpu3D, String> {
+    pub fn with_turbulence(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: impl Into<Turbulence>) -> Result<Gpu3D, String> {
         Self::with_refinement(body, nu, u_in, fp16, sa, 0)
     }
 
@@ -2878,7 +3081,7 @@ impl Gpu3D {
         nu: f64,
         u_in: f32,
         fp16: bool,
-        sa: bool,
+        sa: impl Into<Turbulence>,
         depth: usize,
     ) -> Result<Gpu3D, String> {
         Self::with_refinement_le(body, nu, u_in, fp16, sa, depth, false)
@@ -2896,7 +3099,7 @@ impl Gpu3D {
         nu: f64,
         u_in: f32,
         fp16: bool,
-        sa: bool,
+        sa: impl Into<Turbulence>,
         depth: usize,
         le: bool,
     ) -> Result<Gpu3D, String> {
@@ -2915,12 +3118,13 @@ impl Gpu3D {
         nu: f64,
         u_in: f32,
         fp16: bool,
-        sa: bool,
+        sa: impl Into<Turbulence>,
         depth: usize,
         le: bool,
         te: bool,
         bands: &[f64],
     ) -> Result<Gpu3D, String> {
+        let sa: Turbulence = sa.into();
         let (device, queue, name) = Self::open_device()?;
         let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, 0.0)?;
         let depth = depth.min(crate::refine3d::EXTENT3.len());
@@ -3145,10 +3349,12 @@ impl Gpu3D {
         nu: f64,
         u_in: f32,
         fp16: bool,
-        sa: bool,
+        turb: Turbulence,
         nested: bool,
         band: f64,
     ) -> Result<Gpu3D, String> {
+        let sa = turb != Turbulence::Laminar;
+        let keps = turb == Turbulence::KEpsRng;
         let (nx, ny, nz) = (body.nx, body.ny, body.nz);
         let al = device.limits();
         let words_a = if fp16 { 5 } else { 10 };
@@ -3337,9 +3543,12 @@ impl Gpu3D {
         // (à la suite, une valeur par maille) la vitesse de transpiration,
         // puis la viscosité de la couche pariétale (passe `wall3d`).
         let utau_buf = mk("utau3d", (24 * wall_count) as u64, st);
-        let nsa = if sa { 4 * ns as u64 } else { 16 };
+        let nsa = if sa { 4 * ns as u64 * (1 + keps as u64) } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
-        let nut0: Vec<f32> = if sa {
+        let nut0: Vec<f32> = if keps {
+            let (k, e) = crate::sa::ke_inf(u_in as f64, nu);
+            wall_gpu.iter().flat_map(|&w| if w == SOLID { [0.0, 0.0] } else { [k, e] }).collect()
+        } else if sa {
             let inf = crate::sa::nu_tilde_inf(nu);
             wall_gpu.iter().map(|&w| if w == SOLID { 0.0 } else { inf }).collect()
         } else {
@@ -3462,10 +3671,14 @@ impl Gpu3D {
             &step_layout,
             fp16,
             wall_count > 0,
-            [sa as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
+            [sa as u32 + keps as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
         );
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
-        let sa_pipe = pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true);
+        let sa_pipe = if keps {
+            pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{}", KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS)), true)
+        } else {
+            pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true)
+        };
         // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
         let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wall_cells3d"),
@@ -3619,6 +3832,7 @@ impl Gpu3D {
             vox: vox_buf,
             _qbuf: qbuf,
             sa,
+            keps,
             nu,
             l: body.l,
             les_a: 1.0,
@@ -3829,7 +4043,7 @@ impl Gpu3D {
             write_macro: write_macro as u32,
             les: self.les as u32,
             rows: self.nested as u32 | ((self.ground as u32) << 1) | ((self.periodic_span as u32) << 2),
-            sa: self.sa as u32,
+            sa: self.sa as u32 + self.keps as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
             xtr: self.xtr as f32,
@@ -4038,10 +4252,14 @@ impl Gpu3D {
         }
     }
 
-    /// ν̃ de Spalart–Allmaras par maille (vide sans SA).
+    /// ν̃ de Spalart–Allmaras par maille (vide sans SA) ; avec k-ε RNG,
+    /// ν_t = C_μ k²/ε (que `nu_turb` laisse presque inchangé loin de la paroi).
     pub fn nu_tilde(&self) -> Vec<f32> {
         if !self.sa {
             return Vec::new();
+        }
+        if self.keps {
+            return self.k_eps().iter().map(|&[k, e]| crate::sa::nu_ke(k, e)).collect();
         }
         let size = 4 * self.n as u64;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -4051,6 +4269,21 @@ impl Gpu3D {
             mapped_at_creation: false,
         });
         self.read(&self.nut[self.cur], &staging, size)
+    }
+
+    /// (k, ε) de k-ε RNG par maille (vide sans ce modèle).
+    pub fn k_eps(&self) -> Vec<[f32; 2]> {
+        if !self.keps {
+            return Vec::new();
+        }
+        let size = 8 * self.n as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ke3d_read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.read(&self.nut[self.cur], &staging, size).chunks_exact(2).map(|c| [c[0], c[1]]).collect()
     }
 
     /// Traînée en champ lointain (Betz, Maskell) : bilan de quantité de
