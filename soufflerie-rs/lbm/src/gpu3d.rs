@@ -206,6 +206,62 @@ fn spalding_utau(ut: f32, y: f32) -> f32 {
   }
   return ut / up;
 }
+// Gradient de pression longitudinal (essai 8388608) : loi de Townsend (1961)
+// et Mellor (1966). Couche interne d'équilibre, contrainte totale
+// τ(y) = u_τ² + P y (P = (1/ρ) dp/ds, cinématique, s le long du glissement)
+// et longueur de mélange κ y : du/dy = √τ / (κ y). Intégrée et raccordée à la
+// loi logarithmique là où P y ≪ u_τ², elle ajoute à la loi sans gradient
+//   Δ(y) = (2/κ) [√τ − u_τ + u_τ ln(2 u_τ / (√τ + u_τ))],
+// nul pour P = 0 (Spalding inchangé), ≈ P y / (2κ u_τ) aux faibles
+// gradients, et (2/κ)√(P y) à u_τ = 0 (profil de Stratford au décollement).
+// Gradient favorable : τ borné à 0 (au-delà, couche sans contrainte).
+fn mellor_du(u: f32, pg: f32, y: f32) -> f32 {
+  if (!(u > 1e-12)) { return 2.0 / KAPPA * sqrt(max(pg * y, 0.0)); }
+  let r = max(pg * y / (u * u), -1.0);
+  // a = √(1+r) − 1 sans soustraction ; Δκ/(2u) = a − ln(1 + a/2).
+  let a = r / (sqrt(1.0 + r) + 1.0);
+  var g = a - log(1.0 + 0.5 * a);
+  if (abs(a) < 1e-2) { g = a * (0.5 + a * (0.125 - a / 24.0)); }
+  return 2.0 / KAPPA * u * g;
+}
+// ∫₀^y max(τ_w + P y', 0) dy'.
+fn tau_int(tw: f32, pg: f32, y: f32) -> f32 {
+  if (pg < 0.0 && tw + pg * y < 0.0) { return tw * tw / (-2.0 * pg); }
+  return tw * y + 0.5 * pg * y * y;
+}
+// u_τ de la loi avec gradient : racine de F(u) = u − u_τ,Spalding(u_t − Δ(u))
+// par fausse position (Illinois) dans un encadrement. Gradient adverse :
+// F(0) ≤ 0 ≤ F(u_τ,0) (Spalding sans gradient). Favorable : racine au-delà
+// de u_τ,0, encadrée par 2 u_τ,0 sauf sous-couche visqueuse (borne gardée).
+fn mellor_utau(ut: f32, y: f32, pg: f32) -> f32 {
+  let u0 = spalding_utau(ut, y);
+  if (pg == 0.0 || !(u0 > 1e-12)) { return u0; }
+  var lo = 0.0;
+  var hi = u0;
+  if (pg < 0.0) { lo = u0; hi = 2.0 * u0; }
+  var flo = lo - spalding_utau(max(0.0, ut - mellor_du(lo, pg, y)), y);
+  var fhi = hi - spalding_utau(max(0.0, ut - mellor_du(hi, pg, y)), y);
+  if (fhi <= 0.0) { return hi; }
+  if (flo >= 0.0) { return lo; }
+  var side = 0;
+  for (var k = 0; k < 12; k++) {
+    if (!(fhi - flo > 0.0)) { break; }
+    let m = clamp((lo * fhi - hi * flo) / (fhi - flo), lo, hi);
+    let fm = m - spalding_utau(max(0.0, ut - mellor_du(m, pg, y)), y);
+    if (abs(fm) < 1e-5 * u0) { return m; }
+    if (fm < 0.0) {
+      lo = m; flo = fm;
+      if (side == -1) { fhi *= 0.5; }
+      side = -1;
+    } else {
+      hi = m; fhi = fm;
+      if (side == 1) { flo *= 0.5; }
+      side = 1;
+    }
+  }
+  if (!(fhi - flo > 0.0)) { return lo; }
+  return clamp((lo * fhi - hi * flo) / (fhi - flo), lo, hi);
+}
 ";
 
 /// Transport explicite de ν̃ (même schéma que sa.wgsl, en 3D) : advection
@@ -274,6 +330,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * WM_H);
     // Diagnostic : ν̃ = κ u_τ y_n, distance du nœud (524288).
     if ((P.essai & 524288u) != 0u) { out = min(NU_TILDE_MAX, KAPPA * utau[4u * k] * max(0.1, abs(wallGeo[k].w))); }
+    // Gradient de pression (8388608) : viscosité de la couche pariétale de
+    // la loi de Mellor, κ h √(u_τ² + P h), écrite par la passe de paroi.
+    if ((P.essai & 8388608u) != 0u && (P.essai & 16777216u) == 0u) {
+      let nw = utau[arrayLength(&utau) / 6u * 5u + k];
+      if (nw >= 0.0) { out = min(NU_TILDE_MAX, nw); }
+    }
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
   } else {
     // Voisins (comme `cell`, sans modulo ; ici 0 < x < nx − 1) : y
@@ -414,6 +476,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     var ut = ut0;
     var yw = y0;
     var th = tv0;
+    // Gradient de pression cinématique le long du glissement (essai 8388608).
+    var pg = 0.0;
     {
       // Loi de paroi alimentée à une hauteur fixe h = WM_H au-dessus du pied
       // de la normale (Kawai et Larsson 2012) : au premier nœud, l'erreur
@@ -428,6 +492,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       let fr = ps - vec3<f32>(i0);
       var us3 = vec3<f32>(0.0);
       var ds = 0.0;
+      // Masse volumique et son gradient (dérivée de l'interpolation
+      // trilinéaire) au point relevé.
+      var rh = 0.0;
+      var gr = vec3<f32>(0.0);
       var ok = true;
       for (var c = 0u; c < 8u; c++) {
         let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
@@ -435,17 +503,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         if (q3.x < 0 || q3.x >= i32(P.nx) || q3.z < 0 || q3.z >= i32(P.nz)) { ok = false; break; }
         let ci = cell(q3.x, q3.y, q3.z);
         if (wall[ci] >= 0xfffffffeu) { ok = false; break; }
-        let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
-        us3 += wv.x * wv.y * wv.z * macroBuf[ci].xyz;
+        let ob = vec3<bool>(o.x == 1, o.y == 1, o.z == 1);
+        let wv = select(1.0 - fr, fr, ob);
+        let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), ob);
+        let m4 = macroBuf[ci];
+        us3 += wv.x * wv.y * wv.z * m4.xyz;
         ds += wv.x * wv.y * wv.z * wdist[ci];
+        rh += wv.x * wv.y * wv.z * m4.w;
+        gr += m4.w * vec3<f32>(sg.x * wv.y * wv.z, wv.x * sg.y * wv.z, wv.x * wv.y * sg.z);
       }
       if (ok && abs(ds - WM_H) < 0.5) {
         th = us3 - dot(us3, gw.xyz) * gw.xyz;
         ut = length(th);
         yw = WM_H;
+        // P = (1/ρ) dp/ds le long de la vitesse tangentielle relevée,
+        // p = ρ c_s² = ρ/3.
+        if ((P.essai & 8388608u) != 0u && ut > 1e-12) {
+          pg = dot(gr, th) / (3.0 * rh * ut);
+        }
       }
     }
-    var ut2 = spalding_utau(ut, yw);
+    // Diagnostic 33554432 (avec 8388608) : u_τ de Spalding, le gradient ne
+    // sert qu'au profil de la couche pariétale (compatibilité à la paroi,
+    // ∂τ/∂y = dp/ds, exacte en y = 0).
+    var ut2 = mellor_utau(ut, yw, select(pg, 0.0, (P.essai & 33554432u) != 0u));
     if (P.xtr > 0.0) {
       // Zone laminaire : Cf de Blasius, 0,664/√Re_x, plafonné au point d'arrêt.
       let xl = lam_xl(x, y);
@@ -453,6 +534,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         let rex = max(1.0, P.uIn * max(xl.x, 0.5) / P.nu);
         let cf = min(0.02, 0.664 / sqrt(rex));
         ut2 = ut * sqrt(0.5 * cf);
+        pg = 0.0;
       }
     }
     utau[4u * wk] = ut2;
@@ -467,7 +549,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     nuw = KAPPA * ut2 * yw;
     // Diagnostic : viscosité de la couche pariétale κ u_τ y_n (distance du nœud).
     if ((P.essai & 256u) != 0u) { nuw = KAPPA * ut2 * y0; }
+    // Gradient de pression : viscosité de longueur de mélange de la loi à
+    // la hauteur de raccord, κ h √τ(h), τ(h) = u_τ² + P h (borné à 0).
+    // Diagnostic : κ u_τ h gardé (16777216).
+    if (pg != 0.0 && (P.essai & 16777216u) == 0u) { nuw = KAPPA * yw * sqrt(max(ut2 * ut2 + pg * yw, 0.0)); }
     if ((P.essai & 1024u) != 0u) { nuw = min(nuw, P.essaiNu); }
+    // Couche pariétale : contrainte u_τ² + P y (bornée à 0 comme dans la
+    // loi), profil u(y) = u_s + ∫₀^y τ / (ν + ν_t) : le glissement ne dépasse
+    // jamais la vitesse du nœud (sinon la paroi entraînerait le fluide).
+    let dpn = tau_int(ut2 * ut2, pg, y0) / (P.nu + nuw);
+    let dph = tau_int(ut2 * ut2, pg, yw) / (P.nu + nuw);
     var usv = vec3<f32>(0.0);
     if (edge) {
       // Arête vive : l'écoulement y décolle et la loi de paroi (couche
@@ -489,6 +580,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       // (plaque plane, `plaque3d` : θ −12 %, perte de pression totale du nez
       // −30 %).
       var us = max(0.0, min(ut0, ut) - ut2 * ut2 * y0 / (P.nu + nuw));
+      if (pg != 0.0) { us = max(0.0, min(ut0, ut) - dpn); }
       // Plancher : le profil de la couche pariétale ancré à h. Là où la paroi
       // croise une rangée de nœuds, le nouveau premier nœud (y_n ≪ 1, dans
       // le coin d'une marche : liens vers la paroi dessous et vers l'amont)
@@ -501,7 +593,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       // pas ; là où le nœud donne plus (paroi convexe, couche plus mince que
       // h, gradient adverse), le glissement reste celui du nœud. Diagnostic :
       // sans plancher (4194304).
-      if ((P.essai & 4194304u) == 0u) { us = max(us, ut - ut2 * ut2 * yw / (P.nu + nuw)); }
+      if ((P.essai & 4194304u) == 0u) { us = max(us, ut - select(ut2 * ut2 * yw / (P.nu + nuw), dph, pg != 0.0)); }
       // Diagnostics : sans borne (4096) ; ancienne borne u_h − pente · h (8192).
       if ((P.essai & 4096u) != 0u) { us = max(0.0, ut0 - ut2 * ut2 * y0 / (P.nu + nuw)); }
       // Diagnostic : profil ancré à h seulement (131072).
@@ -2790,6 +2882,45 @@ pub fn spalding_utau(ut: f64, y: f64, nu: f64) -> f64 {
     ut / up
 }
 
+/// Écart de la loi de Townsend–Mellor à la loi sans gradient en y (comme
+/// `mellor_du` de `WALL3_WGSL`) : (2/κ)[√τ − u_τ + u_τ ln(2u_τ/(√τ + u_τ))],
+/// τ = u_τ² + P y borné à 0, P = (1/ρ) dp/ds.
+pub fn mellor_du(u: f64, pg: f64, y: f64) -> f64 {
+    let k = 0.41;
+    if !(u > 1e-12) {
+        return 2.0 / k * (pg * y).max(0.0).sqrt();
+    }
+    let r = (pg * y / (u * u)).max(-1.0);
+    let a = r / ((1.0 + r).sqrt() + 1.0);
+    2.0 / k * u * (a - (0.5 * a).ln_1p())
+}
+
+/// u_τ de la loi de paroi avec gradient de pression : u_τ = u_τ,Spalding(u_t − Δ(u_τ)),
+/// résolu par dichotomie dans l'encadrement de `mellor_utau` du shader.
+pub fn mellor_utau(ut: f64, y: f64, nu: f64, pg: f64) -> f64 {
+    let u0 = spalding_utau(ut, y, nu);
+    if pg == 0.0 || !(u0 > 1e-12) {
+        return u0;
+    }
+    let f = |u: f64| u - spalding_utau((ut - mellor_du(u, pg, y)).max(0.0), y, nu);
+    let (mut lo, mut hi) = if pg > 0.0 { (0.0, u0) } else { (u0, 2.0 * u0) };
+    if f(hi) <= 0.0 {
+        return hi;
+    }
+    if f(lo) >= 0.0 {
+        return lo;
+    }
+    for _ in 0..60 {
+        let m = 0.5 * (lo + hi);
+        if f(m) < 0.0 {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 pub struct WallForces {
     pub pos: Vec<[f64; 3]>,
     pub force: Vec<[f64; 3]>,
@@ -3767,7 +3898,11 @@ impl Gpu3D {
     /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement ;
     /// 262144 loi de paroi aussi aux arêtes vives ; 524288 ν̃ du premier nœud
     /// κ u_τ y_n (distance du nœud) ; 1048576 advection de ν̃ de Lax–Wendroff ;
-    /// 4194304 sans le plancher du glissement (profil ancré à h).
+    /// 4194304 sans le plancher du glissement (profil ancré à h) ;
+    /// 8388608 loi de paroi avec gradient de pression longitudinal
+    /// (Townsend–Mellor, `WALL3_WGSL`) ; 16777216 (avec 8388608) viscosité
+    /// de la couche pariétale κ u_τ h gardée ; 33554432 (avec 8388608) u_τ
+    /// de Spalding, gradient dans le seul profil de la couche pariétale.
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
@@ -4957,7 +5092,17 @@ impl Gpu3D {
                 let un = vf[0] * n[0] + vf[1] * n[1] + vf[2] * n[2];
                 let ut = [0, 1, 2].map(|k| vf[k] - un * n[k]);
                 let utm = (ut[0] * ut[0] + ut[1] * ut[1] + ut[2] * ut[2]).sqrt();
-                let utau = spalding_utau(utm, hf, l.nu);
+                let mut utau = spalding_utau(utm, hf, l.nu);
+                if self.essai & 8_388_608 != 0 && utm > 0.0 {
+                    // Gradient de pression le long de la vitesse tangentielle
+                    // relevée (différence centrée sur ±1 maille), comme la
+                    // loi de paroi du calcul.
+                    let at = |sg: f64| sample(l, [0, 1, 2].map(|k| c[k] + hf * n[k] + sg * ut[k] / utm));
+                    if let (Some(a), Some(b)) = (at(1.0), at(-1.0)) {
+                        let pg = (a[3] - b[3]) / (6.0 * v[3]);
+                        utau = mellor_utau(utm, hf, l.nu, pg);
+                    }
+                }
                 let tau = v[3] * utau * utau;
                 for k in 0..3 {
                     out.pressure[k] -= p * n[k] * ar;
@@ -5314,6 +5459,29 @@ impl Gpu3D {
 #[cfg(test)]
 mod tests {
     use super::oct_encode;
+
+    /// Loi de Townsend–Mellor : nulle sans gradient, P y/(2κu_τ) aux faibles
+    /// gradients, (2/κ)√(P y) à u_τ = 0 ; u_τ abaissé en gradient adverse,
+    /// relevé en favorable, et racine de u = u_τ,S(u_t − Δ(u)).
+    #[test]
+    fn loi_mellor() {
+        use super::{mellor_du, mellor_utau, spalding_utau};
+        let k = 0.41;
+        assert_eq!(mellor_du(0.002, 0.0, 2.0), 0.0);
+        let (u, pg, y) = (0.002, 1e-9, 2.0);
+        let lin = pg * y / (2.0 * k * u);
+        assert!((mellor_du(u, pg, y) - lin).abs() < 1e-3 * lin);
+        assert!((mellor_du(0.0, 4e-6, 2.0) - 2.0 / k * 8e-6f64.sqrt()).abs() < 1e-12);
+        let (ut, nu) = (0.05, 1e-6);
+        let u0 = spalding_utau(ut, y, nu);
+        assert_eq!(mellor_utau(ut, y, nu, 0.0), u0);
+        for pg in [2e-6, 2e-5, -2e-6] {
+            let m = mellor_utau(ut, y, nu, pg);
+            assert!(if pg > 0.0 { m < u0 } else { m > u0 }, "{pg} {m} {u0}");
+            let r = m - spalding_utau(ut - mellor_du(m, pg, y), y, nu);
+            assert!(r.abs() < 1e-9, "{pg} {r}");
+        }
+    }
 
     /// Décodage identique à `oct_decode` (WGSL).
     fn oct_decode(k: f32) -> [f64; 3] {
