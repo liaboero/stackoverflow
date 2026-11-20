@@ -2419,8 +2419,8 @@ faire : un raffinement du bord d'attaque en tronçons qui suivent la flèche.
 Base de la condition limite volumique de Chen et al. (1998), celle de
 PowerFLOW, qui conserve exactement masse et quantité de mouvement là où le
 rebond de Bouzidi dépend de la place de la paroi dans la maille. Module
-`lbm/src/surfel.rs`, côté processeur seulement : le solveur GPU n'est pas
-encore modifié (tâche suivante).
+`lbm/src/surfel.rs`, côté processeur ; branchée dans le solveur GPU en
+option (section suivante).
 
 - **Découpe.** Chaque triangle du STL est coupé par les plans i + ½ de la
   grille (Sutherland–Hodgman) ; chaque morceau, dans un seul voxel (cube
@@ -2463,6 +2463,89 @@ nœuds, un voxel coupé dont le nœud est dans le corps n'a pas de
 populations. La condition limite à surfels devra garder des populations
 dans ces voxels partiellement fluides (fraction fluide > 0), ou rendre leur
 part du volume balayé aux voxels voisins.
+
+## Paroi volumique par surfels sur GPU (essai, désactivée par défaut)
+
+Condition limite de Chen, Teixeira et Molvig (1998), celle de PowerFLOW,
+branchée dans le solveur : `Body3D::surfels = true` (bancs `aile_infinie`,
+`plaque3d`, `ahmed` : `SOUFFLERIE_SURFELS=1`) remplace le rebond de Bouzidi
+sur toutes les grilles boîtes (veine et grilles fines imbriquées) ; maquette
+maillée seulement, ni couche pariétale creuse ni sol mobile. Défaut
+inchangé. Modules : `lbm/src/surfel3d.rs` (tables, sur le processeur),
+passe `surfel3d` et variante de la collision pariétale (`gpu3d.rs`).
+
+**Schéma.** Les mailles sont les voxels de volume fluide V > 0 (fractions
+de `surfel.rs`) : un voxel coupé dont le nœud est dans le corps est
+calculé. Chaque pas, avant la collision :
+
+- *rassemblement* : chaque surfel reçoit, pour chaque paire de directions,
+  Γⁱⁿ = Σ w f* (parts w de son parallélépipède dans les voxels, populations
+  après collision) ;
+- *réflexion* : rebond Γᵒᵘᵗ = Γⁱⁿ dans la direction opposée (masse et
+  pression renvoyées exactement ; au repos, effort −p A n exact) ; avec la
+  loi de paroi existante (passe `wall3d`, u_τ de la maille pariétale la plus
+  recouverte par le surfel), une perturbation de forme d'équilibre
+  δⱼ = Pⱼ wⱼ (λ₀ + Λ·cⱼ) rend la part spéculaire de la quantité de mouvement
+  tangentielle, de sorte que l'effort tangentiel transmis au corps soit
+  ρ u_τ² A (au plus celui du rebond ; masse et quantité de mouvement normale
+  inchangées ; pseudo-inverse de la matrice de Gram, singulière pour une
+  normale d'axe). Aux arêtes vives, rebond seul, comme avant ;
+- *propagation* : la maille x reçoit dans la direction i la part transmise
+  de la maille amont, Tᵢ f*, avec Tᵢ = V_amont − Σ w (ce qui n'a frappé aucun
+  surfel), plus les parts émises Σ w Γᵒᵘᵗ / Σ w, divisées par
+  Dᵢ = Tᵢ + Σ w. Géométrie exacte : Dᵢ = V_x et la masse Σ V f est conservée ;
+  le diviseur Dᵢ garde une combinaison convexe là où la géométrie discrète
+  s'en écarte.
+
+Seules les mailles « réceptrices » (≈ 2 à 3 fois les mailles pariétales de
+Bouzidi) passent par la variante de la collision ; les autres sont
+inchangées. L'effort sur le corps est accumulé par surfel (efforts par
+position : `take_forces`, `take_wall_forces`). Correctif annexe : un maillage
+dont les normales rentrent (profil extrudé parcouru dans l'autre sens, cas de
+`aile_infinie`) est retourné avant la découpe (signe de Σ A_a c_a) ; les
+fractions solides peuvent être intégrées selon y ou z (axe de plus grande
+aire projetée ; un canal parallèle à x n'a aucune composante Aₓ).
+
+**Validation** (`cargo test --release --test surfels`, `canal_surfels`) :
+
+| Cas | Surfels | Bouzidi | Commentaire |
+| --- | --- | --- | --- |
+| Tables, sphère maillée périodique | max \|V − Dᵢ\| 5·10⁻¹⁴, fuite 10⁻¹², masse d'un pas à 2·10⁻⁶ | — | test unitaire `tables_conservatives` |
+| Masse Σ V ρ, sphère, 4 000 pas, veine périodique | dérive −4·10⁻⁶ par rapport à la veine vide | +1,0·10⁻⁴ | la veine vide dérive de 6·10⁻⁵ (arrondi f32 de la collision) |
+| Poiseuille, parois droites à mi-maille | débit −0,3 %, profil 0,4 % | — | rebond à mi-chemin, ordre 2 |
+| Poiseuille, parois droites en c₁ = 3,3 / 3,0 | −7,4 % / −10,6 % | — | H = 12 mailles |
+| Poiseuille incliné (normale (0, −1, 2)/√5) | débit −9,9 %, profil 7,1 % | (non comparable : nœuds solides mal classés par le maillage périodique) | H = 10,7 mailles |
+| Sphère Re = 100, 8 mailles par diamètre | Cx 1,471 (bilan sur boîte 1,475) | 1,236 (bilan 1,244) | |
+| `aile_infinie 16 2 6e6 α 12 - 60` (64 mailles), bilan sur boîte Cz / Cx | 0° : 0,009 / 0,103 · 4° : 0,249 / 0,109 · 8° : 0,384 / 0,139 | 4° : 0,456 / 0,0158 | Ladson 0,43–0,44 / 0,0081–0,0088 à 4°, 0,87–0,89 à 8° |
+| idem, échange de quantité de mouvement (tranche centrale) | 4° : 0,2496 / 0,1087 (bilan 0,2491 / 0,1087) | 4° : 0,4625 / 0,0026 (bilan 0,4562 / 0,0158) | |
+| `plaque3d 64`, x/L = 0,6 : δ*, Cf loi | 1,31 maille, 0,00189 (échange 0,00209 = ρu_τ² 0,00206) | 0,27, 0,00360 | théorie Cf 0,00389 |
+
+**Bilan.** Ce qui est acquis : conservation exacte de la masse (à
+l'arrondi), effort par échange de quantité de mouvement égal au bilan sur
+boîte (sphère 0,3 %, aile 0,02 % ; le rebond de Bouzidi en est loin sur
+l'aile), contrainte de la loi de paroi transmise exactement (plaque :
+frottement d'échange = ρ u_τ²). Ce qui ne va pas : **la paroi volumique,
+dans cette forme (voxels coupés supposés homogènes), est d'ordre 1 en
+position** — exacte à mi-maille, elle se comporte comme une paroi déplacée
+de 0,2 à 0,35 maille vers le fluide ailleurs (Poiseuille −7 à −11 % de
+débit, sphère +19 % de traînée à 8 mailles par diamètre). Avec la loi de
+paroi aux Reynolds élevés, une couche lente de plusieurs mailles se forme
+dès le bord d'attaque (plaque : u/U_e = 0,49 au premier nœud contre 0,88,
+δ* ×5), et l'aile perd la moitié de sa portance avec une traînée ×7 ; au
+bord de fuite, plus mince qu'un voxel, les deux faces partagent aussi les
+mêmes voxels (sans dédoublement de voxel, la condition de Kutta en
+souffre). Le défaut n'est donc pas réglable par un facteur : il faut une
+représentation sous-maille des voxels coupés (position du centre fluide
+dans le rassemblement et la dispersion, ou interpolation des populations
+rassemblées à la place du surfel comme dans les versions ultérieures de
+PowerFLOW) et le dédoublement des voxels traversés par une paroi mince.
+Option laissée désactivée.
+
+Reste à faire, dans l'ordre : (1) rassemblement et dispersion qui tiennent
+compte de la place du fluide dans le voxel coupé (viser l'ordre 2 du
+Poiseuille incliné, test `surfels_poiseuille_incline`) ; (2) voxels
+dédoublés au bord de fuite ; (3) seulement ensuite, l'aile, la plaque et le
+corps d'Ahmed (non relancé ici).
 
 ## Domaine de Mach du D3Q19
 
@@ -3144,6 +3227,7 @@ soufflerie-rs/
 │   ├── src/stl.rs      lecture STL, nettoyage, appartenance, distance à la surface
 │   ├── src/geom3d.rs   prétraitement géométrique : arêtes vives, raffinement lisse, contrôle par tranche
 │   ├── src/surfel.rs   surfels : découpe du STL par voxel, volumes balayés, poids, fractions solides
+│   ├── src/surfel3d.rs paroi volumique par surfels : tables du GPU (rassemblement, dispersion, loi de paroi)
 │   ├── src/sgeo.rs     format de géométrie .sgeo (maillage indexé, mise en place, arêtes vives)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
@@ -3245,6 +3329,22 @@ chacune une découpe de polyèdre). Pistes si cela gêne : volume nul ou
 plein sans découpe quand un voxel est entier d'un côté de tous les plans
 (déjà fait), mise en commun des découpes des directions opposées (déjà
 fait), poids en f32 sur le GPU.
+
+### Paroi volumique par surfels (`SOUFFLERIE_SURFELS=1`, désactivée par défaut)
+
+Défaut inchangé (Bouzidi) : aucun coût. Avec l'option, GPU partagé (un
+passage) :
+
+| Cas | Bouzidi | Surfels | dont préparation des surfels (processeur) |
+| --- | --- | --- | --- |
+| `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 4,4 M mailles) | 64 s | 132 s | 49 s (47 520 + 76 214 + 144 640 surfels sur les trois grilles) |
+| `plaque3d 64` | 13 s | 27 s | — |
+
+Pas de calcul : une passe de plus (un fil par surfel, ≈ 27 lectures de
+population par surfel) et la propagation des mailles réceptrices par listes
+(≈ 2,5 fois plus de mailles pariétales qu'avec Bouzidi). Mémoire du GPU :
+≈ 0,7 ko par surfel (sphère : 3,3 Mo pour 4 752 surfels ; aile à 64
+mailles : ≈ 190 Mo estimés pour 268 000 surfels).
 
 ### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
 

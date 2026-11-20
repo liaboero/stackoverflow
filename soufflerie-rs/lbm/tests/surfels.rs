@@ -138,3 +138,40 @@ fn surfels_poiseuille_incline() {
     let Some((q, e)) = poiseuille(0.5, 3.3, 12.0) else { return };
     assert!(q < 0.0 && q > -0.13 && e < 0.09, "canal incliné : débit {q}, profil {e}");
 }
+
+/// Sphère maillée à Re = 100, 8 mailles par diamètre (comme `sphere_stl`) :
+/// avec les surfels, l'effort par échange de quantité de mouvement est celui
+/// du bilan sur boîte (à 1 % près). Cx ≈ 1,47 contre 1,24 avec Bouzidi
+/// (1,26 dans l'application web) : la paroi volumique se comporte comme une
+/// paroi déplacée d'environ 0,2 maille vers le fluide (README).
+#[test]
+fn surfels_sphere_re100() {
+    let l = 8;
+    let tris = lbm::stl::icosphere(1.0, [0.0; 3], 4);
+    let u = 0.1f32;
+    let nu = u as f64 * l as f64 / 100.0;
+    let ramp = Ramp { steps: 4 * l as u64 * 10, u };
+    let mut cx = Vec::new();
+    let mut bil = Vec::new();
+    for surf in [true, false] {
+        let (mut b, _) = Body3D::from_mesh(&tris, l, &lbm::stl::MeshSetup::default()).unwrap();
+        b.surfels = surf;
+        let Ok(mut g) = Gpu3D::new(&b, nu, u, true) else {
+            eprintln!("GPU ignoré");
+            return;
+        };
+        let steps = (30.0 * l as f64 / u as f64) as usize;
+        g.run(steps - 800, &ramp);
+        let _ = g.take_forces();
+        g.run(800, &ramp);
+        let f = g.take_forces();
+        let q = 0.5 * (u as f64).powi(2) * b.area;
+        let bx = g.box_forces(0.5).map_or(f64::NAN, |v| v[0] / q);
+        cx.push(f.fx / q);
+        bil.push(bx);
+        println!("surfels {surf} : Cx échange {:.4}, bilan sur boîte {bx:.4}, {} mailles pariétales", f.fx / q, g.wall_count);
+        assert!(!g.lost);
+    }
+    assert!((cx[0] / bil[0] - 1.0).abs() < 0.01, "surfels : échange {} contre bilan {}", cx[0], bil[0]);
+    assert!(cx[0] > cx[1] && cx[0] < 1.6, "Cx surfels {} contre Bouzidi {}", cx[0], cx[1]);
+}

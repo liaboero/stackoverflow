@@ -177,8 +177,9 @@ pub struct Stats {
     pub sum_mismatch: f64,
     /// Directions sans aucune source (Dᵢ = 0) : rebond simple du nœud.
     pub fallback: usize,
-    /// Volume transmis vers une maille solide ou hors de la grille (somme
-    /// sur les directions de V_y − Σ w, y fluide, y + cᵢ solide) : perdu.
+    /// Volume transmis vers une maille solide (somme sur les directions de
+    /// V_y − Σ w, y fluide, y + cᵢ solide) : perdu (nul pour une géométrie
+    /// exacte ; les bords d'une grille fine relèvent des raccords).
     pub leak: f64,
 }
 
@@ -232,6 +233,24 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         }
     }
     let ax = (0..3).fold(0, |b, a| if proj[a] > proj[b] { a } else { b });
+    // Orientation : volume Σ A_ax c_ax (divergence, colonnes selon ax) ;
+    // négatif, les normales rentrent (profil extrudé parcouru dans l'autre
+    // sens) : triangles retournés.
+    let vsign: f64 = tris
+        .iter()
+        .map(|t| {
+            let (u, v) = ([0, 1, 2].map(|a| t[1][a] - t[0][a]), [0, 1, 2].map(|a| t[2][a] - t[0][a]));
+            let cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            0.5 * cr[ax] * (t[0][ax] + t[1][ax] + t[2][ax]) / 3.0
+        })
+        .sum();
+    let flipped: Vec<Tri>;
+    let tris = if vsign < 0.0 {
+        flipped = tris.iter().map(|t| [t[0], t[2], t[1]]).collect();
+        &flipped[..]
+    } else {
+        tris
+    };
     let ls = surfel::build_axis(tris, &[Level::base()], ax).remove(0);
     let rank = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
     let cell_of = |v: [i32; 3]| -> Option<usize> {
@@ -412,7 +431,7 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         }
     }
     let scat_inv: Vec<f64> = scat_sum.iter().map(|&s| if s > 0.0 { 1.0 / s } else { 0.0 }).collect();
-    // Volume transmis vers le solide ou hors de la grille.
+    // Volume transmis vers le solide.
     stats.leak = (b0[2]..=b1[2])
         .into_par_iter()
         .map(|z| {
@@ -426,7 +445,7 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
                     for i in 1..19 {
                         let ci = C19[i];
                         let dst = cell_of([x as i32 + ci[0], y as i32 + ci[1], z as i32 + ci[2]]);
-                        if dst.is_none_or(|d| vol[d] == 0.0) {
+                        if dst.is_some_and(|d| vol[d] == 0.0) {
                             l += (vol64(c) - win_at(c, i)).max(0.0);
                         }
                     }
@@ -579,6 +598,10 @@ mod tests {
         let st = prepare(&tris, dims, [true; 3], false);
         assert!(st.stats.surfels > 100 && st.stats.fallback == 0, "{:?}", st.stats);
         assert!(st.stats.max_mismatch < 1e-9 && st.stats.leak < 1e-9 && st.stats.dropped < 1e-12 && st.stats.over_gathered < 1e-5, "{:?}", st.stats);
+        // Normales rentrantes : même découpe après retournement.
+        let inv: Vec<Tri> = tris.iter().map(|t| [t[0], t[2], t[1]]).collect();
+        let st2 = prepare(&inv, dims, [true; 3], false);
+        assert!(st2.wall_cells == st.wall_cells && st2.stats.max_mismatch < 1e-9, "{:?}", st2.stats);
         // Un pas de propagation à populations pseudo-aléatoires : masse V f
         // conservée exactement par rassemblement, rebond et dispersion.
         let ns = dims[0] * dims[1] * dims[2];

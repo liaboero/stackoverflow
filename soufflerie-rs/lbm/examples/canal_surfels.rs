@@ -61,7 +61,8 @@ fn main() {
         b.mesh = Some(Arc::new(mesh));
         b.features = None;
         b.surfels = surf;
-        let mut sim = Gpu3D::with_turbulence(&b, nu, 0.0, false, Turbulence::Laminar).unwrap();
+        let turb = if std::env::var("CANAL_SA").is_ok() { Turbulence::Sa } else { Turbulence::Laminar };
+        let mut sim = Gpu3D::with_turbulence(&b, nu, 0.0, false, turb).unwrap();
         sim.set_periodic_x();
         sim.set_accel(acc);
         sim.run(steps, &Ramp { steps: 0, u: 0.0 });
