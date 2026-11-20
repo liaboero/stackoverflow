@@ -108,7 +108,11 @@ fn main() {
     let spt = lf / u as f64;
     let ramp = lbm::cpu::Ramp { steps: (2.0 * spt * std::env::var("AILE_RAMPE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)) as u64, u };
     let t0 = std::time::Instant::now();
-    let mut sim = Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), true, raff, false, false, &bands).unwrap();
+    let mut sim = Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &bands).unwrap();
+    {
+        let cells: usize = sim.grid_cells().iter().map(|c| c.0).sum();
+        println!("  mailles (toutes grilles) : {:.2} M, modèle {}", cells as f64 / 1e6, if sim.keps { "k-ε RNG" } else { "Spalart–Allmaras" });
+    }
     if let Ok(f) = std::env::var("AILE_DUMP") {
         // Champ fin (u, w, ρ de la rangée centrale) après AILE_DUMP_T cordes.
         let tt: f64 = std::env::var("AILE_DUMP_T").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
@@ -315,6 +319,16 @@ fn main() {
                 s.loads.len()
             );
         }
+    }
+    // Durée de chaque passe (AILE_PROFIL=lancements), comme `banc3d --profil` ;
+    // modifie le champ : relevés suivants (AILE_P0, AILE_W) sans valeur.
+    if let Some(reps) = std::env::var("AILE_PROFIL").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let mut tot = 0.0;
+        for (name, n, ms) in sim.profile_passes(reps) {
+            println!("  passe {name:32} {:8.3} M  {ms:8.3} ms", n as f64 / 1e6);
+            tot += ms;
+        }
+        println!("  somme des passes : {tot:.3} ms");
     }
     if std::env::var("AILE_P0").is_ok() {
         perte_p0(&mut sim, &pts, lf, ny, u as f64, nu);

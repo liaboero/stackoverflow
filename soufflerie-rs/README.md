@@ -1682,7 +1682,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
@@ -2092,6 +2092,69 @@ l'aile 3D à Re = 1000) : l'écart mesure l'effet du Reynolds, pas une erreur.
 Re = 200) alors qu'il devrait être nul : à examiner (décalage d'un quart de
 maille de la maquette, ou sillage instationnaire).
 
+## Modèle k-ε RNG (3D)
+
+Second modèle RANS, à côté de Spalart–Allmaras (défaut) : k-ε RNG de Yakhot
+et Orszag (1986), sous la forme de Yakhot et al. (1992), base du modèle de
+turbulence de PowerFLOW. Choix : `Turbulence::KEpsRng` à la construction de
+`Gpu3D` (`true`/`false` restent acceptés pour SA/aucun), ou
+`SOUFFLERIE_RANS=keps` pour les bancs `aile_infinie` et `plaque3d`.
+
+**Équations** (constantes publiées, aucune retouchée) :
+
+- ν_t = C_μ k²/ε, C_μ = 0,0845 ;
+- Dk/Dt = ∇·((ν + ν_t/σ_k)∇k) + P − ε, P = ν_t S², S = √(2 S_ij S_ij) ;
+- Dε/Dt = ∇·((ν + ν_t/σ_ε)∇ε) + C_ε1 (ε/k) P − C_ε2* ε²/k ;
+- C_ε2* = C_ε2 + C_μ η³ (1 − η/η₀)/(1 + β η³), η = S k/ε (terme R de RNG) ;
+- σ_k = σ_ε = 0,7194, C_ε1 = 1,42, C_ε2 = 1,68, η₀ = 4,38, β = 0,012.
+
+**Schéma.** Celui de ν̃ (passe `ke3d` à la place de `sa3d`) : advection
+décentrée amont, diffusion conservative avec ν_t moyen aux faces, taux de
+déformation par différences centrées des vitesses du pas LBM, destructions
+semi-implicites (−ε dans k, −C_ε2* ε²/k dans ε ; partie négative de C_ε2*,
+η > η₀, traitée en source). k et ε sont rangés par paires dans les tampons
+de ν̃, doublés (8 octets de plus par maille). La collision prend
+τ = ½ + 3(ν + ν_t) comme avec SA. ν_t n'est défini qu'en un endroit
+(`nu_ke`, dans `KE_FNS`) : point d'accroche de la réduction VLES.
+
+**Paroi.** Loi de paroi inchangée (passe `wall3d`, relevé à h = 2 mailles).
+Au premier nœud, équilibre de la zone logarithmique à la hauteur de raccord
+h : k = u_τ²/√C_μ, ε = u_τ³/(κ h), d'où ν_t = κ u_τ h, la viscosité de la
+couche pariétale que suppose déjà le glissement. h plutôt que la distance du
+nœud, pour la même raison qu'avec SA (pas de saut quand la paroi traverse
+une rangée de nœuds). Zone laminaire imposée (`set_transition`) : P = 0.
+
+**Amont.** Tu = 0,1 %, ν_t/ν = 0,2 (la viscosité turbulente amont de
+ν̃ = 3ν en SA). Termes d'entretien de Spalart et Rumsey (2007) : +ε∞ dans
+l'équation de k, +C_ε2 ε∞²/k∞ dans celle de ε, pour que k et ε ne
+décroissent pas entre l'entrée et la maquette ; ils s'annulent en écoulement
+amont et sont négligeables dans la couche limite.
+
+**Raffinement imbriqué.** Comme ν̃ : valeurs de la grille parente
+interpolées (espace et temps) sur les mailles fantômes, recopiées de la
+grille fine vers la parente. En unités du réseau (Δt ∝ Δx), k est le même
+sur les deux grilles et ε double de la grille fine à la parente.
+
+**Validation** (`SOUFFLERIE_RANS=keps`, même binaire que SA) :
+
+| Cas | Spalart–Allmaras | k-ε RNG | Référence |
+| --- | --- | --- | --- |
+| Plaque plane L = 64, Re = 10⁶, x = 0,5 L : θ / H / Cf loi | 0,200 / 1,27 / 0,00362 | 0,204 / 1,26 / 0,00360 | θ 0,083, Cf 0,00399 |
+| Aile infinie 64 mailles, 0° Cz / Cx boîte | −0,014 / 0,0145 | −0,014 / 0,0146 | 0 / 0,0081 |
+| 4° | 0,458 / 0,0157 | 0,458 / 0,0158 | 0,43 à 0,44 / 0,0081 à 0,0088 |
+| 8° | 0,971 / 0,0286 | 0,972 / 0,0286 | 0,87 à 0,89 / 0,0099 à 0,0105 |
+| Aile infinie 128 mailles, 0° | −0,013 / 0,0138 | −0,012 / 0,0128 | 0 / 0,0081 |
+| 4° | 0,458 / 0,0140 | 0,517 / 0,0169 | 0,43 à 0,44 / 0,0081 à 0,0088 |
+| 8° | 0,898 / 0,0224 | 0,906 / 0,0195 | 0,87 à 0,89 / 0,0099 à 0,0105 |
+
+À 64 mailles les deux modèles donnent les mêmes efforts à 1 % près : le
+premier nœud est fixé par la loi de paroi (ν_t = κ u_τ h dans les deux cas),
+et le profil de ν_t à mi-corde est le même (ν_t/ν ≈ 3200 au premier nœud,
+u_τ identique). À 128 mailles, k-ε baisse la traînée à 0° (−7 %) et 8°
+(−13 %) mais monte portance et traînée à 4° (Cz 0,517, 18 % au-dessus de
+Ladson) : pas d'amélioration nette, la traînée reste 1,6 à 2 fois la
+mesure. **Spalart–Allmaras reste le modèle par défaut.**
+
 ## Vitesse de calcul 3D
 
 Le calcul 3D a été accéléré de deux à trois fois sans rien changer au
@@ -2266,6 +2329,28 @@ partagée (≈ 5 %) ; transport de ν̃ dans la collision du pas suivant
 et un décalage d'un pas à reporter dans les raccords) ; vitesses rangées
 en tableaux séparés (≈ 2 %).
 
+
+## Coût de calcul des modifications
+
+Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
+totale varie de ±30 % d'un passage à l'autre ; les temps par passe
+(`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
+alternés par modèle, on garde le plus rapide.
+
+### Modèle k-ε RNG
+
+Cas : `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles par corde, 4°,
+4,38 M mailles sur toutes les grilles).
+
+| | Spalart–Allmaras | k-ε RNG |
+| --- | --- | --- |
+| Transport (veine + grille ×2 + grille ×4) | 0,45 + 0,11 + 0,33 = 0,89 ms | 0,52 + 0,16 + 0,45 = 1,13 ms |
+| Somme des passes d'un pas | 5,4 ms | 7,6 ms (collision de la veine 2,2 ms contre 1,6 : bruit, même noyau) |
+| Durée totale | 53 à 82 s | 53 à 80 s |
+| Mémoire | — | +8 octets par maille (k et ε au lieu de ν̃), ≈ +35 Mo |
+
+Surcoût attendu : celui du transport, +0,24 ms par pas, ≈ +4 % ; il n'est
+pas séparable du bruit sur la durée totale.
 
 ## Installation
 

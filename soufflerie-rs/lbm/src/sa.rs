@@ -32,6 +32,29 @@ pub fn nu_tilde_inf(nu: f64) -> f32 {
     (3.0 * nu) as f32
 }
 
+/// k-ε RNG (Yakhot et al. 1992) : C_μ, plafond de ν_t (réseau) et état
+/// amont (Tu = 0,1 %, ν_t/ν = 0,2), comme `KE_FNS` de gpu3d.
+pub const CMU: f32 = 0.0845;
+pub const NUT_KE_MAX: f32 = 0.08;
+pub const TU_INF: f64 = 0.001;
+pub const RNUT_INF: f64 = 0.2;
+
+/// (k∞, ε∞) amont pour la vitesse `u` et la viscosité `nu` (réseau).
+pub fn ke_inf(u: f64, nu: f64) -> (f32, f32) {
+    let k = 1.5 * (TU_INF * u).powi(2);
+    (k as f32, (CMU as f64 * k * k / (RNUT_INF * nu)) as f32)
+}
+
+/// ν_t = C_μ k²/ε du modèle k-ε RNG.
+#[inline(always)]
+pub fn nu_ke(k: f32, e: f32) -> f32 {
+    if k > 0.0 && e > 0.0 {
+        (CMU * k * k / e).min(NUT_KE_MAX)
+    } else {
+        0.0
+    }
+}
+
 /// Viscosité turbulente ν_t = ν̃ f_v1(ν̃/ν).
 #[inline(always)]
 pub fn nu_turb(v: f32, inv_nu: f32) -> f32 {
@@ -301,6 +324,18 @@ mod tests {
             let e = (y as f64 - exact).abs() / exact;
             assert!(e < 3e-7, "z = {z} : {y} (erreur {e})");
         }
+    }
+
+    #[test]
+    fn k_eps_amont_et_paroi() {
+        // Amont : ν_t/ν = 0,2.
+        let (u, nu) = (0.1, 2e-6);
+        let (k, e) = ke_inf(u, nu);
+        assert!((nu_ke(k, e) as f64 / nu - 0.2).abs() < 1e-3);
+        // Paroi : k = u_τ²/√C_μ, ε = u_τ³/(κ h) ⇒ ν_t = κ u_τ h.
+        let (ut, h) = (0.004f32, 2.0f32);
+        let (k, e) = (ut * ut / CMU.sqrt(), ut * ut * ut / (KAPPA * h));
+        assert!((nu_ke(k, e) - KAPPA * ut * h).abs() < 1e-6);
     }
 
     #[test]

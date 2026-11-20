@@ -128,7 +128,7 @@ fn main() {
     let stations: Vec<f64> = (0..15).map(|k| 0.15 + 0.05 * k as f64).collect();
     let run = |essai: u32| -> Option<(Vec<Vec<(f64, f64)>>, f64, [usize; 3], f64, f64, f64)> {
         let t0 = std::time::Instant::now();
-        let mut sim = Gpu3D::with_refinement(&body, nu, u, fp16, true, raff).unwrap();
+        let mut sim = Gpu3D::with_refinement(&body, nu, u, fp16, lbm::gpu3d::Turbulence::rans_from_env(), raff).unwrap();
         sim.periodic_span = true;
         sim.set_essai(essai, nu_cap);
         sim.run(((t_end - 2.0) * spt) as usize, &ramp);
