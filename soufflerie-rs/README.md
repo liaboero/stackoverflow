@@ -2038,6 +2038,56 @@ références : le lissage des facettes. Ce qui ne change rien de mesurable :
 les arêtes vives tirées du maillage. Ce qui aiderait le plus, et reste à
 faire : un raffinement du bord d'attaque en tronçons qui suivent la flèche.
 
+## Parois à surfels : géométrie (première brique)
+
+Base de la condition limite volumique de Chen et al. (1998), celle de
+PowerFLOW, qui conserve exactement masse et quantité de mouvement là où le
+rebond de Bouzidi dépend de la place de la paroi dans la maille. Module
+`lbm/src/surfel.rs`, côté processeur seulement : le solveur GPU n'est pas
+encore modifié (tâche suivante).
+
+- **Découpe.** Chaque triangle du STL est coupé par les plans i + ½ de la
+  grille (Sutherland–Hodgman) ; chaque morceau, dans un seul voxel (cube
+  centré sur un nœud), est un surfel : voxel, aire, normale sortante,
+  centre, polygone.
+- **Volumes balayés.** Pour chaque direction D3Q19, Pᵢ = |cᵢ·n| A
+  (Δt = 1) ; le parallélépipède (surfel poussé de 0 à c côté fluide) sert au
+  rassemblement de cᵢ entrant et à la dispersion de −cᵢ sortant. Ses parts
+  dans chaque voxel (poids) sont exactes : découpe d'un polyèdre convexe par
+  le voxel.
+- **Fractions solides** exactes des voxels coupés, à partir des seuls
+  surfels (divergence de (x − xᵢ₋½) eₓ le long des colonnes en x) ;
+  maillage fermé.
+- **Raffinement imbriqué** (`Level` : échelle, nœud 0 et domaine propre en
+  mailles de la veine, comme `refine3d`) : un morceau appartient au niveau
+  le plus fin dont le domaine propre le contient (découpe exacte par les
+  plans des domaines), ses surfels sont dans la grille de ce niveau.
+
+Tests (`cargo test --release surfel`) : Σ aires = aire du STL et Σ A n = 0
+(à 10⁻¹⁰ près, y compris réparties sur trois niveaux) ; cube aligné
+(fraction solide de chaque voxel et poids de la direction +x exacts), cube
+tourné et sphère (volume exact par les fractions) ; somme des poids d'un
+parallélépipède = Pᵢ ; sur un corps convexe, pour chaque direction, la
+somme des poids d'un voxel ne dépasse pas son volume fluide.
+
+Bilans (`cargo run --release --example surfels_check -- TR1208.stl 8 2`,
+grille ×4 autour de la maquette, α = 4°) :
+
+| | TR-1208 (L = 8, ×4) | NACA 0012 extrudée (L = 16, ×4) |
+| --- | --- | --- |
+| Surfels (par voxel coupé) | 59 854 (3,3) | 62 588 (3,3) |
+| Écart d'aire, \|Σ A n\|/A | 2·10⁻¹⁵, 8·10⁻¹⁷ | 3·10⁻¹⁴, 1·10⁻¹⁵ |
+| Volume par les fractions | 3·10⁻¹⁴ | 4·10⁻¹⁵ |
+| max \|Σ poids − Pᵢ\| | 1·10⁻¹³ | 2·10⁻¹³ |
+| Volume balayé hors fluide | 1,2·10⁻⁷ de Σ Pᵢ | 0 |
+| Volume balayé dans des voxels à nœud solide | 14 % | 18 % |
+
+La dernière ligne compte pour la suite : avec la voxelisation actuelle par
+nœuds, un voxel coupé dont le nœud est dans le corps n'a pas de
+populations. La condition limite à surfels devra garder des populations
+dans ces voxels partiellement fluides (fraction fluide > 0), ou rendre leur
+part du volume balayé aux voxels voisins.
+
 ## Validation 3D
 
 Résultats bruts dans `validation/` ; `tools/validation3d.sh` refait les
@@ -2356,6 +2406,7 @@ soufflerie-rs/
 │   ├── src/bodies3d.rs maquettes 3D (sphère, cube, cylindre, aile)
 │   ├── src/stl.rs      lecture STL, nettoyage, appartenance, distance à la surface
 │   ├── src/geom3d.rs   prétraitement géométrique : arêtes vives, raffinement lisse, contrôle par tranche
+│   ├── src/surfel.rs   surfels : découpe du STL par voxel, volumes balayés, poids, fractions solides
 │   ├── src/sgeo.rs     format de géométrie .sgeo (maillage indexé, mise en place, arêtes vives)
 │   ├── src/geometry.rs mailles solides, liens de Bouzidi, distance et normale à la paroi
 │   ├── src/shapes.rs   maquettes
@@ -2373,6 +2424,26 @@ soufflerie-rs/
     ├── src/tab3d.rs    onglet soufflerie 3D (fil de calcul GPU, vue 3D, coupe, efforts)
     └── src/worker.rs   fil de calcul de l'interface (image, traceurs)
 ```
+
+## Coût de calcul des modifications
+
+### Surfels : prétraitement géométrique (`lbm/src/surfel.rs`)
+
+Cas : `surfels_check`, grille ×4 autour de la maquette, 12 fils (processeur
+partagé avec d'autres calculs pendant la mesure : ordres de grandeur). Le
+pas de calcul n'est pas touché ; c'est un coût de préparation, une fois par
+calcul.
+
+| Cas | Voxelisation actuelle (nœuds + coupes de Bouzidi) | Surfels, poids et fractions | Mémoire des surfels |
+| --- | --- | --- | --- |
+| TR-1208, L = 8 + ×4 | 0,5–1,6 s | 8–12 s | 52 Mo (CPU) |
+| NACA 0012 extrudée, L = 16 + ×4 | 1,0–1,1 s | 10–11 s | 53 Mo (CPU) |
+
+Le temps va surtout aux poids (≈ 27 parts de parallélépipède par surfel,
+chacune une découpe de polyèdre). Pistes si cela gêne : volume nul ou
+plein sans découpe quand un voxel est entier d'un côté de tous les plans
+(déjà fait), mise en commun des découpes des directions opposées (déjà
+fait), poids en f32 sur le GPU.
 
 ## Pistes
 
