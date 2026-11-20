@@ -16,6 +16,10 @@ de Smagorinsky, sans loi de paroi) :
 - `periodic_span` n'est jamais mis à vrai dans `gpu3d.rs`, alors que la
   maquette se présente comme « envergure périodique 4D » ;
 - blocage D/h = 1/8 (Parnaudeau : domaine 20 D × πD × 20 D).
+- avec loi de paroi (`SOUFFLERIE_RANS=sa|keps|vles`, D = 16) le calcul
+  tient mais le sillage reste stationnaire (Cl′ = 0, Cd 1,09–1,10) : la
+  loi de paroi turbulente ne convient pas à cette couche limite laminaire
+  (README, « VLES sur la base k-ε RNG »).
 
 À faire : stabilité de la paroi 3D à τ ≈ 0,5 sans loi de paroi ; envergure
 réellement périodique ; veine plus haute ou correction de blocage fondée

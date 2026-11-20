@@ -2057,7 +2057,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
@@ -2732,6 +2732,105 @@ u_τ identique). À 128 mailles, k-ε baisse la traînée à 0° (−7 %) et 8°
 Ladson) : pas d'amélioration nette, la traînée reste 1,6 à 2 fois la
 mesure. **Spalart–Allmaras reste le modèle par défaut.**
 
+## VLES sur la base k-ε RNG (3D)
+
+Réduction « très grandes échelles » de la viscosité turbulente, dans l'esprit
+du VLES de PowerFLOW (Chen et al. 2003, *Science* 301 ; Chen et al. 2004 ;
+Fares 2006) : là où la maille résout les tourbillons porteurs, seule la
+part non résolue de la turbulence doit être modélisée, sinon le RANS amortit
+les structures du sillage. Choix : `Turbulence::Vles`, ou
+`SOUFFLERIE_RANS=vles` pour `aile_infinie`, `plaque3d`, `ahmed` et
+`cylindre3d` (ces deux derniers lisent désormais aussi la variable ; sans
+elle, comportement inchangé). Défaut inchangé (Spalart–Allmaras).
+
+**Formule** (constantes publiées, aucun facteur de réglage) :
+
+- filtre de maille de Johansen, Wu et Shyy (2004, *Int. J. Heat Fluid Flow*
+  25) : F = min(1, C₃ Δ ε/k^{3/2}), C₃ = 1, Δ = pas du réseau local (1 en
+  unités de chaque grille, donc la moitié de la maille parente sur une
+  grille fine) ; loin des corps où k^{3/2}/ε > Δ, ν_t → C_μ Δ √k ;
+- protection de la couche limite attachée par la fonction f_d de la DDES
+  (Spalart et al. 2006) : r_d = (ν_t + ν)/(κ² d² √(U_ij U_ij)),
+  f_d = 1 − tanh((8 r_d)³), ν_t RANS de k-ε dans r_d ;
+- ν_t = C_μ (k²/ε) · (1 − f_d (1 − F)) : RANS entier en paroi (f_d = 0),
+  filtré au large (f_d = 1).
+
+Sans protection, le filtre couperait la couche limite : dans la zone
+logarithmique k^{3/2}/ε = κ y/C_μ^{3/4} ≈ 2,6 y dépasse la maille dès
+y ≈ 0,4 Δ, et ν_t tomberait de κ u_τ y à C_μ^{3/4} u_τ Δ (÷ 5 à y = 2).
+
+**Où entre le ν_t filtré.** Dans la collision seulement : comme le τ_turb
+de Chen et al., le temps de relaxation filtré n'entre que dans l'équation
+de Boltzmann ; k et ε suivent le k-ε RNG complet (production ν_t S²,
+diffusion). La passe `ke3d` calcule F et f_d (|S| et ∇u y sont déjà) et
+range ν_t filtré dans un troisième tiers des tampons de ν̃ (4 octets de plus
+par maille), relu par `nut_cell` (`P.sa = 3`). Les raccords de grilles
+(`refine3d.rs`) gardent le ν_t RANS pour le changement d'échelle de la
+partie hors équilibre. Variante essayée et écartée (constante `VLES_TR` de
+`KE3_WGSL`) : ν_t filtré aussi dans la production et la diffusion de k et ε
+(forme de Johansen et al.). Le filtre réduit alors la production, k baisse,
+ν_t encore plus : sur le corps d'Ahmed 25°, L = 64, Cx 0,549 (surface) et
+0,667 (boîte), 35° : 0,897 et 0,963, écoulement amont perturbé (profils
+amont |ΔU|/Ub 0,16 contre 0,04 en SA).
+
+Non retenu : le terme de tourbillonnement de Chen et al. (2003),
+τ_turb = C_μ (k²/ε)/(T √(1 + η²)), η = k|S|/ε. Sous sa forme publiée
+(sans le recalage de PowerFLOW, non publié), il divise ν_t par 3,6 dans la
+zone logarithmique en équilibre (η = 1/√C_μ ≈ 3,4) : il casse la couche
+limite attachée que la loi de paroi suppose.
+
+**Validation** (`SOUFFLERIE_RANS=sa|keps|vles`, même binaire) :
+
+| Cas | Spalart–Allmaras | k-ε RNG | VLES | Référence |
+| --- | --- | --- | --- | --- |
+| Plaque plane L = 64, x = 0,5 L : θ / H / Cf loi | 0,189 / 1,28 / 0,00364 | 0,155 / 1,32 / 0,00368 | 0,206 / 1,26 / 0,00360 | θ 0,083, Cf 0,00399 |
+| Aile infinie 64 mailles, 0° Cz / Cx bilan | −0,014 / 0,0149 | −0,014 / 0,0157 | −0,014 / 0,0157 | 0 / 0,0081 |
+| 4° | 0,456 / 0,0158 | 0,458 / 0,0151 | 0,458 / 0,0160 | 0,43 à 0,44 / 0,0081 à 0,0088 |
+| 8° | 0,971 / 0,0290 | 0,972 / 0,0286 | 0,973 / 0,0282 | 0,87 à 0,89 / 0,0099 à 0,0105 |
+| Aile infinie 128 mailles, 0° | −0,013 / 0,0147 | −0,013 / 0,0149 | −0,013 / 0,0143 | 0 / 0,0081 |
+| 4° | 0,462 / 0,0143 | 0,460 / 0,0153 | 0,467 / 0,0150 | 0,43 à 0,44 / 0,0081 à 0,0088 |
+| 8° | 0,899 / 0,0222 | 0,899 / 0,0230 | 0,899 / 0,0232 | 0,87 à 0,89 / 0,0099 à 0,0105 |
+| Ahmed 25°, L = 64 : Cx surface / boîte | 0,479 / 0,457 | 0,437 / 0,475 | 0,454 / 0,433 | 0,285 |
+| Ahmed 25°, L = 96 | 0,395 / 0,429 (tableau du corps d'Ahmed) | 0,362 / 0,399 | 0,412 / 0,405 | 0,285 |
+| Ahmed 35°, L = 64 | 0,670 / 0,681 | 0,634 / 0,606 | 0,630 / 0,578 | ≈ 0,26 |
+| Cylindre Re = 3900, D = 16 : Cd / Cl′ | 1,10 / 0 | 1,10 / 0 | 1,09 / 0 | 0,98 à 1,0 / lâcher St 0,21 |
+
+(Plaque : θ instantané à ±7 % selon la station, comme indiqué plus haut ;
+aile : bilan à la plus grande marge, 4 relevés sur une corde, écart type
+0,0003 à 0,0008 sur Cx ; Ahmed : 12 t*, moyenne sur 4 t*.)
+
+**Lecture.**
+- *Couche limite attachée* : le filtre ne change presque rien, comme
+  voulu. Plaque : Cf de la loi de paroi sur 0,3–0,7 L 0,00407 / 0,00405 /
+  0,00405 (SA / k-ε / VLES) ; la couche limite y tient dans moins d'une
+  maille, θ varie dans sa dispersion instantanée. Aile :
+  Cz à 0,5 % près, Cx dans la dispersion des relevés (±5 %).
+- *Ahmed* : le filtre agit bien dans le sillage (ν_t ramené en moyenne à
+  0,21 fois le ν_t RANS derrière le culot, 90 % des mailles réduites de
+  plus de moitié ; 0,18 et 93 % à L = 96), mais il ne fait pas décoller la
+  lunette : à 35°, C_S reste 0,33 (attaché, comme en SA) et Cx 0,58–0,63
+  contre 0,26. À 25°, VLES est entre SA et k-ε à L = 64, et au-dessus de
+  k-ε à L = 96 (0,41 contre 0,36, surpression de l'avant C_K 0,095 contre
+  0,063). Écoulement amont dégradé : avec moins de viscosité, le coin
+  entrée/sol mobile laisse un retour près du sol (à 400 mm devant le nez,
+  z = 28 mm, à une maille de l'entrée : U = 11,5 m/s contre 27 en SA et 34
+  mesurés) et p∞ dérive (Cp∞ 0,06–0,07 contre 0,005 en SA, 0,02–0,03 en
+  k-ε) ; d'où un écart aux profils plus grand (|ΔU|/Ub 0,12 contre 0,07 en
+  SA à L = 64, 0,097 contre 0,066 en k-ε à L = 96).
+- *Cylindre Re = 3900* : sans modèle RANS le calcul diverge (Cd NaN, comme
+  noté dans EVOLUTIONS.md) ; avec loi de paroi les trois modèles tiennent
+  mais donnent un sillage stationnaire symétrique (Cl′ = 0, pas de lâcher),
+  Cd 1,09–1,10. La couche limite y est laminaire jusqu'au décollement ; la
+  loi de paroi turbulente et le ν_t de paroi (RANS, protégé par f_d) en
+  font un cas sous-critique faux, que le filtre du sillage ne corrige pas.
+
+**Conclusion.** Le VLES tient la non-régression en écoulement attaché et
+abaisse fortement ν_t dans les sillages, mais n'améliore aucun cas décollé :
+le défaut de fond reste le décollement de la lunette (loi de paroi, arête à
+une maille ; voir « Pourquoi la soufflerie ne décolle pas »), pas la
+viscosité du sillage. Il dégrade le coin entrée/sol. **Spalart–Allmaras
+reste le modèle par défaut** ; `Turbulence::Vles` est une option.
+
 ## Vitesse de calcul 3D
 
 Le calcul 3D a été accéléré de deux à trois fois sans rien changer au
@@ -3201,6 +3300,22 @@ Cas : `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles par corde, 4°,
 
 Surcoût attendu : celui du transport, +0,24 ms par pas, ≈ +4 % ; il n'est
 pas séparable du bruit sur la durée totale.
+
+### VLES (filtre de maille sur k-ε RNG)
+
+Cas : `aile_infinie 16 2 6e6 4 2 - 60`, `AILE_PROFIL=200` (64 mailles par
+corde, 4,38 M mailles), deux passages alternés, GPU libre.
+
+| | k-ε RNG | VLES |
+| --- | --- | --- |
+| Transport (veine + grille ×2 + grille ×4) | 0,92 + 0,21 + 0,87 = 2,00 ms | 1,12 + 0,25 + 1,06 = 2,43 ms |
+| Collision (veine + grille ×2 + grille ×4) | 2,87 + 0,51 + 2,22 ms | 2,78 + 0,51 + 2,22 ms (lecture directe de ν_t, même coût) |
+| Mémoire | — | +4 octets par maille (ν_t filtré), ≈ +18 Mo |
+
+Surcoût : +0,43 ms par pas dans le transport (f_d, F et l'écriture de ν_t),
+≈ +4 % de la somme des passes d'un pas (≈ 11 ms ici ; horloges du GPU
+plus basses que pour le tableau k-ε ci-dessus). Corps d'Ahmed 25°, L = 96 : 195 s contre
+188 s en k-ε (12 t*).
 
 ### Raffinement automatique (`--raff-auto 64`)
 
