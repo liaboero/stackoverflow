@@ -2088,6 +2088,67 @@ populations. La condition limite à surfels devra garder des populations
 dans ces voxels partiellement fluides (fraction fluide > 0), ou rendre leur
 part du volume balayé aux voxels voisins.
 
+## Domaine de Mach du D3Q19
+
+**Défaut.** Sur D3Q19, c_α³ = c_α : le moment d'ordre 3 Σ f c_α³ vaut ρ u_α,
+et le terme ρ u_α³ de l'équilibre de Maxwell manque. Le développement de
+Chapman–Enskog donne alors une contrainte normale 2ρν ∂_α u_α (1 − 4,5 u_α²),
+soit une erreur de 1,5 Ma² dans la direction de l'écoulement (c_s² = 1/3).
+L'équilibre de la collision porte déjà les moments mixtes xxy, xyy, … (Hermite
+d'ordre 3 partiel, régularisation récursive de Malaspinas 2015) : les
+contraintes de cisaillement sont justes, sauf le terme ∂_γ(ρ u_x u_y u_z)
+(c_x c_y c_z = 0 sur D3Q19), qui n'existe que si les trois composantes de
+la vitesse sont non nulles.
+
+**Correction** (`set_essai(MACH3_BIT)`, bit 2²⁸, collision 3D seulement).
+Terme source sur le moment d'ordre 2 après collision (Dellar 2014 ; Hosseini,
+Darabiha, Thévenin 2020) : s_αα = −(1 − ω/2) ∂_α(ρ u_α³) ≈ −(1 − ω/2) 3ρ u_α²
+∂_α u_α. Le gradient est tiré localement de la partie hors équilibre,
+∂_α u_α = −3ω Π¹_αα / (2ρ), comme la correction galiléenne du cumulant
+(Geier et al. 2015) : ni voisin lu ni tampon ajouté. Le terme u_α³ ∂_α ρ,
+d'ordre Ma⁴ à faible Mach, est négligé. Sans le bit, le code de la
+correction est retiré du shader (défaut identique à l'octet près, test
+`collision_par_defaut_sans_correction`). Non porté au D2Q9 : même défaut
+diagonal, même formule, mais la soufflerie 2D n'a pas de veine périodique
+pour le valider.
+
+**Validation** (`lbm/tests/mach3d.rs`, veine périodique 64 × 64 × 2 sans
+maquette, `set_periodic_x`, `set_state`). Onde de cisaillement advectée
+selon x à U = Ma c_s, τ = 0,8, viscosité apparente rapportée à celle de
+l'onde au repos. Nombre d'onde selon (1, 1, 0) : le réseau voit des
+déformations normales, l'analyse prévoit ν (1 − 2,25 U²). Nombre d'onde selon
+x (vitesse selon y) : témoin sans défaut.
+
+| Ma | (1,1) sans | (1,1) avec | prévu sans | témoin sans | témoin avec |
+| --- | --- | --- | --- | --- | --- |
+| 0,1 | 0,9927 | 1,0002 | 0,9925 | 1,0016 | 1,0016 |
+| 0,2 | 0,9704 | 0,9992 | 0,9700 | 1,0017 | 1,0018 |
+| 0,3 | 0,9329 | 0,9946 | 0,9325 | 1,0016 | 1,0017 |
+
+Le défaut mesuré suit l'analyse à 1 % près ; la correction en retire 92 à
+98 % (reste −0,5 % à Ma 0,3, ordre Ma⁴ du gradient local). Tourbillon
+isotherme gaussien (ε = 0,02, R = 6,4, τ = 0,56) convecté d'une période de
+veine, écart L2 de u − U au même tourbillon resté au repos : 7,1·10⁻³ →
+6,5·10⁻³ à Ma 0,1, 1,27·10⁻² → 0,99·10⁻² à 0,2, 1,76·10⁻² → 1,11·10⁻² à 0,3
+(le reste : dispersion du schéma d'advection, indépendante de ce défaut).
+
+**Domaine utilisable** (contrainte visqueuse juste à 1 % près) : avant,
+Ma ≲ 0,08 pour les contraintes normales (1,5 Ma²), 0,12 pour une onde de
+cisaillement oblique ; les calculs courants (u = 0,1, Ma = 0,17) portent
+4 % d'erreur sur la contrainte normale. Après, Ma ≲ 0,3 tant que l'écoulement
+n'a pas ses trois composantes de vitesse grandes à la fois (terme xyz
+restant). Au-delà, les limites viennent du modèle isotherme (pas d'équation
+d'énergie) et du réseau : D3Q27 pour le terme xyz, D3Q39 pour le
+compressible (tâches ultérieures).
+
+**Effet sur l'aile infinie** (4°, 64 mailles par corde, L = 16 + ×4,
+ny = 40, 12 cordes, bilan sur boîte à 0,05 corde) : Cz 0,4552 → 0,4556,
+Cx 0,0156 → 0,0160 ; surface Cz 0,4495 → 0,4499, Cx 0,0130 → 0,0131.
+Négligeable comme attendu : le défaut ne touche que la contrainte
+visqueuse, en ν (Re = 6·10⁶, sous-maille et loi de paroi près de la
+maquette), et au Mach du calcul (u = 0,1) la correction ne change cette
+contrainte que de quelques pour cent là où elle compte peu.
+
 ## Validation 3D
 
 Résultats bruts dans `validation/` ; `tools/validation3d.sh` refait les
@@ -2539,3 +2600,16 @@ fait), poids en f32 sur le GPU.
 - Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter
   (cargo-apk / xbuild). Sur téléphone, l'application web reste la plus
   simple à installer.
+
+## Coût de calcul des modifications
+
+### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
+
+Cas : `aile_infinie 16 2 6e6 4 <t> - 40 12 <essai>` (64 mailles par
+corde), GTX 1070. Sans le bit, le shader est identique au précédent :
+coût inchangé par construction. Avec le bit : une dizaine d'opérations
+par maille dans la collision, aucun accès mémoire, aucun tampon (mémoire
+inchangée). Mesuré GPU seul : 84 s pour 12 cordes sans le bit, 24 s pour
+4 cordes avec (28 s attendues au prorata) ; pas d'écart mesurable. Les
+autres mesures ont été faussées par des calculs d'autres sessions sur le
+même GPU (×1,5 à ×2,7 dans un sens comme dans l'autre).

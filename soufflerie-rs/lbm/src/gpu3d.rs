@@ -827,7 +827,7 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
             pull,
             "  {{
     var v: f32;
-{wallpart}    }}{ground} else if (x - {cx} < 0) {{
+{wallpart}    }}{ground}{perx} else if (x - {cx} < 0) {{
       v = feqIn({i}u);
     }} else if (x - {cx} >= i32(P.nx)) {{
       v = pop({i}u, idx);
@@ -840,6 +840,19 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
             yv = ["ym", "yc", "yp"][(1 - cy) as usize],
             zv = ["zm", "zc", "zp"][(1 - cz) as usize],
             ground = ground_code(i),
+            // Veine périodique en x (bit 8 de `rows`, cas de validation sans
+            // entrée ni sortie, voir `set_periodic_x`).
+            perx = if cx == 0 {
+                String::new()
+            } else {
+                format!(
+                    " else if ((P.rows & 8u) != 0u && (x - {cx} < 0 || x - {cx} >= i32(P.nx))) {{
+      v = pop({i}u, nbr(u32((x - {cx} + i32(P.nx)) % i32(P.nx)), {yv}, {zv}, r_{yv}_{zv}));
+    }}",
+                    yv = ["ym", "yc", "yp"][(1 - cy) as usize],
+                    zv = ["zm", "zc", "zp"][(1 - cz) as usize],
+                )
+            },
         );
     }
     let dotc = |i: usize, a: usize, b: usize| C3[i][a] * C3[i][b];
@@ -892,8 +905,16 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
         .map(|(c, v)| format!("{} * {v}", f(*c)))
         .collect::<Vec<_>>()
         .join(" + ");
+        // Correction du défaut cubique (essai, voir `MACH3_BIT`) : contribution
+        // des termes correctifs s_αα au moment d'ordre 2 après collision.
+        let qs = [(cxf * cxf - 1.0 / 3.0, "sxx"), (cyf * cyf - 1.0 / 3.0, "syy"), (czf * czf - 1.0 / 3.0, "szz")]
+            .iter()
+            .map(|(c, v)| format!("{} * {v}", f(*c)))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let qs = format!("{M3_OPEN} + {} * ({qs}){M3_CLOSE}", f(4.5 * w));
         if j == i {
-            let _ = writeln!(coll, "  o[{i}] = {wf} * rho * (1.0 - usq) + k * {w45} * ({qp}) - {wf};", wf = f(w), w45 = f(4.5 * w));
+            let _ = writeln!(coll, "  o[{i}] = {wf} * rho * (1.0 - usq) + k * {w45} * ({qp}){qs} - {wf};", wf = f(w), w45 = f(4.5 * w));
             continue;
         }
         let accel = match cx {
@@ -920,7 +941,7 @@ fn wgsl_step(fp16: bool, walls: bool) -> String {
             coll,
             "  {{
     let cu = {cu};
-    let ev = {wf} * rho * (1.0 + 4.5 * cu * cu - usq) + k * {w45} * ({qp});
+    let ev = {wf} * rho * (1.0 + 4.5 * cu * cu - usq) + k * {w45} * ({qp}){qs};
     let od = {w3f} * rho * cu + {w135} * ({h3}){accel};
     o[{i}] = ev + od - {wf};
     o[{j}] = ev - od - {wf};
@@ -1146,11 +1167,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     om = 2.0 / (tau + sqrt(tau * tau + c18 * damp * damp * qn * ir));
   }}
   let k = 1.0 - om;
+{M3_OPEN}
+  // Défaut cubique du D3Q19 (essai MACH3_BIT) : Σ f c_α³ = Σ f c_α, le
+  // moment d'équilibre ρ u_α³ manque, et la contrainte normale vaut
+  // 2ρν ∂_α u_α (1 − 4,5 u_α²) au lieu de 2ρν ∂_α u_α. Terme source
+  // (Dellar 2014 ; Hosseini et al. 2020) ajouté au moment d'ordre 2 après
+  // collision : s_αα = −(1 − ω/2) ∂_α(ρ u_α³) ≈ −(1 − ω/2) 3ρ u_α² ∂_α u_α,
+  // le gradient tiré localement de la partie hors équilibre,
+  // ∂_α u_α = −3ω Π¹_αα / (2ρ) (comme la correction galiléenne du
+  // cumulant, Geier et al. 2015). Le défaut en ∂_γ(ρ u_x u_y u_z) des
+  // contraintes de cisaillement (c_x c_y c_z = 0 sur D3Q19) reste.
+  let cm3 = (1.0 - 0.5 * om) * 4.5 * om;
+  let sxx = cm3 * u.x * u.x * pxx;
+  let syy = cm3 * u.y * u.y * pyy;
+  let szz = cm3 * u.z * u.z * pzz;
+{M3_CLOSE}
   // Régularisation récursive (Malaspinas 2015) : moments d'ordre 3 tirés de
   // ρ, u et de la partie hors équilibre d'ordre 2 après collision.
-  let bxx = k * pxx;
-  let byy = k * pyy;
-  let bzz = k * pzz;
+  let bxx = k * pxx{M3_OPEN} + sxx{M3_CLOSE};
+  let byy = k * pyy{M3_OPEN} + syy{M3_CLOSE};
+  let bzz = k * pzz{M3_OPEN} + szz{M3_CLOSE};
   let bxy = k * pxy;
   let bxz = k * pxz;
   let byz = k * pyz;
@@ -2038,6 +2074,8 @@ pub struct Gpu3D {
     /// de bandes absorbantes sur les bords latéraux y, que la maquette
     /// traverse (elles freineraient la couche limite de ses bords).
     pub periodic_span: bool,
+    /// Veine périodique en x, sans entrée ni sortie (cas de validation).
+    periodic_x: bool,
     /// Variantes de diagnostic de la loi de paroi (bits, `set_essai`).
     essai: u32,
     essai_nu: f32,
@@ -2092,10 +2130,34 @@ fn plain_mask(wall: &[u32]) -> Vec<u32> {
     m
 }
 
+/// Bit de `set_essai` : correction du défaut cubique du D3Q19 (moment
+/// d'équilibre ρ u_α³ manquant ; README, « Domaine de Mach »).
+pub const MACH3_BIT: u32 = 1 << 28;
+/// Bornes du code de cette correction dans la collision : retiré sans le
+/// bit (code par défaut inchangé à l'octet près).
+const M3_OPEN: &str = "/*M3[*/";
+const M3_CLOSE: &str = "/*]M3*/";
+
+fn mach3_strip(code: &str, keep: bool) -> String {
+    if keep {
+        return code.to_string();
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(a) = rest.find(M3_OPEN) {
+        out.push_str(&rest[..a]);
+        let b = rest[a..].find(M3_CLOSE).expect("borne M3 non fermée") + a;
+        rest = &rest[b + M3_CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Code de la collision où les paramètres fixes d'une grille deviennent des
 /// constantes (SA, sous-maille, type de bords, diagnostics, stockage) : le
 /// compilateur retire leurs branches (collision 4 % plus rapide).
 fn specialize(code: &str, c: [u32; 7]) -> String {
+    let code = mach3_strip(code, c[3] & MACH3_BIT != 0);
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
@@ -3883,6 +3945,7 @@ impl Gpu3D {
             nested,
             ground: body.ground && !nested,
             periodic_span: false,
+            periodic_x: false,
             essai: 0,
             essai_nu: 0.0,
             refine: None,
@@ -3981,7 +4044,9 @@ impl Gpu3D {
     /// relevée à h ; 131072 profil de la couche pariétale ancré à h seulement ;
     /// 262144 loi de paroi aussi aux arêtes vives ; 524288 ν̃ du premier nœud
     /// κ u_τ y_n (distance du nœud) ; 1048576 advection de ν̃ de Lax–Wendroff ;
-    /// 4194304 sans le plancher du glissement (profil ancré à h).
+    /// 4194304 sans le plancher du glissement (profil ancré à h) ;
+    /// `MACH3_BIT` (2²⁸) correction du défaut cubique du D3Q19 (domaine de
+    /// Mach, README).
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
@@ -3992,6 +4057,50 @@ impl Gpu3D {
                 g.essai_nu = (nu_cap * (1u64 << r.depth[k]) as f64) as f32;
             }
         }
+    }
+
+    /// Veine périodique dans les trois directions (cas de validation sans
+    /// maquette : onde de cisaillement, tourbillon convecté). Grille boîte
+    /// sans raffinement ; ni entrée, ni sortie, ni éponge.
+    pub fn set_periodic_x(&mut self) {
+        self.periodic_x = true;
+        self.sponge_start = self.nx as u32;
+    }
+
+    /// Champ initial donné par maille (u_x, u_y, u_z, ρ), rangé x + nx (y +
+    /// ny z) : populations à l'équilibre de la collision (Hermite d'ordre 3
+    /// partiel). Grille boîte en simple précision, sans raffinement.
+    pub fn set_state(&mut self, m: &[[f32; 4]]) -> Result<(), String> {
+        if self.fp16 || self.sparse.is_some() || self.refine.is_some() || m.len() != self.n {
+            return Err("set_state : grille boîte simple précision sans raffinement, une valeur par maille".into());
+        }
+        let n = self.n;
+        let mut e = vec![0f32; 19 * n];
+        for (c, &[ux, uy, uz, rho]) in m.iter().enumerate() {
+            let (ux, uy, uz, rho) = (ux as f64, uy as f64, uz as f64, rho as f64);
+            let usq = 1.5 * (ux * ux + uy * uy + uz * uz);
+            let a = [
+                rho * ux * ux * uy,
+                rho * ux * uy * uy,
+                rho * ux * ux * uz,
+                rho * ux * uz * uz,
+                rho * uy * uy * uz,
+                rho * uy * uz * uz,
+            ];
+            for i in 0..19 {
+                let [cx, cy, cz] = C3[i].map(|v| v as f64);
+                let w = w3(i);
+                let cu = cx * ux + cy * uy + cz * uz;
+                let h = |p: f64, q: f64| p * (q * q - 1.0 / 3.0);
+                let h3 = h(cy, cx) * a[0] + h(cx, cy) * a[1] + h(cz, cx) * a[2] + h(cx, cz) * a[3] + h(cz, cy) * a[4] + h(cy, cz) * a[5];
+                e[i * n + c] = (w * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq) + 13.5 * w * h3 - w) as f32;
+            }
+        }
+        let a: Vec<u32> = e[..10 * n].iter().map(|v| v.to_bits()).collect();
+        let b: Vec<u32> = e[10 * n..].iter().map(|v| v.to_bits()).collect();
+        self.queue.write_buffer(&self.pops[self.cur][0], 0, bytemuck::cast_slice(&a));
+        self.queue.write_buffer(&self.pops[self.cur][1], 0, bytemuck::cast_slice(&b));
+        Ok(())
     }
 
     pub fn adapter_name(&self) -> &str {
@@ -4042,7 +4151,7 @@ impl Gpu3D {
             c18: (18.0 * self.cs * self.cs) as f32,
             write_macro: write_macro as u32,
             les: self.les as u32,
-            rows: self.nested as u32 | ((self.ground as u32) << 1) | ((self.periodic_span as u32) << 2),
+            rows: self.nested as u32 | ((self.ground as u32) << 1) | ((self.periodic_span as u32) << 2) | ((self.periodic_x as u32) << 3),
             sa: self.sa as u32 + self.keps as u32,
             nu: self.nu as f32,
             les_a: self.les_a as f32,
