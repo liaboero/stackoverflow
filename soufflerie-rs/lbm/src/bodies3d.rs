@@ -713,6 +713,202 @@ impl Body3D {
     }
 }
 
+/// Corps d'Ahmed (Ahmed, Ramm et Faltin 1984, SAE 840300) : dimensions (mm).
+pub mod ahmed {
+    pub const LONGUEUR: f64 = 1044.0;
+    pub const LARGEUR: f64 = 389.0;
+    pub const HAUTEUR: f64 = 288.0;
+    /// Rayon des arrondis de l'avant.
+    pub const RAYON: f64 = 100.0;
+    /// Longueur de la lunette, mesurée le long de la pente.
+    pub const LUNETTE: f64 = 222.0;
+    /// Garde au sol.
+    pub const GARDE: f64 = 50.0;
+    pub const PIED_DIAMETRE: f64 = 30.0;
+    /// Centres des quatre pieds (x depuis l'avant, y depuis le plan de
+    /// symétrie). En x : 202 et 672 mm (entraxe 470 mm, dessin d'Ahmed) ; en
+    /// y : ±163,5 mm, valeur reprise de la littérature et non vérifiée à la
+    /// source (Ahmed corrige sa traînée de celle des pieds).
+    pub const PIEDS: [[f64; 2]; 4] = [[202.0, -163.5], [202.0, 163.5], [672.0, -163.5], [672.0, 163.5]];
+    /// Exposant de la super-ellipse des coins avant à mi-congé (x = 50 mm),
+    /// ajusté sur la géométrie d'origine (fichier `Ahmed_Front_Geo.dat`
+    /// d'ERCOFTAC, données de S. R. Ahmed) : les coins s'arrondissent à
+    /// l'avant et deviennent vifs à x = 100 mm.
+    pub const EXPOSANT_COIN: f64 = 8.0;
+}
+
+/// Nœuds de [a, b] espacés d'au plus `ds`, avec les valeurs imposées
+/// `forced` ; un nœud régulier trop proche d'un nœud imposé est retiré.
+fn ahmed_nodes(a: f64, b: f64, forced: &[f64], ds: f64) -> Vec<f64> {
+    let n = ((b - a) / ds).ceil().max(1.0) as usize;
+    let mut f: Vec<f64> = forced.iter().copied().filter(|&v| v > a && v < b).collect();
+    f.push(a);
+    f.push(b);
+    let mut out: Vec<f64> = (1..n)
+        .map(|k| a + (b - a) * k as f64 / n as f64)
+        .filter(|&v| f.iter().all(|&g| (v - g).abs() > 0.3 * ds))
+        .collect();
+    out.extend(f);
+    out.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    out.dedup_by(|p, q| (*p - *q).abs() < 1e-9);
+    out
+}
+
+/// Corps d'Ahmed maillé (mm) : x de l'avant (0) vers l'arrière, y latéral,
+/// z vers le haut depuis le dessous de la caisse (le sol est à z = −50).
+/// Lunette de `slant_deg` degrés ; avec `stilts`, quatre pieds de 30 mm qui
+/// descendent jusqu'à z = −50 − `depth` (ils traversent le plancher de
+/// `depth` pour ne pas laisser de fente sous eux). Facettes d'au plus `ds`
+/// environ : l'intégration des efforts sur la surface relève la pression au
+/// centre de chaque triangle. Maillage fermé, normales sortantes.
+///
+/// Avant : congés de 100 mm sur les quatre arêtes de la face avant ; la
+/// section à l'abscisse x < 100 est le rectangle intérieur (|y| ≤ 94,5,
+/// 100 ≤ z ≤ 188) élargi de r = √(100² − (100 − x)²) avec des coins en
+/// super-ellipse d'exposant 4 / w, w = (100 − x)/100 (8 à mi-congé, vifs à
+/// x = 100), ce qui reproduit la géométrie d'origine à quelques millimètres
+/// près. Arêtes longitudinales, de lunette et de culot vives.
+pub fn ahmed_tris(slant_deg: f64, stilts: bool, ds: f64, depth: f64) -> Vec<Tri> {
+    use ahmed::*;
+    let (l, hw, h, r0) = (LONGUEUR, LARGEUR / 2.0, HAUTEUR, RAYON);
+    let (cy, zlo, zhi) = (hw - r0, r0, h - r0);
+    let phi = slant_deg.to_radians();
+    let xs = l - LUNETTE * phi.cos();
+    let ztop = |x: f64| if x <= xs { h } else { h - (x - xs) * phi.tan() };
+    let a = 25.0; // demi-côté de la fenêtre carrée autour de chaque pied
+    let rp = PIED_DIAMETRE / 2.0;
+    let pieds: Vec<[f64; 2]> = if stilts { PIEDS.to_vec() } else { Vec::new() };
+    // Pourtour de la section (rectangle hw × h) : dessous de −hw à hw, côté
+    // droit, dessus, côté gauche.
+    let mut fy = vec![-cy, cy];
+    for p in &pieds {
+        fy.extend([p[1] - a, p[1] + a]);
+    }
+    let ys = ahmed_nodes(-hw, hw, &fy, ds);
+    let zs = ahmed_nodes(0.0, h, &[zlo, zhi], ds);
+    let mut perim: Vec<[f64; 2]> = ys.iter().map(|&y| [y, 0.0]).collect();
+    let nbot = perim.len();
+    perim.extend(zs[1..].iter().map(|&z| [hw, z]));
+    perim.extend(ys.iter().rev().skip(1).map(|&y| [y, h]));
+    perim.extend(zs.iter().rev().skip(1).take(zs.len() - 2).map(|&z| [-hw, z]));
+    let np = perim.len();
+    // Sections : congé avant (pas angulaire), puis x ≥ 100.
+    let nf = (std::f64::consts::FRAC_PI_2 * r0 / ds).ceil() as usize;
+    let mut stations: Vec<f64> = (0..nf).map(|j| r0 * (1.0 - (std::f64::consts::FRAC_PI_2 * j as f64 / nf as f64).cos())).collect();
+    let mut fx = vec![xs];
+    for p in &pieds {
+        fx.extend([p[0] - a, p[0] + a]);
+    }
+    stations.extend(ahmed_nodes(r0, l, &fx, ds));
+    let section = |x: f64| -> Vec<[f64; 3]> {
+        if x >= r0 {
+            let k = ztop(x) / h;
+            return perim.iter().map(|&[y, z]| [x, y, z * k]).collect();
+        }
+        let w = (r0 - x) / r0;
+        let r = r0 * (1.0 - w * w).max(0.0).sqrt();
+        let p = 0.5 * EXPOSANT_COIN / w.max(1e-9);
+        perim
+            .iter()
+            .map(|&[y, z]| {
+                let dy = (y.abs() - cy).max(0.0);
+                let dz = if z < zlo { zlo - z } else if z > zhi { z - zhi } else { 0.0 };
+                let m = dy.max(dz);
+                let norm = if p > 500.0 { m } else { m * ((dy / m).powf(p) + (dz / m).powf(p)).powf(1.0 / p) };
+                let s = if norm > 0.0 { r / norm } else { 0.0 };
+                let yy = if dy > 0.0 { y.signum() * (cy + dy * s) } else { y };
+                let zz = if z < zlo { zlo - dz * s } else if z > zhi { zhi + dz * s } else { z };
+                [x, yy, zz]
+            })
+            .collect()
+    };
+    let rings: Vec<Vec<[f64; 3]>> = stations.iter().map(|&x| section(x)).collect();
+    let mut out: Vec<Tri> = Vec::new();
+    // Triangle orienté selon `dir` (normale sortante approchée).
+    let mut push = |t: Tri, dir: [f64; 3]| {
+        let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
+        let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        out.push(if dot3(n, dir) >= 0.0 { t } else { [t[0], t[2], t[1]] });
+    };
+    let quad = |a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]| [[a, b, c], [a, c, d]];
+    let hole = |x0: f64, x1: f64, y0: f64, y1: f64| {
+        pieds.iter().any(|p| x0 >= p[0] - a - 1e-9 && x1 <= p[0] + a + 1e-9 && y0 >= p[1] - a - 1e-9 && y1 <= p[1] + a + 1e-9)
+    };
+    // Bandes entre sections.
+    for i in 0..rings.len() - 1 {
+        let (ra, rb) = (&rings[i], &rings[i + 1]);
+        let (xa, xb) = (stations[i], stations[i + 1]);
+        let xm = 0.5 * (xa + xb);
+        let zc = if xm < r0 { 0.5 * h } else { 0.5 * ztop(xm) };
+        for j in 0..np {
+            let k = (j + 1) % np;
+            if j + 1 < nbot && xa >= r0 && hole(xa, xb, ys[j], ys[j + 1]) {
+                continue;
+            }
+            for t in quad(ra[j], ra[k], rb[k], rb[j]) {
+                let c = [0, 1, 2].map(|q| (t[0][q] + t[1][q] + t[2][q]) / 3.0);
+                push(t, [-(r0 - xm).max(0.0), c[1], c[2] - zc]);
+            }
+        }
+    }
+    // Bouchons plans par anneaux homothétiques (face avant, culot).
+    let cap = |ring: &[[f64; 3]], dir: [f64; 3], push: &mut dyn FnMut(Tri, [f64; 3])| {
+        let n = ring.len() as f64;
+        let c = [0, 1, 2].map(|q| ring.iter().map(|p| p[q]).sum::<f64>() / n);
+        let rmax = ring.iter().map(|p| ((p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt()).fold(0.0, f64::max);
+        let nk = (rmax / ds).ceil().max(1.0) as usize;
+        let at = |p: [f64; 3], s: f64| [0, 1, 2].map(|q| c[q] + s * (p[q] - c[q]));
+        for k in 0..nk {
+            let (s0, s1) = (k as f64 / nk as f64, (k + 1) as f64 / nk as f64);
+            for j in 0..ring.len() {
+                let jn = (j + 1) % ring.len();
+                for t in quad(at(ring[j], s0), at(ring[jn], s0), at(ring[jn], s1), at(ring[j], s1)) {
+                    push(t, dir);
+                }
+            }
+        }
+    };
+    cap(&rings[0], [-1.0, 0.0, 0.0], &mut push);
+    cap(&rings[rings.len() - 1], [1.0, 0.0, 0.0], &mut push);
+    // Pieds : couronne carré → cercle dans le dessous, fût, fond.
+    for p in &pieds {
+        let ia: Vec<usize> = (0..stations.len()).filter(|&i| stations[i] >= p[0] - a - 1e-9 && stations[i] <= p[0] + a + 1e-9).collect();
+        let ja: Vec<usize> = (0..nbot).filter(|&j| ys[j] >= p[1] - a - 1e-9 && ys[j] <= p[1] + a + 1e-9).collect();
+        let (y0, y1) = (ys[ja[0]], ys[*ja.last().unwrap()]);
+        let (x0, x1) = (stations[ia[0]], stations[*ia.last().unwrap()]);
+        let mut sq: Vec<[f64; 3]> = Vec::new();
+        sq.extend(ia.iter().map(|&i| [stations[i], y0, 0.0]));
+        sq.extend(ja.iter().skip(1).map(|&j| [x1, ys[j], 0.0]));
+        sq.extend(ia.iter().rev().skip(1).map(|&i| [stations[i], y1, 0.0]));
+        sq.extend(ja.iter().rev().skip(1).take(ja.len() - 2).map(|&j| [x0, ys[j], 0.0]));
+        let circ = |q: [f64; 3], z: f64| {
+            let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+            let d = dx.hypot(dy);
+            [p[0] + rp * dx / d, p[1] + rp * dy / d, z]
+        };
+        let zb = -GARDE - depth;
+        let nzs = ((GARDE + depth) / ds).ceil().max(1.0) as usize;
+        let n = sq.len();
+        for j in 0..n {
+            let k = (j + 1) % n;
+            for t in quad(sq[j], sq[k], circ(sq[k], 0.0), circ(sq[j], 0.0)) {
+                push(t, [0.0, 0.0, -1.0]);
+            }
+            for m in 0..nzs {
+                let (z0, z1) = (-(GARDE + depth) * m as f64 / nzs as f64, -(GARDE + depth) * (m + 1) as f64 / nzs as f64);
+                let dir = [sq[j][0] - p[0], sq[j][1] - p[1], 0.0];
+                for t in quad(circ(sq[j], z0), circ(sq[k], z0), circ(sq[k], z1), circ(sq[j], z1)) {
+                    push(t, dir);
+                }
+            }
+        }
+        let bottom: Vec<[f64; 3]> = sq.iter().map(|&q| circ(q, zb)).collect();
+        cap(&bottom, [0.0, 0.0, -1.0], &mut push);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +920,23 @@ mod tests {
             .into_iter()
             .map(|t| t.map(|p| [50.0 * p[0], 12.5 * p[1], 9.0 * p[2]]))
             .collect()
+    }
+
+    #[test]
+    fn ahmed_ferme() {
+        use super::ahmed::*;
+        for (phi, pieds) in [(25.0, true), (35.0, false)] {
+            let (t, d) = crate::stl::clean(ahmed_tris(phi, pieds, 8.0, 5.0));
+            assert!(d.watertight(), "{phi}° : {}", d.summary());
+            assert_eq!(d.flipped_edges, 0);
+            let (lo, hi) = crate::stl::bbox(&t);
+            assert!((hi[0] - lo[0] - LONGUEUR).abs() < 1e-9 && (hi[1] - lo[1] - LARGEUR).abs() < 1e-9);
+            assert!((hi[2] - HAUTEUR).abs() < 1e-9);
+            let p = phi.to_radians();
+            let v0 = LONGUEUR * LARGEUR * HAUTEUR - 0.5 * LUNETTE * LUNETTE * p.sin() * p.cos() * LARGEUR;
+            // Congés de l'avant : de l'ordre de 2 % du volume.
+            assert!(d.volume > 0.95 * v0 && d.volume < 0.995 * v0, "{phi}° : {} contre {v0}", d.volume);
+        }
     }
 
     fn voxels(b: &Body3D) -> usize {
