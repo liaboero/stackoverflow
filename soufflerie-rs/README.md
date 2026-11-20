@@ -2092,11 +2092,12 @@ d'énergie) et du réseau : D3Q27 pour le terme xyz, D3Q39 pour le
 compressible (tâches ultérieures).
 
 **Effet sur l'aile infinie** (4°, 64 mailles par corde, L = 16 + ×4,
-ny = 40) : à mesurer (`aile_infinie 16 2 6e6 4 12 - 40 12 0`, puis
-`… 268435456`) ; GPU occupé par d'autres calculs lors de cette tâche.
-Attendu négligeable : le défaut ne porte que sur la contrainte visqueuse,
-prise en charge par la loi de paroi près de la maquette à Re = 6·10⁶. Coût
-par pas non mesuré (une dizaine d'opérations par maille, sous le bit).
+ny = 40, 12 cordes, bilan sur boîte à 0,05 corde) : Cz 0,4552 → 0,4556,
+Cx 0,0156 → 0,0160 ; surface Cz 0,4495 → 0,4499, Cx 0,0130 → 0,0131.
+Négligeable comme attendu : le défaut ne touche que la contrainte
+visqueuse, en ν (Re = 6·10⁶, sous-maille et loi de paroi près de la
+maquette), et au Mach du calcul (u = 0,1) la correction ne change cette
+contrainte que de quelques pour cent là où elle compte peu.
 
 ## Validation 3D
 
@@ -2443,3 +2444,16 @@ soufflerie-rs/
 - Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter
   (cargo-apk / xbuild). Sur téléphone, l'application web reste la plus
   simple à installer.
+
+## Coût de calcul des modifications
+
+### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
+
+Cas : `aile_infinie 16 2 6e6 4 <t> - 40 12 <essai>` (64 mailles par
+corde), GTX 1070. Sans le bit, le shader est identique au précédent :
+coût inchangé par construction. Avec le bit : une dizaine d'opérations
+par maille dans la collision, aucun accès mémoire, aucun tampon (mémoire
+inchangée). Mesuré GPU seul : 84 s pour 12 cordes sans le bit, 24 s pour
+4 cordes avec (28 s attendues au prorata) ; pas d'écart mesurable. Les
+autres mesures ont été faussées par des calculs d'autres sessions sur le
+même GPU (×1,5 à ×2,7 dans un sens comme dans l'autre).
