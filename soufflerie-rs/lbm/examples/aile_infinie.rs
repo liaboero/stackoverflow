@@ -126,7 +126,9 @@ fn main() {
     // (`lbm::raff_paroi`), n niveaux de plus que la grille de base, choisis
     // sur un premier calcul de la grille de base (`--raff-paroi-t` cordes,
     // défaut min(t, 6)) ; `--raff-paroi-bande b` : épaisseur du niveau le
-    // plus fin (mailles ; défaut max(16, 0,125 L)) ; AILE_ZONE_Y=w : zones
+    // plus fin (mailles ; défaut max(16, 0,125 L)) ; `--raff-paroi-sillage s` :
+    // sillage des couches de s fois leur épaisseur (défaut 0 : le sillage des
+    // couches creuses fausse le bilan, voir le README) ; AILE_ZONE_Y=w : zones
     // limitées à une largeur w (mailles de la veine) autour de la tranche
     // centrale (coût).
     let opt = |k: &str| a.iter().position(|v| v == k).and_then(|i| a.get(i + 1)).and_then(|v| v.parse::<f64>().ok());
@@ -170,7 +172,11 @@ fn main() {
         let wy: Option<f64> = std::env::var("AILE_ZONE_Y").ok().and_then(|v| v.parse().ok());
         let cen = |t: &lbm::stl::Tri| [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
         let keep = |i: usize| wy.is_none_or(|w| (cen(&tris[i])[1] - yc).abs() <= 0.5 * w);
-        let zones = lbm::raff_paroi::zones(&beta, nz, keep);
+        // AILE_ZONE_TOUT=1 : toute la surface (contrôle : couche sans raccord
+        // coupant la paroi, comme `--bande`).
+        let tout = std::env::var("AILE_ZONE_TOUT").is_ok();
+        let beta_z: Vec<f64> = if tout { vec![f64::INFINITY; beta.len()] } else { beta.clone() };
+        let zones = lbm::raff_paroi::zones(&beta_z, nz, keep);
         let bands_z = lbm::raff_paroi::bands(lf, raff, nz, opt("--raff-paroi-bande"));
         // Résumé sur la tranche centrale : part de corde couverte par
         // niveau, extrados et intrados, et β le long de l'extrados.
@@ -226,7 +232,7 @@ fn main() {
         }
         let v: Vec<String> = bins.iter().enumerate().map(|(b, x)| format!("{:.2}:{:.2}", (b as f64 + 0.5) / 20.0, x[0] / x[1].max(1.0))).collect();
         println!("  β extrados (x/c:β moyen) {}", v.join(" "));
-        lbm::raff_paroi::plan(raff, &zones, &bands_z)
+        lbm::raff_paroi::plan(raff, &zones, &bands_z, opt("--raff-paroi-sillage").unwrap_or(0.0))
     });
     let mut sim = match (paroi_plan, lbm::raff_auto::options_from_args(&a)) {
         (Some(p), _) => Gpu3D::with_plan(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), &p).unwrap(),

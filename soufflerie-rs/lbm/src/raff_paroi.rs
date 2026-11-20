@@ -29,7 +29,12 @@
 //! Les niveaux sont des couches creuses (`LayerSpec::zone`) imbriquées sous
 //! les grilles boîtes de base : épaisseur selon la règle de `raff_auto`
 //! (max(16 mailles, 0,125 L) au niveau le plus fin, puis `nested_bands`),
-//! sillage de même longueur que l'épaisseur.
+//! sillage en fraction de l'épaisseur (0 conseillé : sur l'aile infinie, le
+//! sillage balayé des couches creuses ajoute au bilan une traînée qui croît
+//! avec la marge, README « Raffinement de paroi par zones »).
+//!
+//! Limite connue : là où la zone s'arrête sur la paroi, le raccord coupe la
+//! surface (comme les grilles des bords) et ajoute de la traînée.
 
 use crate::gpu3d::{LayerSpec, RefinePlan, SurfaceForces, ZoneRegion};
 use crate::stl::Tri;
@@ -158,15 +163,16 @@ pub fn bands(l: f64, depth: usize, n: usize, finest: Option<f64>) -> Vec<f64> {
 }
 
 /// Plan : `depth` boîtes de base (`refine3d::EXTENT3`), puis une couche par
-/// zone (masques `zones`, épaisseurs `bands`), sillage égal à l'épaisseur.
-pub fn plan(depth: usize, zones: &[Vec<bool>], bands: &[f64]) -> RefinePlan {
+/// zone (masques `zones`, épaisseurs `bands`), sillage de `wake` fois
+/// l'épaisseur.
+pub fn plan(depth: usize, zones: &[Vec<bool>], bands: &[f64], wake: f64) -> RefinePlan {
     let depth = depth.min(crate::refine3d::EXTENT3.len());
     RefinePlan {
         boxes: crate::refine3d::EXTENT3[..depth].to_vec(),
         layers: zones
             .iter()
             .zip(bands)
-            .map(|(z, &b)| LayerSpec { band: b, wake: b, edges: None, zone: Some(std::sync::Arc::new(ZoneRegion { tris: z.clone() })) })
+            .map(|(z, &b)| LayerSpec { band: b, wake: (wake * b).ceil(), edges: None, zone: Some(std::sync::Arc::new(ZoneRegion { tris: z.clone() })) })
             .collect(),
         le: false,
         te: false,
