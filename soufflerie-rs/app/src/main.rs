@@ -826,6 +826,7 @@ fn cmd_run3d(a: &Args) {
             wall_cells: raff_auto,
             wake: a.get("raff-auto-sillage", 1.0f64),
             edges: a.get("raff-auto-bords", 0usize) > 0,
+            sparse: a.get("raff-auto-creux", 0usize) > 0,
         };
         let ap = lbm::raff_auto::auto_plan(&body, &o).unwrap_or_else(|e| {
             eprintln!("{e}");

@@ -18,11 +18,15 @@
 //!
 //! Les grilles imbriquées sont des boîtes ou des couches creuses. Une boîte
 //! est l'enveloppe exacte de sa région : maquette ± d_k, plus W_k vers
-//! l'aval. Les niveaux grossiers sont des boîtes tant que la boîte ne fait
-//! pas plus de deux fois le volume de la région décalée (`BOX_RATIO` : le
-//! stockage par blocs de 8³ garde aussi des blocs entamés et des fantômes) ;
-//! le premier niveau est toujours une boîte (bilans sur boîte, champs). Les
-//! suivants sont des couches creuses (`LayerSpec`), sillage compris.
+//! l'aval. Par défaut, les niveaux 1 à n − 1 sont des boîtes et seul le
+//! niveau de la paroi est une couche creuse (`LayerSpec`, sillage compris) :
+//! le bilan sur boîte, mesure de référence de la traînée, s'intègre sur la
+//! grille entière la plus fine, qui doit rester à un niveau de la paroi
+//! (sur la grille ×2 de TR-1208, il donne un Cx négatif). Avec
+//! `--raff-auto-creux 1`, un niveau n'est une boîte que si elle ne fait pas
+//! plus de deux fois le volume de sa région (`BOX_RATIO` : le stockage par
+//! blocs de 8³ garde 1,6 fois les mailles actives, blocs entamés et
+//! fantômes) ; le premier niveau reste une boîte.
 //!
 //! Bords (`--raff-auto-bords 1`, essai) : un niveau de plus, limité aux
 //! arêtes vives (angle dièdre ≥ 60°, `geom3d::FEATURE_DEG` : bord de fuite,
@@ -53,11 +57,14 @@ pub struct AutoOptions {
     pub wake: f64,
     /// Niveau de plus près des bords.
     pub edges: bool,
+    /// Niveaux intermédiaires en couches creuses dès que la boîte dépasse
+    /// `BOX_RATIO` fois la région (sinon boîtes jusqu'au niveau n − 1).
+    pub sparse: bool,
 }
 
 impl Default for AutoOptions {
     fn default() -> Self {
-        AutoOptions { wall_cells: 0, wake: 1.0, edges: false }
+        AutoOptions { wall_cells: 0, wake: 1.0, edges: false, sparse: false }
     }
 }
 
@@ -224,8 +231,13 @@ pub fn auto_plan(body: &Body3D, o: &AutoOptions) -> Result<AutoPlan, String> {
     let d_layer = offsets(l, n, 0, extra);
     let mut nb = 1;
     let mesh = body.mesh.is_some();
+    let need = if o.sparse { 1 } else { n.saturating_sub(1).max(1) };
     while nb < n {
         let d = d_layer[nb];
+        if nb < need {
+            nb += 1;
+            continue;
+        }
         let w = o.wake * d;
         if mesh && box_vol(d, w) > BOX_RATIO * region_volume(body, d, w) {
             break;
@@ -275,7 +287,8 @@ pub fn auto_plan(body: &Body3D, o: &AutoOptions) -> Result<AutoPlan, String> {
 }
 
 /// `--raff-auto N` dans une liste d'arguments (N, ou None), avec
-/// `--raff-auto-sillage s` et `--raff-auto-bords 1` : options des exemples.
+/// `--raff-auto-sillage s`, `--raff-auto-bords 1` et `--raff-auto-creux 1` :
+/// options des exemples.
 pub fn options_from_args(args: &[String]) -> Option<AutoOptions> {
     let val = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<f64>().ok());
     let n = val("--raff-auto")?;
@@ -283,6 +296,7 @@ pub fn options_from_args(args: &[String]) -> Option<AutoOptions> {
         wall_cells: n as usize,
         wake: val("--raff-auto-sillage").unwrap_or(1.0),
         edges: val("--raff-auto-bords").unwrap_or(0.0) > 0.0,
+        sparse: val("--raff-auto-creux").unwrap_or(0.0) > 0.0,
     })
 }
 

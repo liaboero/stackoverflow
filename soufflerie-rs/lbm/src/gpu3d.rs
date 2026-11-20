@@ -2606,7 +2606,6 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
         })
         .collect();
     let map = SparseMap::new(bd, &used);
-    let ns = map.slots() * SB3;
     temps("couche : blocs", tb);
     // Type et distance de chaque maille gardée.
     let ghost = crate::refine3d::GHOST;
@@ -2710,6 +2709,7 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
     } else {
         (map, cells)
     };
+    let ns = map.slots() * SB3;
     let mut wall: Vec<u32> = cells.iter().map(|c| c.0).collect();
     let dist: Vec<f32> = cells.iter().map(|c| c.1).collect();
     let solid_count = wall.iter().filter(|&&w| w == SOLID).count();
