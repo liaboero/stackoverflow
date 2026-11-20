@@ -77,6 +77,8 @@ struct Parts {
     /// Pieds : total, et partie au-dessus de la face basse des boîtes.
     pieds: f64,
     pieds_haut: f64,
+    /// Cp maximal sur l'avant (point d'arrêt), sommé sur les relevés.
+    cp_arret: f64,
 }
 
 fn main() {
@@ -179,6 +181,7 @@ fn main() {
     let mut parts = Parts::default();
     let mut nsurf = 0usize;
     let mut manque = 0.0;
+    let mut pref_acc = 0.0;
     let mut next_print = spt;
     while step < total {
         if step == debut {
@@ -221,13 +224,30 @@ fn main() {
                     }
                 }
             }
+            // Pression de référence p∞ : moyenne sur la section de veine à
+            // mi-chemin entre l'entrée et l'avant (la pression de la veine
+            // n'est pas fixée : seule l'entrée impose ρ = 1 aux populations
+            // entrantes). Une pression uniforme ne change pas Cx, mais bien
+            // sa répartition entre l'avant, la lunette et le culot.
+            let xp = (0.5 * bb.x0).round() as usize;
+            let (mut ps, mut pn) = (0.0f64, 0usize);
+            for z in 0..d[2] {
+                for y in 0..d[1] {
+                    let m = mac[xp + d[0] * (y + d[1] * z)];
+                    ps += (m[3] as f64 - 1.0) / 3.0;
+                    pn += 1;
+                }
+            }
+            let pref = ps / pn as f64;
+            pref_acc += pref;
             drop(mac);
             if let Some(sf) = sim.surface_forces() {
+                let mut cpmax = f64::MIN;
                 manque += sf.missed;
                 nsurf += 1;
                 for ((c, f), (nrm, pw)) in sf.loads.iter().zip(&sf.walls) {
                     let ar = aire.get(&key(*c)).copied().unwrap_or(0.0);
-                    let fp = -pw * nrm[0] * ar;
+                    let fp = -(pw - pref) * nrm[0] * ar;
                     let fr = f[0] - fp;
                     let p = to_mm(*c);
                     if p[2] < -0.5 {
@@ -240,6 +260,7 @@ fn main() {
                     parts.frott += fr;
                     if p[0] < ahmed::RAYON {
                         parts.k += fp;
+                        cpmax = cpmax.max((pw - pref) / (0.5 * (u as f64).powi(2)));
                     } else if nrm[0] > 0.9 && p[0] > ahmed::LONGUEUR - 1.0 {
                         parts.b += fp;
                     } else if nrm[0] > 0.05 && nrm[2] > 0.05 && p[0] > xs {
@@ -248,6 +269,7 @@ fn main() {
                         parts.autres += fp;
                     }
                 }
+                parts.cp_arret += cpmax;
             }
         }
     }
@@ -263,6 +285,11 @@ fn main() {
         "Surface (caisse seule) : Cx = {cx_surf:.4} · C_K avant {ck:.4} · C_S lunette {cs:.4} · C_B culot {cb:.4} · pression ailleurs {cautres:.4} · frottement {cf:.4} · C_R = Cx − C_K − C_S − C_B = {:.4} (non relevé {:.2} %)",
         cx_surf - ck - cs - cb,
         100.0 * manque / ns
+    );
+    println!(
+        "p∞ (section amont) : Cp = {:.4} par rapport à ρ = 1 · Cp au point d'arrêt {:.3}",
+        pref_acc / nsnap.max(1) as f64 / (0.5 * (u as f64).powi(2)),
+        parts.cp_arret / ns
     );
     println!("Pieds (surface) : Cx {cp_pieds:.4}, dont {cp_haut:.4} au-dessus de la face basse des boîtes (z = {z_cut_mm:.0} mm)");
     println!("Échange de quantité de mouvement (caisse et pieds) : Cx = {:.4}", fex.fx / q);
