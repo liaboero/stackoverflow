@@ -2270,6 +2270,9 @@ pub struct Gpu3D {
     surface: Option<std::sync::Arc<crate::stl::MeshBody>>,
     /// Décambrage visqueux par transpiration (voir `enable_transpiration`).
     transp: Option<Box<Transpiration>>,
+    /// Loi de paroi hors équilibre (TBLE, `set_paroi_tble`) et son état
+    /// (profils 1D sous chaque nœud pariétal) ; None : Spalding (défaut).
+    tble: Option<(crate::tble::ParoiTble, wgpu::Buffer)>,
 }
 
 /// Passe de la loi de paroi (voir `WALL3_WGSL`).
@@ -4329,6 +4332,7 @@ impl Gpu3D {
             rest_force,
             surface: body.mesh.clone(),
             transp: None,
+            tble: None,
         };
         s.set_viscosity(nu);
         s.reset(0.0);
@@ -4436,6 +4440,97 @@ impl Gpu3D {
                 g.essai_nu = (nu_cap * (1u64 << r.depth[k]) as f64) as f32;
             }
         }
+    }
+
+    /// Loi de paroi hors équilibre à équations de couche limite 1D (TBLE,
+    /// `crate::tble`) sur toutes les grilles, au lieu de u_τ de Spalding ;
+    /// None : retour à la passe par défaut. L'état des profils repart du
+    /// profil d'équilibre au premier pas qui suit.
+    pub fn set_paroi_tble(&mut self, mode: Option<crate::tble::ParoiTble>) {
+        self.set_paroi_tble_one(mode);
+        if let Some(r) = self.refine.as_mut() {
+            for g in r.levels.iter_mut() {
+                g.set_paroi_tble_one(mode);
+            }
+        }
+    }
+
+    /// Loi de paroi choisie (None : Spalding).
+    pub fn paroi_tble(&self) -> Option<crate::tble::ParoiTble> {
+        self.tble.as_ref().map(|t| t.0)
+    }
+
+    fn set_paroi_tble_one(&mut self, mode: Option<crate::tble::ParoiTble>) {
+        use crate::tble;
+        if self.wall_pass.is_none() {
+            return;
+        }
+        let psize = std::mem::size_of::<Params>() as u64;
+        let mut entries = vec![uniform(0, true, psize)];
+        for (b, ro) in [(1, true), (2, true), (3, true), (4, false), (5, true), (6, true), (7, true), (8, true)] {
+            entries.push(storage(b, ro));
+        }
+        let base = WALL3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS);
+        let code = match mode {
+            None => {
+                self.tble = None;
+                format!("{PARAMS_WGSL}{}", base.replace("SA_FNS", SA_FNS))
+            }
+            Some(m) => {
+                entries.push(storage(9, false));
+                let ys = tble::grille(WM_H, tble::premier_point(self.nu, self.u_in as f64));
+                let rep = |s: String, a: &str, b: &str| {
+                    assert_eq!(s.matches(a).count(), 1, "TBLE : ancre « {a} » introuvable ou multiple");
+                    s.replace(a, &format!("{a}{b}"))
+                };
+                let c = base.replace("SA_FNS", &format!("{SA_FNS}{}", tble::wgsl_fns(m, &ys)));
+                let c = rep(c, "    var pg = 0.0;\n", tble::WGSL_DECL);
+                let c = rep(c, "        yw = WM_H;\n", tble::WGSL_SOURCE);
+                let c = rep(c, "    var ut2 = mellor_utau(ut, yw, select(pg, 0.0, (P.essai & 33554432u) != 0u));\n", tble::WGSL_UTAU);
+                let size = (4 * tble::TB_N * self.wall_count.max(1)) as u64;
+                let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("tble3d"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                self.tble = Some((m, buf));
+                format!("{PARAMS_WGSL}{c}")
+            }
+        };
+        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("wall3d"), entries: &entries });
+        let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wall3d"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let module = compute_module(&self.device, "wall3d", code);
+        let pipe = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("wall3d"),
+            layout: Some(&pl),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let pb = Some(psize);
+        let mut be = vec![
+            buf_entry(0, &self.params, pb),
+            buf_entry(1, &self.macro_buf, None),
+            buf_entry(2, &self.wall, None),
+            buf_entry(3, &self._wall_geo, None),
+            buf_entry(4, &self._utau, None),
+            buf_entry(5, &self._dist, None),
+            buf_entry(6, &self._slab, None),
+            buf_entry(7, &self.blk_buf, None),
+            buf_entry(8, &self._wcell, None),
+        ];
+        if let Some((_, b)) = &self.tble {
+            be.push(buf_entry(9, b, None));
+        }
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("wall3d"), layout: &layout, entries: &be });
+        let disp = self.wall_disp;
+        self.wall_pass = Some(WallPass { pipe, bind, disp });
     }
 
     /// Veine périodique dans les trois directions (cas de validation sans
@@ -4569,6 +4664,9 @@ impl Gpu3D {
         }
         enc.clear_buffer(&self.force, 0, None);
         enc.clear_buffer(&self.macro_buf, 0, None);
+        if let Some((_, b)) = &self.tble {
+            enc.clear_buffer(b, 0, None);
+        }
         self.queue.submit([enc.finish()]);
         if self.sa {
             for b in &self.nut {

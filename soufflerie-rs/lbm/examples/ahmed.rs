@@ -137,6 +137,11 @@ fn main() {
     if essai != 0 {
         sim.set_essai(essai, 0.0);
     }
+    // Loi de paroi hors équilibre (TBLE) : SOUFFLERIE_TBLE=eq|gp|gpc.
+    if let Some(m) = lbm::tble::ParoiTble::from_env() {
+        sim.set_paroi_tble(Some(m));
+        println!("  loi de paroi : {}", m.nom());
+    }
     println!("{} · τ₀ = {:.6} · liens de paroi {}", sim.adapter_name(), sim.tau0, sim.wall_count);
     let spt = l as f64 / u as f64;
     let ramp = Ramp { steps: (4.0 * spt) as u64, u };

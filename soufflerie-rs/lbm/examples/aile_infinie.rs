@@ -176,6 +176,11 @@ fn main() {
         println!("  grille fine : z de {:.3} à {:.3} ; profil de {:.3} à {:.3} : marges {:.3} dessous, {:.3} dessus", org[2], org[2] + (d[2] - 1) as f64 / sc, zl, zh, zl - org[2], org[2] + (d[2] - 1) as f64 / sc - zh);
     }
     sim.periodic_span = true;
+    // Loi de paroi hors équilibre (TBLE) : SOUFFLERIE_TBLE=eq|gp|gpc.
+    if let Some(m) = lbm::tble::ParoiTble::from_env() {
+        sim.set_paroi_tble(Some(m));
+        println!("  loi de paroi : {}", m.nom());
+    }
     if essai != 0 {
         // AILE_NUCAP : plafond de ν (multiple de ν) pour les essais 1024 / 2048.
         let cap = std::env::var("AILE_NUCAP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
