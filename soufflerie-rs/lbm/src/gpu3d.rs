@@ -448,6 +448,24 @@ fn cell(xi: i32, yi: i32, zi: i32) -> u32 {
   return id_of(u32(xx), u32(yy), u32(zz));
 }
 
+// (u, ρ) interpolés (trilinéaire) en p ; ρ = 0 si un sommet est solide ou
+// hors veine.
+fn mac_at(p: vec3<f32>) -> vec4<f32> {
+  let i0 = vec3<i32>(floor(p));
+  let fr = p - vec3<f32>(i0);
+  var r = vec4<f32>(0.0);
+  for (var c = 0u; c < 8u; c++) {
+    let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
+    let q3 = i0 + o;
+    if (q3.x < 0 || q3.x >= i32(P.nx) || q3.z < 0 || q3.z >= i32(P.nz)) { return vec4<f32>(0.0); }
+    let ci = cell(q3.x, q3.y, q3.z);
+    if (wall[ci] >= 0xfffffffeu) { return vec4<f32>(0.0); }
+    let wv = select(1.0 - fr, fr, vec3<bool>(o.x == 1, o.y == 1, o.z == 1));
+    r += wv.x * wv.y * wv.z * macroBuf[ci];
+  }
+  return r;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let wk = gid.x + gid.y * nwg.x * 64u;
@@ -520,6 +538,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         // p = ρ c_s² = ρ/3.
         if ((P.essai & 8388608u) != 0u && ut > 1e-12) {
           pg = dot(gr, th) / (3.0 * rh * ut);
+          // Essai 536870912 : gradient filtré, différence centrée de ρ
+          // interpolé à h, à ±D = 2 mailles le long de u_h (moyenne du
+          // gradient sur 4 mailles le long de la paroi) : les fluctuations
+          // de pression du réseau, d'une à deux mailles, s'y annulent. Point
+          // non valide (solide, hors veine, autre paroi) : pas de gradient.
+          if ((P.essai & 536870912u) != 0u) {
+            let e = th / ut;
+            let mp = mac_at(ps + 2.0 * e);
+            let mm = mac_at(ps - 2.0 * e);
+            let ok2 = mp.w > 0.0 && mm.w > 0.0;
+            pg = select(0.0, (mp.w - mm.w) / (12.0 * rh), ok2);
+            // Essai 1073741824 (avec 536870912) : gradient de la pression
+            // totale à h, d(p/ρ + |u|²/2)/ds. Le long d'une ligne de courant
+            // il vaut (1/ρ) ∂τ/∂y à h, la divergence de contrainte que le
+            // fluide y subit réellement ; près de la paroi elle tend vers
+            // dp/ds. Nul quand l'écoulement à h est non visqueux (couche
+            // limite plus mince que h : loi d'équilibre retrouvée), il ne
+            // corrige que lorsque la couche limite épaissie atteint h.
+            if ((P.essai & 1073741824u) != 0u) {
+              pg = select(0.0, pg + (dot(mp.xyz, mp.xyz) - dot(mm.xyz, mm.xyz)) / 8.0, ok2);
+            }
+          }
         }
       }
     }
@@ -3931,7 +3971,12 @@ impl Gpu3D {
     /// 8388608 loi de paroi avec gradient de pression longitudinal
     /// (Townsend–Mellor, `WALL3_WGSL`) ; 16777216 (avec 8388608) viscosité
     /// de la couche pariétale κ u_τ h gardée ; 33554432 (avec 8388608) u_τ
-    /// de Spalding, gradient dans le seul profil de la couche pariétale.
+    /// de Spalding, gradient dans le seul profil de la couche pariétale ;
+    /// 67108864 glissement signé, porté par la vitesse relevée à h ;
+    /// 134217728 (avec 67108864) sans plancher ; 268435456 ν_t = max(ν_SA,
+    /// ν_Smagorinsky) au lieu de la somme ; 536870912 (avec 8388608) gradient
+    /// de pression filtré sur ±2 mailles le long de la paroi ; 1073741824
+    /// (avec les deux précédents) gradient de pression totale à h.
     pub fn set_essai(&mut self, bits: u32, nu_cap: f64) {
         self.essai = bits;
         self.essai_nu = nu_cap as f32;
