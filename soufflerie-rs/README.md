@@ -447,7 +447,8 @@ ni la crise ni la remontée ; sans elle, la sphère reste sous-critique.
 **Corps d'Ahmed à 25° sur sol mobile** (60 m/s, Re = 4,3·10⁶, garde au sol
 50 mm, sans pieds ; mesure : Cx = 0,285) : Cx 0,78 à L = 32 (garde au sol
 d'une maille et demie : soubassement bouché, Cz = 1,5), 0,60 à L = 64
-(Cz = 1,0, lâcher périodique). Hors de portée sans raffinement près du sol.
+(Cz = 1,0, lâcher périodique). Hors de portée sans raffinement près du sol. Cas repris avec la maquette complète
+(pieds, Re = 2,78·10⁶) : voir « Corps d'Ahmed » dans la validation 3D.
 Une sphère à un diamètre du sol garde une portance faible (Cz = 0,03) :
 la condition de sol elle-même est saine.
 
@@ -1363,6 +1364,14 @@ est 1,3 fois la mesure avec la couche ×8 (0,015 à 4°, 0,026 à 8°), contre
 affinant. Celle de l'aile AR 4 passe sous l'estimation de VSPAERO (dont la
 traînée de frottement est une formule de plaque plane).
 
+**Automobile, corps d'Ahmed** (sol mobile, Re = 2,78·10⁶, L = 96,
+grille la plus fine utilisable ; détail dans « Corps d'Ahmed ») :
+
+| Cas | Cx boîte (surface) | Mesure | Écart |
+| --- | --- | --- | --- |
+| Lunette 25° | 0,434 (0,395) | 0,285 | +52 % (+39 %) ; lunette juste, avant ×3,6, culot ×2 |
+| Lunette 35° | 0,696 (0,676) | ≈ 0,26 | ×2,7 : la lunette ne décolle pas |
+
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
 
 | Contrôle | Cz boîte | Cz surface | Cz échange |
@@ -2196,6 +2205,94 @@ l'aile 3D à Re = 1000) : l'écart mesure l'effet du Reynolds, pas une erreur.
 À incidence nulle, l'aile 3D garde un Cz de −0,03 à Re = 1000 (−0,007 à
 Re = 200) alors qu'il devrait être nul : à examiner (décalage d'un quart de
 maille de la maquette, ou sillage instationnaire).
+
+### Corps d'Ahmed (premier cas automobile)
+
+`cargo run --release --example ahmed -- --phi 25 --l 96 --marge 0.4 --t 16 --moy 8`
+(lunette 25° ou 35°). Mesures de Lienhart et Schenk dans `validation/ahmed/`
+(`lienhart_*_y0.csv`), résultats dans `validation/ahmed/resultats.csv`
+(une ligne par calcul) et `profils_*_L96.csv`.
+
+**Maquette.** `bodies3d::ahmed_tris` : 1044 × 389 × 288 mm, congés avant
+de 100 mm, lunette de 222 mm (le long de la pente), garde au sol 50 mm,
+quatre pieds de 30 mm (centres à 202 et 672 mm de l'avant, ±163,5 mm en
+y ; position latérale non vérifiée à la source). Les coins avant sont des
+super-ellipses ajustées sur la géométrie d'origine (fichier ERCOFTAC
+`Ahmed_Front_Geo.dat`) : écart médian 1,5 mm. Maillage fermé (test
+`ahmed_ferme`).
+
+**Conditions.** U = 40 m/s, Re = 2,78·10⁶ sur la longueur (Lienhart et
+Becker ; Ahmed mesurait à 60 m/s, Re = 4,29·10⁶). Veine : marge 0,4 L
+autour de la maquette, blocage 3,3 %.
+
+**Sol mobile.** La soufflerie n'a que le sol mobile (paroi qui défile à la
+vitesse amont, z = −½, plafond glissant), et seulement sur la grille de
+base : le raffinement local ne le gère pas encore. Les essais ont un
+plancher fixe (planche de sol, couche limite de quelques millimètres sous
+la maquette). Effet attendu : faible sur Cx (quelques pour cent) ; débit
+sous la caisse un peu plus fort sur sol mobile.
+
+**Mesures de la traînée.**
+- *Boîte* : bilan de quantité de mouvement sur trois boîtes (±0,1, ±0,2
+  et ±0,3 L), face basse à mi-garde, extrapolé à volume nul ; le haut des
+  pieds (au-dessus de cette face) est retiré par son intégrale de surface.
+- *Surface* : intégrale des efforts sur la caisse seule (sans les pieds,
+  comme la mesure d'Ahmed corrigée de la tare des pieds).
+- *Décomposition d'Ahmed* : pression intégrée sur l'avant (x < 100 mm,
+  C_K), la lunette (C_S) et le culot (C_B), par rapport à la pression p∞
+  relevée sur une section amont (la pression de la veine n'est fixée
+  qu'aux populations entrantes) ; C_R = Cx − C_K − C_S − C_B (frottement
+  et pression résiduelle).
+
+**Références.**
+- Cx à 25° : 0,285 (Ahmed, Ramm et Faltin 1984 ; [décomposition reprise par COMSOL](https://doc.comsol.com/6.1/doc/com.comsol.help.models.cfd.ahmed_body/ahmed_body.html) :
+  C_K 0,020, C_S 0,140, C_B 0,070, C_R 0,055 ; SimScale retient 0,2875).
+- Cx à 35° : ≈ 0,26 (figure 4 d'Ahmed, lue par d'autres auteurs, non
+  vérifiée à la source).
+- Le tableau 1 d'Ahmed (SAE 840300) ne décompose que 5°, 12,5° et 30° ; son
+  texte donne C_K = 0,016 constant quelle que soit la lunette.
+- Profils : [ERCOFTAC AC1-05](https://kbwiki.ercoftac.org/w/index.php/Test_Data_AC1-05)
+  (Lienhart et Schenk, LDA, plan de symétrie, x depuis le culot).
+
+**Résultats** (12 à 16 t*, moyenne sur 4 à 8 t*) :
+
+| Cas | L (h) | Cx boîte | Cx surface | C_K | C_S | C_B | C_R | \|ΔU\|/Ub |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 25° | 64 (16 mm) | 0,454 | 0,512 | 0,113 | 0,134 | 0,226 | 0,039 | 0,078 |
+| 25° | 96 (11 mm) | 0,434 | 0,395 | 0,072 | 0,132 | 0,144 | 0,047 | 0,062 |
+| 25°, mesure | | 0,285 | | 0,020 (0,016) | 0,140 | 0,070 | 0,055 | |
+| 35° | 64 | 0,588 | 0,606 | 0,103 | 0,330 | 0,130 | 0,042 | 0,323 |
+| 35° | 96 | 0,696 | 0,676 | 0,072 | 0,410 | 0,143 | 0,051 | 0,343 |
+| 35°, mesure | | ≈ 0,26 | | 0,016 | — | — | — | |
+
+L = 96 (15,1 M mailles, 5 min) est la plus fine grille utilisable : au-delà
+d'environ 16 M mailles, le calcul ne progresse plus (débit affiché aberrant,
+mémoire de l'hôte saturée), bien en deçà des 8 Go de la carte. Doubler la
+durée de moyenne change Cx d'environ 1 %.
+
+**Écarts** (sans recalage) :
+- *25°* : Cx 1,4 à 1,5 fois la mesure. La lunette est juste (0,132 contre
+  0,140) ; l'excès vient de l'avant (C_K 0,07 contre 0,02) et du culot
+  (0,14 contre 0,07). L'avant baisse vite avec la grille (0,113 → 0,072) :
+  la garde au sol de 50 mm n'a que 3 à 5 mailles, le soubassement est
+  freiné (à 400 mm devant la maquette, z = 28 mm : U = 22,5 puis 29,5 m/s
+  contre 34,3 mesurés), l'écoulement contourne la caisse par le dessus et
+  les côtés et surpresse l'avant. Sur la lunette, l'écoulement reste
+  attaché (35 à 39 m/s à 5 mm de la paroi contre 22 à 27 mesurés : le
+  décollement partiel de l'essai n'apparaît pas), d'où des tourbillons
+  latéraux plus forts et un culot plus aspirant.
+- *35°* : régime faux. L'écoulement doit décoller franchement à l'arête
+  du toit (au-delà d'environ 30°, Ahmed observe une lunette entièrement décollée et une traînée basse) ; ici il
+  reste attaché sur toute la lunette (U ≈ 35 m/s contre −3 mesurés,
+  survitesse de 55 contre 41 m/s à l'arête), C_S vaut 0,41 et Cx 0,70,
+  et l'écart s'aggrave avec la grille. La loi de paroi (glissement à la
+  paroi) et la résolution de l'arête (une maille) laissent l'écoulement
+  franchir une arête vive à 35° ; c'est le défaut de fond à corriger
+  avant tout cas automobile.
+- *Boîte et surface* : 10 % d'écart à 25°, 3 % à 35° ; l'échange de
+  quantité de mouvement (0,51 et 0,80) surestime nettement, comme sur
+  l'aile.
+
 
 ## Vitesse de calcul 3D
 
