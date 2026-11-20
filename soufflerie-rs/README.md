@@ -1839,6 +1839,75 @@ couche lente s'étend sur 5 mailles. Comme sur la plaque plane, le premier
 nœud doit garder une viscosité de l'ordre de κ u_τ h pour transmettre ρu_τ²
 à travers une couche limite plus mince qu'une maille.
 
+### Gradient de pression dans la loi de paroi : essai écarté
+
+**Modèle** (`--essai 8388608`, `WALL3_WGSL`, `mellor_utau` côté CPU pour
+le frottement intégré). Loi de Townsend (1961) et Mellor (1966) : couche
+interne d'équilibre de contrainte τ(y) = u_τ² + P y, P = (1/ρ) dp/ds le long
+de la vitesse tangentielle relevée à h, longueur de mélange κ y. Intégrée
+et raccordée à la loi logarithmique, elle ajoute à Spalding
+Δ = (2/κ)[√τ − u_τ + u_τ ln(2u_τ/(√τ + u_τ))] : nulle sans gradient,
+P y/(2κu_τ) aux faibles gradients, (2/κ)√(P y) au décollement (Stratford).
+u_τ est la racine de u_τ = u_τ,Spalding(u_h − Δ(u_τ)) (fausse position
+encadrée). dp/ds vient de la dérivée de l'interpolation trilinéaire de ρ au
+point relevé (p = ρ/3). La couche pariétale [0, h] porte la même contrainte
+(bornée à 0 en gradient favorable) : u(y) = u_s + ∫₀^y τ/(ν + ν_t), avec
+ν_t = κ h √τ(h) (viscosité de la loi à h, aussi ν̃ du premier nœud).
+Variantes : 16777216, ν_t = κ u_τ h gardé ; 33554432, u_τ de Spalding, le
+gradient ne sert qu'au profil de la couche pariétale (compatibilité
+∂τ/∂y = dp/ds, exacte à la paroi).
+
+**Résultat** (aile infinie, 64 mailles par corde, bilan sur boîte, marges
+0,05 à 0,2 corde) : toutes les variantes dégradent la solution.
+
+| α | Actuel Cz / Cx | Mellor complet | Profil seul, κu_τh (58720256) | Profil seul, κh√τ(h) (41943040) | Ladson |
+| --- | --- | --- | --- | --- | --- |
+| 0° | −0,014 / 0,014 | — | −0,010 / 0,04 à 0,08 | −0,003 / 0,09 à 0,13 | 0 / 0,0081 |
+| 4° | 0,456 / 0,016 | 0,28 / 0,10 à 0,13 | 0,33 à 0,36 / 0,03 à 0,05 | 0,28 / 0,10 à 0,13 | 0,43 à 0,44 / 0,0081 à 0,0088 |
+| 8° | 0,970 / 0,029 | — | 0,71 à 0,74 / 0,03 à 0,07 | 0,58 / 0,12 à 0,14 | 0,87 à 0,89 / 0,0099 à 0,0105 |
+
+(Mellor complet avec κ u_τ h gardé, 4° : 0,35 à 0,37 / 0,04 à 0,06. Une
+première version, sans borne de la contrainte en gradient favorable,
+divergeait : la paroi glissait plus vite que le nœud et entraînait le
+fluide.) La couche limite décolle : u_τ s'effondre (frottement intégré
+0,0015 au lieu de 0,006) et le bilan dépend de la marge (instationnaire).
+
+**Pourquoi.** h = 2 mailles vaut ici δ ou plus (θ/c ≈ 0,0025 dès 5 % de
+corde, voir « Traînée : où est l'excès ») : le relevé n'est pas dans la
+couche interne où τ = τ_p + y dp/ds tient. Plus haut, le gradient de
+pression est en grande partie équilibré par l'advection ; ne garder que lui
+fait pire que la loi d'équilibre, comme le notent Hickel et al. (2013) et
+Larsson et al. (2016, *Mech. Eng. Rev.* 3) pour les lois de paroi de
+simulation des grandes échelles. Ordre de grandeur dans la couche
+pariétale : P h²/2 / (κ u_τ h) vaut environ dix fois u_τ/κ, la part du
+frottement. Le gradient domine donc le profil au lieu de le corriger.
+L'excès de traînée reste une perte numérique près de la paroi (le
+glissement libre a déjà 1,5 à 2 fois la traînée mesurée), pas un défaut de
+la loi de paroi en gradient adverse. Défaut inchangé (bit à 0 : code
+identique, `cargo test --release` passe ; `plaque3d` inchangé).
+
+**À 128 mailles** (4°) : Mellor complet Cz 0,31, Cx 0,08 à 0,09 (actuel
+0,458 / 0,014) ; le profil seul (58720256) diverge.
+
+**Plaque plane** (`plaque3d`, L = 64, gradient moyen presque nul : U_e/U
+entre 1,06 et 1,08) : bit à 0, résultats identiques à l'actuel ; avec
+8388608, θ à x/L = 0,6 passe de 0,21 à 0,95 maille (théorie 0,10), Cf de
+la loi de 0,0036 à 0,0016, et le frottement transmis par l'échange aux
+parois vaut 14 fois ρu_τ² (0,029 contre 0,0021). Le gradient relevé à une
+maille près (dérivée de l'interpolation de ρ) est dominé par les
+fluctuations de pression du réseau, et le terme P y²/2 de la couche
+pariétale les transmet au premier nœud. Le gradient moyen n'y est pour
+rien.
+
+**Pistes non essayées.** Gradient lissé le long de la paroi (pression
+pariétale moyennée sur plusieurs mailles et dans le temps), et loi de paroi
+hors équilibre qui garde aussi l'advection (Park et Moin 2014). Mais la
+part du gradient de pression ne peut corriger qu'une couche limite
+résolue au-dessus de h, ce qui n'est pas le cas ici avant 256 mailles par
+corde.
+La soufflerie 2D (`d2q9.wgsl` ; `wall.rs` ne fait que relever les profils)
+n'est pas modifiée.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
