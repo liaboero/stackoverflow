@@ -1442,13 +1442,13 @@ est 1,3 fois la mesure avec la couche ×8 (0,015 à 4°, 0,026 à 8°), contre
 affinant. Celle de l'aile AR 4 passe sous l'estimation de VSPAERO (dont la
 traînée de frottement est une formule de plaque plane).
 
-**Automobile, corps d'Ahmed** (sol mobile, Re = 2,78·10⁶, L = 96,
-grille la plus fine utilisable ; détail dans « Corps d'Ahmed ») :
+**Automobile, corps d'Ahmed** (sol mobile, Re = 2,78·10⁶, L = 136,
+grille la plus fine qui tient sur la carte ; détail dans « Corps d'Ahmed ») :
 
 | Cas | Cx boîte (surface) | Mesure | Écart |
 | --- | --- | --- | --- |
-| Lunette 25° | 0,434 (0,395) | 0,285 | +52 % (+39 %) ; lunette juste, avant ×3,6, culot ×2 |
-| Lunette 35° | 0,696 (0,676) | ≈ 0,26 | ×2,7 : la lunette ne décolle pas |
+| Lunette 25° | 0,340 (0,373) | 0,285 | +19 % (+31 %) ; avant et lunette justes, culot ×2,4 |
+| Lunette 35° | 0,613 (0,588) | ≈ 0,26 | ×2,4 : la lunette ne décolle pas |
 
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
 
@@ -2466,10 +2466,10 @@ maille de la maquette, ou sillage instationnaire).
 
 ### Corps d'Ahmed (premier cas automobile)
 
-`cargo run --release --example ahmed -- --phi 25 --l 96 --marge 0.4 --t 16 --moy 8`
+`cargo run --release --example ahmed -- --phi 25 --l 136 --marge 0.4 --t 16 --moy 8`
 (lunette 25° ou 35°). Mesures de Lienhart et Schenk dans `validation/ahmed/`
 (`lienhart_*_y0.csv`), résultats dans `validation/ahmed/resultats.csv`
-(une ligne par calcul) et `profils_*_L96.csv`.
+(une ligne par calcul) et `profils_*_L136.csv`.
 
 **Maquette.** `bodies3d::ahmed_tris` : 1044 × 389 × 288 mm, congés avant
 de 100 mm, lunette de 222 mm (le long de la pente), garde au sol 50 mm,
@@ -2518,38 +2518,40 @@ sous la caisse un peu plus fort sur sol mobile.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 25° | 64 (16 mm) | 0,454 | 0,512 | 0,113 | 0,134 | 0,226 | 0,039 | 0,078 |
 | 25° | 96 (11 mm) | 0,434 | 0,395 | 0,072 | 0,132 | 0,144 | 0,047 | 0,062 |
+| 25° | 136 (7,7 mm) | 0,340 | 0,373 | 0,028 | 0,128 | 0,165 | 0,052 | 0,062 |
 | 25°, mesure | | 0,285 | | 0,020 (0,016) | 0,140 | 0,070 | 0,055 | |
 | 35° | 64 | 0,588 | 0,606 | 0,103 | 0,330 | 0,130 | 0,042 | 0,323 |
 | 35° | 96 | 0,696 | 0,676 | 0,072 | 0,410 | 0,143 | 0,051 | 0,343 |
+| 35° | 136 | 0,613 | 0,588 | 0,029 | 0,415 | 0,087 | 0,057 | 0,337 |
 | 35°, mesure | | ≈ 0,26 | | 0,016 | — | — | — | |
 
-L = 96 (15,1 M mailles, 5 min) est la plus fine grille utilisable : au-delà
-d'environ 16 M mailles, le calcul ne progresse plus (débit affiché aberrant,
-mémoire de l'hôte saturée), bien en deçà des 8 Go de la carte. Doubler la
+L = 136 (43 M mailles, 5,7 Go, 20 min pour 16 t*) est la plus fine grille
+qui tient sur la carte (au-delà de 15 M mailles, il a fallu borner les
+soumissions en vol : voir « Coût de calcul des modifications »). Doubler la
 durée de moyenne change Cx d'environ 1 %.
 
 **Écarts** (sans recalage) :
-- *25°* : Cx 1,4 à 1,5 fois la mesure. La lunette est juste (0,132 contre
-  0,140) ; l'excès vient de l'avant (C_K 0,07 contre 0,02) et du culot
-  (0,14 contre 0,07). L'avant baisse vite avec la grille (0,113 → 0,072) :
-  la garde au sol de 50 mm n'a que 3 à 5 mailles, le soubassement est
-  freiné (à 400 mm devant la maquette, z = 28 mm : U = 22,5 puis 29,5 m/s
-  contre 34,3 mesurés), l'écoulement contourne la caisse par le dessus et
-  les côtés et surpresse l'avant. Sur la lunette, l'écoulement reste
-  attaché (35 à 39 m/s à 5 mm de la paroi contre 22 à 27 mesurés : le
-  décollement partiel de l'essai n'apparaît pas), d'où des tourbillons
-  latéraux plus forts et un culot plus aspirant.
+- *25°* : Cx 1,2 à 1,3 fois la mesure à L = 136 (1,4 à 1,5 à L = 96). La
+  lunette est juste (0,128 contre 0,140), l'avant le devient en affinant
+  (C_K 0,113 → 0,072 → 0,028 contre 0,020) : la garde au sol de 50 mm n'a
+  que 3 à 6 mailles, le soubassement est freiné (à 400 mm devant la
+  maquette, z = 28 mm : U = 22,5, 29,5 puis 32,5 m/s contre 34,3 mesurés),
+  l'écoulement contourne la caisse et surpresse l'avant. L'excès restant
+  est au culot (0,165 contre 0,070), qui ne baisse pas. Sur la lunette,
+  l'écoulement reste attaché (35 à 40 m/s à 5 mm de la paroi contre 22 à
+  27 mesurés : le décollement partiel de l'essai n'apparaît pas), d'où des
+  tourbillons latéraux plus forts et un culot plus aspirant.
 - *35°* : régime faux. L'écoulement doit décoller franchement à l'arête
   du toit (au-delà d'environ 30°, Ahmed observe une lunette entièrement décollée et une traînée basse) ; ici il
   reste attaché sur toute la lunette (U ≈ 35 m/s contre −3 mesurés,
-  survitesse de 55 contre 41 m/s à l'arête), C_S vaut 0,41 et Cx 0,70,
-  et l'écart s'aggrave avec la grille. La loi de paroi (glissement à la
+  survitesse de 55 contre 41 m/s à l'arête), C_S vaut 0,41 à toutes les
+  grilles et Cx 0,61 à L = 136. La loi de paroi (glissement à la
   paroi) et la résolution de l'arête (une maille) laissent l'écoulement
   franchir une arête vive à 35° ; c'est le défaut de fond à corriger
   avant tout cas automobile.
-- *Boîte et surface* : 10 % d'écart à 25°, 3 % à 35° ; l'échange de
-  quantité de mouvement (0,51 et 0,80) surestime nettement, comme sur
-  l'aile.
+- *Boîte et surface* : 3 à 11 % d'écart, de signe variable selon la
+  grille ; l'échange de quantité de mouvement (0,46 et 0,70 à L = 136)
+  surestime nettement, comme sur l'aile.
 
 ## Modèle k-ε RNG (3D)
 
@@ -2912,6 +2914,20 @@ sans loi de paroi) diverge avant 12 D/U à D = 16 comme à D = 24
 (attendu ≈ 1). La stabilité de la paroi 3D à τ ≈ 0,5 sans loi de paroi et
 la veine du cylindre (blocage 1/8, envergure non périodique malgré
 l'étiquette « 4D périodique ») sont à reprendre avant ce cas.
+
+## Coût de calcul des modifications
+
+**Soumissions en vol bornées (`Gpu3D::run`).** Au plus 8 soumissions de pas
+en attente ; au-delà, le processeur attend la plus ancienne. Sans cette
+borne, rien n'attendait le GPU avant la première lecture : tous les pas de
+la mise en vitesse s'empilaient côté hôte (une soumission par pas au-delà
+de 1,5·10⁷ mailles, ≈ 2 Mo chacune), la mémoire de l'hôte atteignait 7 à
+9 Go et l'allocation suivante échouait ; le débit affiché, mesuré avant que
+le GPU ait fait le travail, était aberrant (30 000 M mailles/s). Le corps
+d'Ahmed passe ainsi de 15 M mailles au plus (L = 96) à 43 M (L = 136, 3,7
+à 4 Go sur l'hôte). Coût, Ahmed 25°, L = 96, 5 t*, durée totale : 73 à
+76 s sans la borne, 74 à 78 s avec 8 en vol, 77 s avec 32 : pas d'écart
+mesurable (les écarts entre relevés successifs sont du même ordre).
 
 ## Installation
 

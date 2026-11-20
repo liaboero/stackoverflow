@@ -2009,6 +2009,8 @@ struct SliceParams {
 /// Pas par soumission (paramètres en décalage dynamique).
 pub(crate) const BATCH: usize = 64;
 pub(crate) const SLOT: u64 = 256;
+/// Soumissions de pas en vol au plus (`Gpu3D::run`).
+const EN_VOL_MAX: usize = 8;
 
 /// Grandeur affichée sur une coupe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4517,6 +4519,11 @@ impl Gpu3D {
         // soumission de plus de 2 s fait réinitialiser le pilote, ce qui peut
         // arriver sur un GPU lent ou bridé en température.
         let per_submit = (30_000_000 / self.n.max(1)).clamp(1, BATCH);
+        // Soumissions en vol bornées : sans attente, le processeur empile
+        // toutes les soumissions (une par pas au-delà de 1,5·10⁷ mailles) et
+        // la mémoire de l'hôte s'épuise (≈ 2 Mo par soumission en attente à
+        // 2·10⁷ mailles : 7 Go après 3 t*, puis échec d'allocation).
+        let mut en_vol = std::collections::VecDeque::new();
         let mut left = n;
         while left > 0 {
             let k = left.min(per_submit);
@@ -4545,7 +4552,13 @@ impl Gpu3D {
                     self.cur = 1 - self.cur;
                 }
             }
-            self.queue.submit([enc.finish()]);
+            en_vol.push_back(self.queue.submit([enc.finish()]));
+            if en_vol.len() > EN_VOL_MAX {
+                let _ = self.device.poll(wgpu::PollType::Wait {
+                    submission_index: en_vol.pop_front(),
+                    timeout: None,
+                });
+            }
             self.time += k as u64;
             self.force_steps += k as u64;
             left -= k;
