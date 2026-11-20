@@ -22,7 +22,11 @@
 //! du décollement : vitesse tangentielle moyennée dans le temps des nœuds
 //! pariétaux de la rangée centrale, par 40e de corde ; le décollement commence
 //! à la première tranche de la zone de retour qui touche le bord de fuite
-//! (`AILE_DECOL=1` : détail par tranche).
+//! (`AILE_DECOL=1` : détail par tranche). La loi de paroi impose un
+//! glissement dans le sens de u_τ : la couche pariétale peut rester attachée
+//! sous un écoulement de retour ; on relève donc aussi u·t le long de la
+//! normale, jusqu'à `HAUT_DECOL` corde, et le décollement « au-dessus de la
+//! paroi » (minimum sur la normale négatif).
 use lbm::bodies3d::Body3D;
 use lbm::gpu3d::Gpu3D;
 use lbm::shapes::Naca;
@@ -181,8 +185,7 @@ fn main() {
     // Relevés successifs (surface Cz, Cm ; bilan Cz, Cx à la plus grande marge
     // valide) pour juger de l'instationnarité.
     let mut serie: Vec<[f64; 4]> = Vec::new();
-    let decol = Decol::new(&mut sim, &pts, n, ny);
-    let mut dacc = vec![[0.0f64; 3]; NB_DECOL * 2];
+    let mut decol = Decol::new(&mut sim, &pts, n, ny);
     for _ in 0..nrel {
         sim.run((moy * spt / nrel as f64) as usize, &ramp);
         let mut rel = [f64::NAN; 4];
@@ -298,7 +301,7 @@ fn main() {
                 rel[2] = -fl[1] / span / (q * lf * sc);
                 rel[3] = -fl[0] / span / (q * lf * sc);
             }
-            decol.relever(&sim, &fine, &mut dacc);
+            decol.relever(&sim, &fine);
         }
         serie.push(rel);
         if std::env::var("AILE_SERIE").is_ok() {
@@ -386,7 +389,7 @@ fn main() {
             d.0,
             d.1
         );
-        decol.rapport(&dacc);
+        decol.rapport();
     }
     let bl: Vec<String> = bx.iter().zip(MARGES).filter(|(b, _)| b[2] > 0.0).map(|(b, m)| format!("{m}: {:.4}/{:.5}", b[1] / b[2], b[0] / b[2])).collect();
     println!("  échange (tranche centrale) Cz/Cx {:.4}/{:.5}", ex[1] / nrel as f64, ex[0] / nrel as f64);
@@ -616,6 +619,8 @@ fn zq_mid(pts: &[[f64; 2]]) -> f64 {
 
 /// Tranches de corde du relevé de décollement.
 const NB_DECOL: usize = 40;
+/// Hauteur du relevé le long de la normale, en cordes.
+const HAUT_DECOL: f64 = 0.08;
 
 /// Mailles pariétales de la rangée centrale de la grille fine, avec la
 /// tangente au profil orientée vers le bord de fuite, pour situer le
@@ -624,6 +629,14 @@ struct Decol {
     /// (indice dans `finest_wall_cells`, indice de maille fine, face : 0
     /// extrados, 1 intrados ; tranche de corde ; tangente (x, z)).
     cells: Vec<(usize, usize, usize, usize, [f64; 2])>,
+    /// Par maille : indices des nœuds fluides le long de la normale (une
+    /// maille fine par pas).
+    cols: Vec<Vec<usize>>,
+    /// Sommes par face et tranche : u·t du nœud, du glissement, nombre.
+    acc: Vec<[f64; 3]>,
+    /// Sommes par face, tranche et hauteur : u·t, nombre.
+    hacc: Vec<[f64; 2]>,
+    nh: usize,
 }
 
 impl Decol {
@@ -636,6 +649,18 @@ impl Decol {
         let xte = pts.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
         let m = pts.len();
         let mut cells = Vec::new();
+        let mut cols = Vec::new();
+        let nh = (HAUT_DECOL * (xte - xle) * sc).round().max(1.0) as usize;
+        let inside = |x: f64, z: f64| {
+            let mut c = false;
+            for k in 0..pts.len() {
+                let (a, b) = (pts[k], pts[(k + pts.len() - 1) % pts.len()]);
+                if (a[1] > z) != (b[1] > z) && x < (b[0] - a[0]) * (z - a[1]) / (b[1] - a[1]) + a[0] {
+                    c = !c;
+                }
+            }
+            c
+        };
         for (w, (p, _)) in sim.finest_wall_cells().into_iter().enumerate() {
             if ((p[1] - org[1]) * sc).round() as usize != j {
                 continue;
@@ -662,17 +687,38 @@ impl Decol {
             let bin = ((xc * NB_DECOL as f64) as usize).min(NB_DECOL - 1);
             let (i, kk) = (((p[0] - org[0]) * sc).round() as usize, ((p[2] - org[2]) * sc).round() as usize);
             cells.push((w, i + d[0] * (j + d[1] * kk), face, bin, t));
+            // Normale extérieure : extrados (−t_z, t_x), intrados (t_z, −t_x).
+            let nn = if face == 0 { [-t[1], t[0]] } else { [t[1], -t[0]] };
+            let mut col = Vec::new();
+            for h in 1..=nh {
+                let (x, z) = (p[0] + nn[0] * h as f64 / sc, p[2] + nn[1] * h as f64 / sc);
+                let (ii, kz) = (((x - org[0]) * sc).round(), ((z - org[2]) * sc).round());
+                if ii < 0.0 || kz < 0.0 || ii >= d[0] as f64 || kz >= d[2] as f64 {
+                    break;
+                }
+                let (xr, zr) = (org[0] + ii / sc, org[2] + kz / sc);
+                col.push(if inside(xr, zr) { usize::MAX } else { ii as usize + d[0] * (j + d[1] * kz as usize) });
+            }
+            cols.push(col);
         }
-        Decol { cells }
+        Decol { cells, cols, acc: vec![[0.0; 3]; NB_DECOL * 2], hacc: vec![[0.0; 2]; NB_DECOL * 2 * nh], nh }
     }
 
     /// Ajoute un relevé : par tranche et par face, somme de u·t du nœud
     /// pariétal et du glissement de la loi de paroi, et nombre de mailles.
-    fn relever(&self, sim: &Gpu3D, fine: &(Vec<[f32; 4]>, [usize; 3], [f64; 3], f64), acc: &mut [[f64; 3]]) {
+    fn relever(&mut self, sim: &Gpu3D, fine: &(Vec<[f32; 4]>, [usize; 3], [f64; 3], f64)) {
         let ws = sim.finest_wall_state();
-        for &(w, idx, face, bin, t) in &self.cells {
+        for (&(w, idx, face, bin, t), col) in self.cells.iter().zip(&self.cols) {
+            for (h, &k) in col.iter().enumerate() {
+                if k != usize::MAX {
+                    let c = fine.0[k];
+                    let a = &mut self.hacc[(face * NB_DECOL + bin) * self.nh + h];
+                    a[0] += c[0] as f64 * t[0] + c[2] as f64 * t[1];
+                    a[1] += 1.0;
+                }
+            }
             let c = fine.0[idx];
-            let a = &mut acc[face * NB_DECOL + bin];
+            let a = &mut self.acc[face * NB_DECOL + bin];
             a[0] += c[0] as f64 * t[0] + c[2] as f64 * t[1];
             if let Some(v) = ws.get(w) {
                 a[1] += v[1] as f64 * t[0] + v[3] as f64 * t[1];
@@ -681,7 +727,42 @@ impl Decol {
         }
     }
 
-    fn rapport(&self, acc: &[[f64; 3]]) {
+    fn rapport(&self) {
+        let acc = &self.acc;
+        // Minimum sur la normale de u·t moyen, par face et tranche (NaN :
+        // aucun relevé).
+        let hmin = |face: usize, b: usize| {
+            let mut m = f64::NAN;
+            for h in 0..self.nh {
+                let a = self.hacc[(face * NB_DECOL + b) * self.nh + h];
+                if a[1] > 0.0 {
+                    let v = a[0] / a[1];
+                    if !(v >= m) {
+                        m = v;
+                    }
+                }
+            }
+            m
+        };
+        let debut_h = |face: usize| {
+            let mut x = 1.0;
+            for b in (0..NB_DECOL).rev() {
+                let v = hmin(face, b);
+                if v.is_nan() {
+                    continue;
+                }
+                if v >= 0.0 {
+                    break;
+                }
+                x = b as f64 / NB_DECOL as f64;
+            }
+            x
+        };
+        println!(
+            "  décollement x/c au-dessus de la paroi (u·t < 0 jusqu'à {HAUT_DECOL} c) : extrados {:.3} · intrados {:.3}",
+            debut_h(0),
+            debut_h(1)
+        );
         // Début de la zone de retour (u·t < 0) qui touche le bord de fuite
         // (1 : attaché).
         let debut = |face: usize, k: usize| {
@@ -711,13 +792,13 @@ impl Decol {
                     .map(|b| {
                         let a = acc[face * NB_DECOL + b];
                         if a[2] > 0.0 {
-                            format!("{:.3}:{:+.4}/{:+.4}", (b as f64 + 0.5) / NB_DECOL as f64, a[0] / a[2], a[1] / a[2])
+                            format!("{:.3}:{:+.4}/{:+.4}/{:+.4}", (b as f64 + 0.5) / NB_DECOL as f64, a[0] / a[2], a[1] / a[2], hmin(face, b))
                         } else {
                             "-".into()
                         }
                     })
                     .collect();
-                println!("  u·t {} (x/c:nœud/glissement) {}", if face == 0 { "extrados" } else { "intrados" }, v.join(" "));
+                println!("  u·t {} (x/c:nœud/glissement/min. sur la normale) {}", if face == 0 { "extrados" } else { "intrados" }, v.join(" "));
             }
         }
     }

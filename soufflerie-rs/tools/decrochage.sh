@@ -26,7 +26,7 @@ X2=
 
 for L in $MAILLES; do
   case $L in 64) R=2 ;; 128) R=3 ;; *) echo "mailles : 64 ou 128"; exit 1 ;; esac
-  echo "alpha,Cz_boite,Cx_boite,Cz_surface,Cm_surface,sd_Cz_boite,sd_Cm,x_decol_ext,x_decol_int,duree_s" > "$OUT/3d_$L.csv"
+  echo "alpha,Cz_boite,Cx_boite,Cz_surface,Cm_surface,sd_Cz_boite,sd_Cm,x_decol_ext,x_decol_int,x_decol_ext_normale,x_decol_int_normale,duree_s" > "$OUT/3d_$L.csv"
   for a in $ALPHAS; do
     m=${MOY:-1}
     [ "${MOY:-}" = "" ] && [ "$(awk "BEGIN{print ($a > 14)}")" = 1 ] && m=4
@@ -42,11 +42,14 @@ for L in $MAILLES; do
     czs=$(echo "$s" | sed -n 's/.*surface Cz \([-0-9.]*\) ±.*/\1/p')
     cm=$(echo "$s" | sed -n 's/.*Cm \([-0-9.]*\) ± \([0-9.]*\) .*/\1/p')
     sdm=$(echo "$s" | sed -n 's/.*Cm \([-0-9.]*\) ± \([0-9.]*\) .*/\2/p')
-    d=$(grep 'décollement x/c' "$log")
+    d=$(grep 'décollement x/c (vitesse' "$log")
+    dh=$(grep 'au-dessus de la paroi' "$log")
+    xeh=$(echo "$dh" | sed -n 's/.*extrados \([0-9.]*\) ·.*/\1/p')
+    xih=$(echo "$dh" | sed -n 's/.*intrados \([0-9.]*\)$/\1/p')
     xe=$(echo "$d" | sed -n 's/.*extrados \([0-9.]*\) ;.*/\1/p')
     xi=$(echo "$d" | sed -n 's/.*intrados \([0-9.]*\) ;.*/\1/p')
     du=$(sed -n 's/.* · \([0-9]*\) s$/\1/p' "$log")
-    echo "$a,$czb,$cxb,$czs,$cm,$sdb,$sdm,$xe,$xi,$du" | tee -a "$OUT/3d_$L.csv"
+    echo "$a,$czb,$cxb,$czs,$cm,$sdb,$sdm,$xe,$xi,$xeh,$xih,$du" | tee -a "$OUT/3d_$L.csv"
     sleep "$PAUSE"
   done
 done
