@@ -2226,6 +2226,9 @@ pub struct Gpu3D {
     pub solid_count: usize,
     /// Mailles solides (affichage, pochoirs des raccords).
     pub(crate) solid: Vec<bool>,
+    /// Couche creuse : mailles fantômes (non calculées ; vide pour une
+    /// boîte). Les relevés sur la surface les évitent.
+    pub(crate) ghost: Vec<bool>,
     /// Le GPU ne répond plus (lecture impossible, pilote réinitialisé).
     pub lost: bool,
     /// Grille fine imbriquée : enveloppe de mailles fantômes, ni entrée, ni
@@ -2476,6 +2479,14 @@ pub struct SurfaceForces {
     /// sommets, rangées (mailles de la veine), pour répartir son effort sur
     /// son étendue en envergure (`span_distribution`).
     pub spans: Vec<[f64; 3]>,
+    /// Par triangle (même ordre que `loads`) : son rang dans le maillage,
+    /// la contrainte pariétale moyenne de la loi de paroi (vecteur, unités
+    /// du réseau de la veine, ρu_τ² le long de la vitesse relevée) et la
+    /// hauteur de raccord de la loi de paroi de la grille qui le relève
+    /// (mailles de la veine).
+    pub tri: Vec<usize>,
+    pub shear: Vec<[f64; 3]>,
+    pub wm_h: Vec<f64>,
 }
 
 /// Répartition en envergure d'efforts portés par des triangles : chaque
@@ -2715,15 +2726,26 @@ pub struct EdgeRegion {
     pub radius: f64,
 }
 
+/// Région d'une couche limitée à une partie de la surface (raffinement de
+/// paroi par zones, `raff_paroi`) : triangles retenus du maillage de la
+/// maquette (même ordre que `Body3D::mesh`, que `Body3D::refined` garde).
+/// Mailles actives : à moins de `band` mailles de ces triangles.
+#[derive(Clone, Debug)]
+pub struct ZoneRegion {
+    pub tris: Vec<bool>,
+}
+
 /// Couche pariétale (grille creuse) : mailles actives à moins de `band`
 /// mailles (de cette couche) de la paroi ; plus, si `wake` > 0, celles
 /// balayées vers l'aval (+x) sur `wake` mailles depuis la dernière maille
-/// de la couche de chaque rangée ; si `edges`, seulement près des arêtes.
+/// de la couche de chaque rangée ; si `edges`, seulement près des arêtes ;
+/// si `zone`, seulement près des triangles retenus.
 #[derive(Clone, Debug, Default)]
 pub struct LayerSpec {
     pub band: f64,
     pub wake: f64,
     pub edges: Option<std::sync::Arc<EdgeRegion>>,
+    pub zone: Option<std::sync::Arc<ZoneRegion>>,
 }
 
 /// Plan de raffinement : grilles boîtes (emprise amont, aval, de côté en
@@ -3009,9 +3031,24 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
     let mesh = body.mesh.clone().ok_or("couche pariétale : maquette maillée seulement")?;
     // Région étendue (sillage, bords) : chemins ajoutés ; sans eux, mêmes
     // opérations qu'avant, au bit près.
-    let extended = spec.wake > 0.0 || spec.edges.is_some();
+    let extended = spec.wake > 0.0 || spec.edges.is_some() || spec.zone.is_some();
+    // Zone : maillage des seuls triangles retenus (repère de cette couche).
+    let zmesh = match spec.zone.as_ref() {
+        Some(z) => {
+            if z.tris.len() != mesh.tris.len() {
+                return Err("couche par zones : masque de triangles d'une autre maquette".into());
+            }
+            let t: Vec<crate::stl::Tri> = mesh.tris.iter().zip(&z.tris).filter(|(_, &k)| k).map(|(t, _)| *t).collect();
+            if t.is_empty() {
+                return Err("couche par zones : aucun triangle retenu".into());
+            }
+            Some(crate::stl::MeshBody::new(t, false))
+        }
+        None => None,
+    };
     let near_edge = |p: [f64; 3], slack: f64| -> bool {
         spec.edges.as_ref().is_none_or(|e| e.set.distance(p, e.radius + slack + 1.0) <= e.radius + slack)
+            && zmesh.as_ref().is_none_or(|z| z.distance(p, band + slack + 1.0) <= band + slack)
     };
     let (nx, ny, nz) = (body.nx, body.ny, body.nz);
     let dims = [nx, ny, nz];
@@ -3877,6 +3914,7 @@ impl Gpu3D {
             qs.resize(18, 0.0);
         }
         let solid: Vec<bool> = wall_gpu.iter().map(|&w| w == SOLID).collect();
+        let ghost: Vec<bool> = if sparse.is_some() { wall_gpu.iter().map(|&w| w == crate::refine3d::GHOST).collect() } else { Vec::new() };
         // Affichage des mailles du calcul : 2 bits par maille (1 solide, 2 paroi mince).
         let mut vox = vec![0u32; ns.div_ceil(16)];
         for (c, &s) in solid.iter().enumerate() {
@@ -4311,6 +4349,7 @@ impl Gpu3D {
             wall_count,
             solid_count,
             solid,
+            ghost,
             lost: false,
             nested,
             ground: body.ground && !nested,
@@ -5461,9 +5500,13 @@ impl Gpu3D {
                     let sk = r.scale(k - 1);
                     let g = &mut r.levels[k - 1];
                     let mesh = g.surface.clone()?;
+                    // Fantômes d'une couche creuse : ni calculées ni relevées
+                    // (couche limitée à des zones ou des bords : la grille
+                    // parente relève les triangles hors de la couche).
+                    let solid = if g.ghost.is_empty() { g.solid.clone() } else { g.solid.iter().zip(&g.ghost).map(|(&a, &b)| a || b).collect() };
                     levs.push(Lev {
                         mac: g.macros(),
-                        solid: g.solid.clone(),
+                        solid,
                         d: [g.nx, g.ny, g.nz],
                         org: r.origin[k - 1],
                         s: sk,
@@ -5676,6 +5719,7 @@ impl Gpu3D {
                 }
             }
             let mut fl = [0.0; 3];
+            let mut sh = [0.0; 3];
             let (mut pw_acc, mut n_acc, mut got_any) = (0.0, [0.0; 3], false);
             for w in &centers {
                 let c = [0, 1, 2].map(|k| w[0] * t[0][k] + w[1] * t[1][k] + w[2] * t[2][k]);
@@ -5708,6 +5752,7 @@ impl Gpu3D {
                     if utm > 0.0 {
                         out.friction[k] += tau * ut[k] / utm * ar;
                         fl[k] += tau * ut[k] / utm * ar;
+                        sh[k] += tau * ut[k] / utm * ar;
                     }
                     n_acc[k] += n[k] * ar;
                 }
@@ -5723,6 +5768,9 @@ impl Gpu3D {
             let mut ys = l.mesh.tris[ti].map(|v| l.org[1] + v[1] / l.s);
             ys.sort_by(f64::total_cmp);
             out.spans.push(ys);
+            out.tri.push(ti);
+            out.shear.push(sh.map(|v| v / ar_tot));
+            out.wm_h.push(WM_H / l.s);
         }
         out.missed /= area.max(1e-12);
         Some(out)

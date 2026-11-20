@@ -264,7 +264,7 @@ pub fn auto_plan(body: &Body3D, o: &AutoOptions) -> Result<AutoPlan, String> {
         if k <= nb {
             plan.boxes.push((dk, dk + wk, dk));
         } else {
-            plan.layers.push(LayerSpec { band: (dk * l * s).ceil(), wake: (wk * l * s).ceil(), edges: None });
+            plan.layers.push(LayerSpec { band: (dk * l * s).ceil(), wake: (wk * l * s).ceil(), ..Default::default() });
         }
     }
     let mut edges = None;
@@ -281,6 +281,7 @@ pub fn auto_plan(body: &Body3D, o: &AutoOptions) -> Result<AutoPlan, String> {
             band,
             wake: 0.0,
             edges: Some(std::sync::Arc::new(EdgeRegion { set, radius: band })),
+            zone: None,
         });
     }
     Ok(AutoPlan { levels, edges, plan })
