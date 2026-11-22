@@ -42,6 +42,7 @@ pub mod shapes;
 pub mod stats;
 pub mod stl;
 pub mod surfel;
+pub mod tble;
 pub mod tunnel;
 pub mod vii;
 pub mod wall;

@@ -131,6 +131,11 @@ fn main() {
         let mut sim = Gpu3D::with_refinement(&body, nu, u, fp16, lbm::gpu3d::Turbulence::rans_from_env(), raff).unwrap();
         sim.periodic_span = true;
         sim.set_essai(essai, nu_cap);
+        // Loi de paroi hors équilibre (TBLE) : SOUFFLERIE_TBLE=eq|gp|gpc.
+        if let Some(m) = lbm::tble::ParoiTble::from_env() {
+            sim.set_paroi_tble(Some(m));
+            println!("  loi de paroi : {}", m.nom());
+        }
         sim.run(((t_end - 2.0) * spt) as usize, &ramp);
         let _ = sim.take_forces();
         sim.run((2.0 * spt) as usize, &ramp);
