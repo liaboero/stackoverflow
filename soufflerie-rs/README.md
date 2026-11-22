@@ -3443,29 +3443,6 @@ sans loi de paroi) diverge avant 12 D/U à D = 16 comme à D = 24
 la veine du cylindre (blocage 1/8, envergure non périodique malgré
 l'étiquette « 4D périodique ») sont à reprendre avant ce cas.
 
-## Coût de calcul des modifications
-
-**Soumissions en vol bornées (`Gpu3D::run`).** Au plus 8 soumissions de pas
-en attente ; au-delà, le processeur attend la plus ancienne. Sans cette
-borne, rien n'attendait le GPU avant la première lecture : tous les pas de
-la mise en vitesse s'empilaient côté hôte (une soumission par pas au-delà
-de 1,5·10⁷ mailles, ≈ 2 Mo chacune), la mémoire de l'hôte atteignait 7 à
-9 Go et l'allocation suivante échouait ; le débit affiché, mesuré avant que
-le GPU ait fait le travail, était aberrant (30 000 M mailles/s). Le corps
-d'Ahmed passe ainsi de 15 M mailles au plus (L = 96) à 43 M (L = 136, 3,7
-à 4 Go sur l'hôte). Coût, Ahmed 25°, L = 96, 5 t*, durée totale : 73 à
-76 s sans la borne, 74 à 78 s avec 8 en vol, 77 s avec 32 : pas d'écart
-mesurable (les écarts entre relevés successifs sont du même ordre).
-
-## Coût de calcul des modifications
-
-Mesures sur la GTX 1070, minimum de trois passages (GPU partagé).
-
-| Modification | Cas | Avant | Après |
-| --- | --- | --- | --- |
-| Essais du décollement (bits 67108864 à 1073741824) et gradient de pression (8388608), bits à 0 | `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 12 cordes) | 27 s | 28 s (bruit de mesure ; les bits sont des constantes de compilation de la collision) |
-| Loi de Townsend–Mellor filtrée, κu_τh (562036736) | idem | 28 s | 98 s (×3,5 : fausse position sur la loi de Spalding dans la passe de paroi) |
-
 ## Installation
 
 Installer Rust (<https://rustup.rs>), puis, dans ce dossier :
@@ -3599,6 +3576,29 @@ Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
 totale varie de ±30 % d'un passage à l'autre ; les temps par passe
 (`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
 alternés par modèle, on garde le plus rapide.
+
+### Soumissions en vol bornées (`Gpu3D::run`)
+
+Au plus 8 soumissions de pas
+en attente ; au-delà, le processeur attend la plus ancienne. Sans cette
+borne, rien n'attendait le GPU avant la première lecture : tous les pas de
+la mise en vitesse s'empilaient côté hôte (une soumission par pas au-delà
+de 1,5·10⁷ mailles, ≈ 2 Mo chacune), la mémoire de l'hôte atteignait 7 à
+9 Go et l'allocation suivante échouait ; le débit affiché, mesuré avant que
+le GPU ait fait le travail, était aberrant (30 000 M mailles/s). Le corps
+d'Ahmed passe ainsi de 15 M mailles au plus (L = 96) à 43 M (L = 136, 3,7
+à 4 Go sur l'hôte). Coût, Ahmed 25°, L = 96, 5 t*, durée totale : 73 à
+76 s sans la borne, 74 à 78 s avec 8 en vol, 77 s avec 32 : pas d'écart
+mesurable (les écarts entre relevés successifs sont du même ordre).
+
+### Essais du décollement (`set_essai`)
+
+Mesures sur la GTX 1070, minimum de trois passages (GPU partagé).
+
+| Modification | Cas | Avant | Après |
+| --- | --- | --- | --- |
+| Essais du décollement (bits 67108864 à 1073741824) et gradient de pression (8388608), bits à 0 | `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 12 cordes) | 27 s | 28 s (bruit de mesure ; les bits sont des constantes de compilation de la collision) |
+| Loi de Townsend–Mellor filtrée, κu_τh (562036736) | idem | 28 s | 98 s (×3,5 : fausse position sur la loi de Spalding dans la passe de paroi) |
 
 ### Modèle k-ε RNG
 
