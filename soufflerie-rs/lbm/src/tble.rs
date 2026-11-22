@@ -178,8 +178,12 @@ fn tble_step(wk: u32, uh: f32, f: f32, ut0: f32) -> f32 {{
   let base = wk * TB_N;
   u[0] = 0.0;
   u[TB_N] = uh;
-  if (tble[base] == 0.0) {{
-    // Première fois : profil d'équilibre de u_τ de Spalding, à l'échelle de u_h.
+  // Première fois, et pendant la mise en vitesse (P.accel ≠ 0) : profil
+  // d'équilibre de u_τ de Spalding, à l'échelle de u_h. Parti d'un fluide au
+  // repos, le profil resterait laminaire : ν_t ∝ u_τ (1 − exp(−y⁺/A))² s'annule
+  // avec le frottement, et la diffusion moléculaire (h²/ν ≈ 10⁶ pas) ne le
+  // développe jamais (u_τ nul sur toute l'aile au premier essai).
+  if (tble[base] == 0.0 || P.accel != 0.0) {{
     var acc = 0.0;
     var g0 = 1.0 / P.nu;
     for (var j = 1u; j <= TB_N; j++) {{

@@ -2031,6 +2031,113 @@ côtés ; θ instantané à ±7 % selon la station. Sans la fusion, les bits
 67108864 à 1073741824 et 2097152 ajoutés ici redonnent l'ancien résultat au bit près
 (64 mailles, 4° : 0,4580).
 
+### Loi de paroi hors équilibre à équations de couche limite 1D (TBLE)
+
+**Modèle** (`lbm/src/tble.rs`, `Gpu3D::set_paroi_tble`, variable
+`SOUFFLERIE_TBLE=eq|gp|gpc` lue par `aile_infinie`, `plaque3d` et `ahmed` ;
+absente : Spalding, défaut inchangé). Balaras, Cabot et Moin (1996), Kawai
+et Larsson (2012), Park et Moin (2014) : sous chaque nœud pariétal, une
+grille 1D de 33 points géométriquement étirée entre la paroi (y₁⁺ = 1 pour
+u_τ = 0,1 U, rapport 1,2 à 1,3) et h = `WM_H` = 2 mailles résout
+
+∂u/∂t + F = ∂/∂y [(ν + ν_t) ∂u/∂y],  u(0) = 0,  u(h) = u_h,
+
+le long de la vitesse tangentielle relevée à h, avec ν_t = κ y u_τ
+(1 − e^{−y⁺/A})², κ = 0,41, A = 17 (Kawai et Larsson), u_τ tiré du profil
+courant. Un pas implicite (Thomas) par pas de la grille, dans la passe
+`wall3d`. Le frottement τ_p = ν ∂u/∂y|₀ (borné à 0 en retour) remplace le
+u_τ de Spalding ; glissement, couche pariétale et ν̃ du premier nœud sont
+ceux de la loi par défaut. F, constant le long de la normale, vient du
+champ au point relevé : `eq` F = 0 ; `gp` F = (1/ρ) ∂p/∂s (différence
+centrée de ρ à ±2 mailles le long de u_h, comme l'essai 536870912) ;
+`gpc` F = (1/ρ) ∂p/∂s + u_h ∂u/∂s + v_n ∂u/∂n (mêmes relevés, ±1 maille
+le long de la normale). Aucune constante hors κ et A. Pendant la mise en
+vitesse (accélération imposée non nulle), le profil est remis au profil
+d'équilibre de u_τ de Spalding : parti d'un fluide au repos, il restait
+laminaire (ν_t ∝ u_τ s'annule avec le frottement, et h²/ν ≈ 10⁶ pas), et
+u_τ valait 0 sur toute l'aile au premier essai.
+
+**Équilibre contre Spalding** (test `tble::tests`, régime établi) : u_τ
+TBLE / Spalding = 0,962 à y⁺(h) = 34 (zone tampon, formes différentes),
+0,991 à 245, 0,998 à 1900, 1,000 à 6800, 1,003 à 30 000. Gradient adverse
+F h / u_τ² = 0,5 : τ_p −9 % ; 20 : τ_p < 0 (retour près de la paroi).
+
+**Aile infinie** (NACA 0012, Re = 6·10⁶, bilan sur boîte à 0,2 corde ;
+`tools/essais_tble.sh`, résultats dans `validation/tble/tble.csv`) :
+
+| Mailles | α | Spalding Cz / Cx | `eq` | `gp` | `gpc` | Ladson |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 | 0° | −0,014 / 0,0149 | −0,013 / 0,0154 | −0,013 / 0,0118 | −0,010 / 0,0160 | 0 / 0,0081 |
+| 64 | 4° | 0,456 / 0,0158 | 0,458 / 0,0159 | 0,474 / 0,0038 | 0,437 / 0,0177 | 0,43–0,44 / 0,0081–0,0088 |
+| 64 | 8° | 0,971 / 0,0290 | 0,972 / 0,0283 | 0,949 / 0,0304 | 0,953 / 0,0274 | 0,87–0,89 / 0,0099–0,0105 |
+| 128 | 0° | −0,013 / 0,0147 (\*) | −0,012 / 0,0141 | −0,013 / 0,0109 | −0,015 / 0,0158 | |
+| 128 | 4° | 0,462 / 0,0143 (\*) | 0,463 / 0,0151 | 0,474 / 0,0089 | 0,449 / 0,0167 | |
+| 128 | 8° | 0,899 / 0,0222 (\*) | 0,899 / 0,0225 | 0,876 / 0,0199 | 0,916 / 0,0372 | |
+
+(\*) section « Pourquoi la soufflerie ne décolle pas », même code par défaut.
+
+Décrochage, 64 mailles (4 cordes de moyenne), Cz / Cx :
+
+| α | Spalding | `gp` | `gpc` |
+| --- | --- | --- | --- |
+| 14° | 1,534 / 0,061 | 1,478 / 0,059 | 1,508 / 0,061 |
+| 16° | 1,622 / 0,047 | 1,599 / 0,053 | 1,619 / 0,050 |
+| 18° | 1,706 / 0,106 | 1,613 / 0,117 | 1,678 / 0,107 |
+| 19° | 1,693 / 0,116 | 1,495 / 0,129 | 1,692 / 0,108 |
+
+À 128 mailles, 18° : Spalding 1,711 / 0,092 ; `gp` 1,605 / 0,096 ;
+`gpc` 1,716 / 0,101.
+
+Aucun décollement relevé (vitesse des nœuds pariétaux ni le long de la
+normale jusqu'à 0,08 c), dans aucune variante. Ladson : décrochage vers
+16 à 17°, Cz max 1,5 à 1,6 (voir « Décrochage »).
+
+**Plaque plane** (`plaque3d 64`) : frottement de l'extrados entre 0,3 et
+0,7 L, échange / loi : Spalding 0,00433 / 0,00407 ; `eq` 0,00431 /
+0,00407 (inchangé) ; `gp` 0,00430 / 0,00393 ; `gpc` 0,00493 / 0,00406.
+θ à x/L = 0,6 : 0,212 / 0,206 / 0,243 / 0,202 maille (théorie 0,097).
+
+**Ce que montrent les relevés.** À 18° et 64 mailles (u_τ par dixième de
+corde de l'extrados, `AILE_PAROI=e`) : avec `gp`, la TBLE décolle d'elle-même
+(τ_p ≤ 0) sur tout l'extrados dès x/c = 0,1, mais le champ LBM reste
+attaché : u_τ = 0 n'est qu'une paroi glissante, et le nœud pariétal garde
+0,05 à 0,16 U, comme avec Spalding. Avec `gpc`, u_τ baisse de 10 à 35 %
+vers le bord de fuite (0,0016 contre 0,0025 à x/c > 0,9), sans s'annuler.
+Le couplage par le seul frottement ne peut pas transmettre un décollement :
+un frottement plus faible accélère la couche [0, h] au lieu de la freiner,
+et le défaut de quantité de mouvement que la TBLE porte (son profil sous h)
+n'existe pas dans le champ résolu, puisque [0, h] y est la couche limite
+entière. À 4°, `gp` annule le frottement sur l'essentiel de l'extrados
+(Cx 0,004 au lieu de 0,016, en dessous du frottement seul) et relève Cz ;
+`gpc` corrige dans l'autre sens (Cz −4 %, Cx +12 %). Comme pour
+Townsend–Mellor, le terme source domine : à h, u_h ∂u_h/∂s et ∂p/∂s
+valent chacun une vingtaine de fois u_τ²/h et se compensent presque
+(Bernoulli) ; leur reste, que la TBLE amplifie, est surtout la perte
+numérique de pression totale de la couche lente, pas la physique de la
+couche limite.
+
+**Relever le point d'échange plus haut ?** Kawai et Larsson placent h à
+plusieurs mailles pour que le relevé échappe à l'erreur du premier nœud,
+mais dans une couche limite résolue (h ≈ 0,1 δ, une dizaine de mailles
+au moins dans δ). Ici h = 2 mailles vaut déjà δ ou plus sur l'essentiel
+de l'aile (1,6 à 3 % de corde). Relevé à 4 ou 6 mailles, h serait dans
+l'écoulement extérieur : F de `gpc` y tend vers 0 (loi d'équilibre), et
+celui de `gp` y applique le gradient extérieur à toute l'épaisseur [0, h],
+ce que fait déjà Townsend–Mellor relevé à h ≥ δ. L'essai n'est pas
+pertinent tant que la couche limite n'est pas résolue au-dessus de h ; il
+le devient vers 500 mailles par corde près du bord de fuite. Une TBLE qui
+tiendrait lieu de couche limite entière devrait calculer sa convection
+avec son propre profil u(y) ∂u/∂s + v ∂u/∂y (dérivée le long de la paroi
+entre nœuds voisins : solveur de couche limite 2D sur la surface) et
+rendre au champ son épaisseur de déplacement (transpiration, voir
+`enable_transpiration`), pas seulement le frottement.
+
+**Décision.** Défaut inchangé (Spalding). `eq` redonne Spalding (Cz à
+0,5 % près, Cx à 4 %, plaque inchangée) ; `gp` et `gpc` ne font pas
+décrocher l'aile et dégradent l'attaché (Cz ±4 %, Cx −75 % ou +12 à
++68 %). Corps d'Ahmed non essayé : rien ne laisse attendre un décollement
+de lunette que l'aile n'obtient pas.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -2059,6 +2166,7 @@ arguments en tête de chaque fichier) :
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
 | `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
+| `tools/essais_tble.sh` | loi de paroi TBLE (`SOUFFLERIE_TBLE` : base, eq, gp, gpc) sur l'aile infinie, même CSV ; voir « Loi de paroi hors équilibre » |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
@@ -3245,6 +3353,24 @@ chacune une découpe de polyèdre). Pistes si cela gêne : volume nul ou
 plein sans découpe quand un voxel est entier d'un côté de tous les plans
 (déjà fait), mise en commun des découpes des directions opposées (déjà
 fait), poids en f32 sur le GPU.
+
+### Loi de paroi TBLE (`SOUFFLERIE_TBLE`)
+
+Cas : `aile_infinie 16 2 6e6 4 2 - 60` (64 mailles par corde, 4,38 M
+mailles, 40 000 mailles pariétales sur les trois grilles), `AILE_PROFIL=200`,
+deux passages alternés, GPU partagé à 100 % avec un autre calcul. Sans la
+variable, le shader de la passe de paroi est celui d'avant (coût inchangé
+par construction).
+
+| | Spalding | `eq` | `gpc` |
+| --- | --- | --- | --- |
+| Passe de paroi (veine + ×2 + ×4) | 0,27 à 0,42 ms | 0,81 à 0,84 ms | 1,24 à 1,38 ms |
+| Somme des passes d'un pas | 11,2 à 12,9 ms | 11,6 à 12,1 ms | 12,4 à 13,1 ms |
+| Mémoire | — | +128 octets par maille pariétale (32 valeurs), ≈ +5 Mo | idem |
+
+Surcoût : +0,5 ms par pas (`eq`, `gp`), +1 ms (`gpc`, relevés
+supplémentaires), soit 4 à 8 % ; durées totales à 64 mailles (12 cordes)
+de 67 à 130 s contre 79 à 109 s, dans la dispersion du GPU partagé.
 
 ### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
 
