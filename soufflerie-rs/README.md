@@ -2106,7 +2106,52 @@ surface sur une corde d'envergure autour de la tranche centrale
 (`AILE_ZONE_TOUT=1 AILE_ZONE_Y=16 --raff-paroi 1`, 128 mailles par corde
 de base, 256 à la paroi), sans sillage.
 
-RESULTATS_RAFF_PAROI
+**Résultats** (bilan sur boîte de la tranche centrale, plus grande marge
+valide ; au-delà de 14°, 4 cordes de moyenne, ± écart type des relevés ;
+base : 128 mailles par corde partout, même programme) :
+
+| α | Base Cz / Cx | ×16 à la paroi Cz / Cx | Ladson Cz | TMR SA Cz / Cx |
+| --- | --- | --- | --- | --- |
+| 4° | 0,462 / 0,0143 | **0,442** / 0,0122 | 0,43–0,44 | — |
+| 8° | 0,899 / 0,0222 | **0,897** / 0,0198 | 0,87–0,89 | — |
+| 14° | 1,504 / 0,045 | 1,501 / 0,038 | 1,44–1,45 | — |
+| 15° | 1,591 ± 0,007 / 0,049 | 1,608 ± 0,008 / 0,039 | 1,51–1,53 | 1,546 / 0,021 |
+| 16° | 1,672 ± 0,003 / 0,042 | 1,762 ± 0,006 / 0,063 | 1,57–1,58 | 1,62 / 0,025 |
+| 17° | 1,794 ± 0,020 / 0,082 | diverge (NaN pendant l'établissement) | 1,61–1,63 | 1,67 / 0,030 |
+| 18° | 1,711 ± 0,016 / 0,092 | 1,751 ± 0,018 / 0,078 | 1,0–1,2 | 1,69 / 0,039 |
+| 19° | 1,789 ± 0,008 / 0,107 | 1,778 ± 0,008 / 0,095 | — | 1,60 / 0,060 |
+
+Suite en maillage à la paroi (16° et 18°, base 64 mailles par corde,
+puis couches ×8 et ×8 + ×16 sur la même corde d'envergure ; base 128 et
+128 + ×16 du tableau) :
+
+| Paroi (mailles par corde) | 64 | 64 → 128 | 64 → 256 | 128 | 128 → 256 |
+| --- | --- | --- | --- | --- | --- |
+| 16° Cz / Cx | 1,622 / 0,047 | 1,700 / 0,048 | 1,731 / 0,056 | 1,672 / 0,042 | 1,762 / 0,063 |
+| 18° Cz / Cx | 1,706 / 0,106 | 1,715 / 0,087 | 1,755 / 0,082 | 1,711 / 0,092 | 1,751 / 0,078 |
+
+- *Écoulement attaché (4°, 8°)* : la couche ×16 améliore. À 4°, Cz passe
+  de 0,462 à 0,442 (dans la fourchette de Ladson pour la première fois sur
+  l'aile infinie) et Cx de 0,0143 à 0,0122 (mesure 0,008) ; à 8°, Cz reste
+  juste (0,897) et Cx baisse de 11 %. Bilan indépendant de la marge
+  (Cx à 1,3 % près, Cz à 0,1 %).
+- *Décrochage : non.* Aucun décollement, ni à la paroi ni le long de la
+  normale, jusqu'à 19° ; au dernier 40e de l'extrados, le minimum de u·t
+  vaut encore 0,7 à 0,9 U∞. La portance *augmente* quand la paroi est
+  affinée (16° : 1,62 → 1,70 → 1,73 à base 64, 1,67 → 1,76 à base 128),
+  au lieu de baisser vers SA (1,62) et Ladson (1,57) ; pas de maximum
+  marqué (1,76 à 16°, 1,75 à 18°, 1,78 à 19°), divergence à 17°, aucune
+  convergence en maillage. Le défaut de fond n'est donc pas levé par
+  deux fois plus de résolution à la paroi : avec h = 2 mailles à 256
+  mailles par corde (0,8 % de corde, y⁺ ≈ 800 à 2000), β (moitié de
+  celui relevé à 128) reste de 2 à 36 sur l'extrados, la couche [0, h] reste un filet glissant, et le
+  gradient adverse ne l'arrête pas. Le critère dit qu'il faudrait 3 à 6
+  niveaux de plus ; ×32 sur une corde d'envergure ferait environ 65 M
+  mailles à l'épaisseur de règle (0,125 L), hors de portée de la carte.
+- *Corps d'Ahmed* : non essayé. Le raffinement local refuse le sol mobile
+  (`Gpu3D::with_plan`), seule condition au sol de la soufflerie, et le
+  calcul de référence (L = 136) prend déjà 5,7 Go ; il faudrait d'abord
+  des couches sans boîtes rattachées directement à la veine.
 
 ### Programmes de diagnostic
 
@@ -3302,7 +3347,22 @@ partagée, demi-précision (≈ 100 octets par maille sur le GPU). Sans
 l'option, le calcul est inchangé (un tableau de booléens par maille de
 couche creuse sur le processeur pour les relevés de surface).
 
-COUT_RAFF_PAROI
+| Cas | Base 128 | 128 + couche ×16 (1 corde d'envergure) |
+| --- | --- | --- |
+| Mailles (toutes grilles) | 11,2 à 13,4 M | 19,4 à 21,8 M (couche ×16 : 8,2 à 8,6 M) |
+| Mises à jour par pas de la veine | 65 à 77 M | 195 à 208 M (×2,7 à ×3) |
+| Mémoire du GPU | ≈ 1,1 à 1,3 Go | ≈ 1,9 à 2,2 Go |
+| Mémoire de l'hôte (engagée) | 4,3 Go | 5,4 Go |
+| Durée, 12 cordes (4°) | 183 s | 890 s (GPU partagé) |
+| Durée, 15 cordes (14° à 19°) | 189 à 302 s | 575 à 708 s (×2,1 à ×3) |
+| Mise en place de la couche | — | ≈ 70 s (distances aux triangles retenus) |
+| Premier calcul (β, 6 cordes, sans cache) | — | ≈ 210 s |
+
+Pleine envergure (48 mailles de veine au lieu de 16), la couche ×16 ferait
+20 M mailles à elle seule (33 M en tout) : c'est la limite pratique de la
+GTX 1070 partagée. La mémoire de l'hôte est la contrainte la plus serrée
+quand plusieurs calculs tournent (échecs d'allocation de 115 à 130 Mo
+observés à 21 M mailles).
 
 ### Aéroacoustique : sondes et couches absorbantes
 
