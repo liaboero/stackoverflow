@@ -133,6 +133,9 @@ fn main() {
         std::process::exit(1);
     }
     let nu = u as f64 * l as f64 / re;
+    // Paroi volumique par surfels (SOUFFLERIE_SURFELS=1) au lieu du rebond de Bouzidi.
+    let mut body = body;
+    body.surfels = std::env::var("SOUFFLERIE_SURFELS").is_ok_and(|v| v == "1");
     let mut sim = Gpu3D::with_turbulence(&body, nu, u, true, lbm::gpu3d::Turbulence::rans_from_env()).unwrap_or_else(|e| panic!("GPU : {e}"));
     if essai != 0 {
         sim.set_essai(essai, 0.0);

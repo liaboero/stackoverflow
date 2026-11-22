@@ -43,6 +43,7 @@ pub mod stats;
 pub mod stl;
 pub mod surfel;
 pub mod tble;
+pub mod surfel3d;
 pub mod tunnel;
 pub mod vii;
 pub mod wall;

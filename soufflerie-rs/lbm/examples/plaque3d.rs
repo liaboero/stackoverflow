@@ -116,6 +116,8 @@ fn main() {
     body.center = [x_le + 0.5 * lf, 0.5 * ny as f64, zc];
     body.area = lf * ny as f64;
     body.mesh = Some(Arc::new(mesh));
+    // Paroi volumique par surfels (SOUFFLERIE_SURFELS=1) au lieu du rebond de Bouzidi.
+    body.surfels = std::env::var("SOUFFLERIE_SURFELS").is_ok_and(|v| v == "1");
 
     let u = 0.1f32;
     let nu = u as f64 * lf / re;

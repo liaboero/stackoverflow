@@ -210,6 +210,9 @@ pub struct Overlap {
 /// Fraction solide des voxels coupés, rangés par colonne en x.
 #[derive(Clone, Debug, Default)]
 pub struct Fractions {
+    /// Axe des colonnes (0 : x par défaut) ; (j, k) sont les deux autres
+    /// coordonnées dans l'ordre circulaire.
+    axis: usize,
     /// (j, k) → voxels coupés de la colonne, triés par i : (i, part solide
     /// de la face x = i + ½, volume solide du voxel).
     cols: HashMap<(i32, i32), Vec<(i32, f64, f64)>>,
@@ -220,10 +223,14 @@ impl Fractions {
     /// centre) d'un maillage fermé : dans une colonne, la part solide de la
     /// face aval vaut a(i + ½) = a(i − ½) − Σ Aₓ, et le volume solide
     /// V = Σ (cₓ − (i − ½)) Aₓ + a(i + ½) (divergence de (x − xᵢ₋½) eₓ).
-    fn build(pieces: &[([i32; 3], P, P)]) -> Fractions {
+    /// Colonnes selon l'axe `ax` (même calcul, coordonnées permutées) : un
+    /// maillage périodique parallèle à x (canal incliné) n'a aucune
+    /// composante Aₓ et demande des colonnes selon y ou z.
+    fn build(pieces: &[([i32; 3], P, P)], ax: usize) -> Fractions {
+        let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
         let mut by: HashMap<(i32, i32), Vec<(i32, f64, f64)>> = HashMap::new();
         for (v, a, c) in pieces {
-            by.entry((v[1], v[2])).or_default().push((v[0], a[0], (c[0] - (v[0] as f64 - 0.5)) * a[0]));
+            by.entry((v[a1], v[a2])).or_default().push((v[ax], a[ax], (c[ax] - (v[ax] as f64 - 0.5)) * a[ax]));
         }
         let cols = by
             .into_par_iter()
@@ -246,14 +253,20 @@ impl Fractions {
                 (jk, out)
             })
             .collect();
-        Fractions { cols }
+        Fractions { axis: ax, cols }
+    }
+
+    /// Axe des colonnes.
+    pub fn axis(&self) -> usize {
+        self.axis
     }
 
     /// Volume solide du voxel (0 à 1) ; hors des voxels coupés, celui du
     /// dernier voxel coupé en amont dans la colonne (0 ou 1).
     pub fn solid(&self, v: [i32; 3]) -> f64 {
-        let Some(col) = self.cols.get(&(v[1], v[2])) else { return 0.0 };
-        match col.binary_search_by_key(&v[0], |e| e.0) {
+        let ax = self.axis;
+        let Some(col) = self.cols.get(&(v[(ax + 1) % 3], v[(ax + 2) % 3])) else { return 0.0 };
+        match col.binary_search_by_key(&v[ax], |e| e.0) {
             Ok(k) => col[k].2,
             Err(0) => 0.0,
             Err(k) => col[k - 1].1.round(),
@@ -265,7 +278,16 @@ impl Fractions {
     }
     /// Voxels coupés (voxel, volume solide).
     pub fn cut(&self) -> impl Iterator<Item = ([i32; 3], f64)> + '_ {
-        self.cols.iter().flat_map(|(&(j, k), c)| c.iter().map(move |e| ([e.0, j, k], e.2)))
+        let ax = self.axis;
+        self.cols.iter().flat_map(move |(&(j, k), c)| {
+            c.iter().map(move |e| {
+                let mut v = [0; 3];
+                v[ax] = e.0;
+                v[(ax + 1) % 3] = j;
+                v[(ax + 2) % 3] = k;
+                (v, e.2)
+            })
+        })
     }
     /// Volume solide total : voxels coupés et voxels pleins entre eux.
     pub fn total_solid(&self) -> f64 {
@@ -508,6 +530,11 @@ fn sweep_overlaps(poly: &[P], n: P, c: P) -> Vec<Overlap> {
 /// Surfels du maillage `tris` (coordonnées de la veine, normales sortantes)
 /// à chaque niveau de `levels` (le premier est en général `Level::base()`).
 pub fn build(tris: &[Tri], levels: &[Level]) -> Vec<LevelSurfels> {
+    build_axis(tris, levels, 0)
+}
+
+/// Comme `build`, fractions solides intégrées en colonnes selon l'axe `ax`.
+pub fn build_axis(tris: &[Tri], levels: &[Level], ax: usize) -> Vec<LevelSurfels> {
     // Plans des domaines propres finis (coordonnées de la veine).
     let mut planes: Vec<(usize, f64)> = Vec::new();
     for l in levels {
@@ -547,10 +574,10 @@ pub fn build(tris: &[Tri], levels: &[Level]) -> Vec<LevelSurfels> {
                 .collect::<Vec<_>>()
         })
         .collect();
-    levels.iter().enumerate().map(|(li, l)| build_level(tris, &parts, li, *l)).collect()
+    levels.iter().enumerate().map(|(li, l)| build_level(tris, &parts, li, *l, ax)).collect()
 }
 
-fn build_level(tris: &[Tri], parts: &[(u32, usize, Vec<P>)], li: usize, l: Level) -> LevelSurfels {
+fn build_level(tris: &[Tri], parts: &[(u32, usize, Vec<P>)], li: usize, l: Level, ax: usize) -> LevelSurfels {
     // Fenêtre (y, z) des colonnes utiles aux fractions : domaine propre et
     // 3 voxels de marge (portée des parallélépipèdes : √2 maille).
     let win: [[f64; 2]; 3] = [0, 1, 2].map(|a| {
@@ -593,7 +620,7 @@ fn build_level(tris: &[Tri], parts: &[(u32, usize, Vec<P>)], li: usize, l: Level
             (*v, a, c)
         })
         .collect();
-    let fractions = Fractions::build(&frac);
+    let fractions = Fractions::build(&frac, ax);
     let mut surfels = Vec::new();
     let mut verts = Vec::new();
     for (v, t, own, q) in pieces {
