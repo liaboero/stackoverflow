@@ -2138,6 +2138,128 @@ décrocher l'aile et dégradent l'attaché (Cz ±4 %, Cx −75 % ou +12 à
 +68 %). Corps d'Ahmed non essayé : rien ne laisse attendre un décollement
 de lunette que l'aile n'obtient pas.
 
+### Raffinement de paroi par zones (`aile_infinie --raff-paroi n`)
+
+But : résoudre la couche externe là où la loi d'équilibre est fausse, par
+des niveaux de plus en couches creuses qui épousent la surface
+(`LayerSpec::zone`, `lbm::raff_paroi`), sous les boîtes de la grille de
+base. Défaut inchangé : sans l'option, aucun chemin de calcul ne change
+(le seul changement hors option : les relevés sur la surface évitent les
+mailles fantômes d'une couche creuse, ce qui ne touche que les couches
+limitées à des bords ou des zones).
+
+**Critère (physique, sans réglage).** La couche interne porte
+τ(y) = τ_p + y dp/ds (Townsend, Mellor) ; la loi d'équilibre, qui suppose
+τ(h) = τ_p, est fausse au raccord dès que
+
+  β_h = h · (dp/ds)⁺ / τ_p > 1.
+
+Un premier calcul de la grille de base (6 cordes, 4 relevés sur la
+dernière) donne par triangle la pression pariétale et la contrainte de la
+loi de paroi moyennées ; dp/ds est la pente, par moindres carrés à une
+dimension le long de la contrainte, de la pression des triangles voisins
+à moins de 2h (faces de même côté d'une arête vive). Le niveau j couvre
+les triangles où β à la hauteur de raccord du niveau j − 1 dépasse 1
+(β₀ > 2ʲ⁻¹) : on raffine tant que la loi est fausse au raccord. Épaisseur
+du niveau le plus fin : règle de `raff_auto`, max(16 mailles, 0,125 L)
+(32 mailles ×16 ici), puis `nested_bands`. β est mis en cache
+(`AILE_BETA=fichier`) ; `AILE_ZONE_Y=w` limite les zones à w mailles de
+la veine autour de la tranche centrale (coût) ; `AILE_ZONE_TOUT=1` prend
+toute la surface.
+
+**Ce que dit le critère** (128 mailles par corde, h = 2 mailles = 1,6 %
+de corde) : β vaut 4 à 26 sur tout l'extrados dès 4° (2 au bord
+d'attaque, 26 au dernier 20e), 7 à 72 à 16° ; à 4°, 95 % de l'extrados
+et 59 % de l'intrados de la tranche centrale sont retenus, à 16° 99 % et
+8 %. Il faudrait 3 à 6 niveaux de plus (×2³ à ×2⁶) pour ramener β sous 1
+au bord de fuite : le critère confirme le diagnostic de « Pourquoi la
+soufflerie ne décolle pas » (h hors de la couche interne partout en
+gradient adverse), mais il ne localise rien ; la zone est l'extrados
+entier.
+
+**Deux défauts des couches creuses trouvés en chemin** (aile infinie, 4°,
+64 mailles + couche ×8 de 16 mailles, bilan à 0,05 / 0,1 / 0,15 / 0,2 c ;
+référence `--bande 16` : Cz 0,462, Cx 0,0142) :
+
+| Couche ×8 | Cz (0,2 c) | Cx selon la marge |
+| --- | --- | --- |
+| toute la surface, sillage = épaisseur (16 mailles) | 0,432 | 0,016 / 0,028 / 0,067 / 0,090 |
+| toute la surface, sans sillage | 0,470 | 0,0152 / 0,0153 / 0,0153 / 0,0153 |
+| toute la surface, sans sillage, 1 corde d'envergure | 0,465 | 0,0155 / 0,0156 / 0,0157 / 0,0158 |
+| zone β > 1 (coupe l'intrados), sans sillage | 0,473 | 0,0228 / 0,0237 / 0,0238 / 0,0242 |
+| base 64 sans couche | 0,456 | 0,0157 / 0,0156 / 0,0156 / 0,0158 |
+
+- *Sillage balayé* (`LayerSpec::wake`, celui de `--raff-auto`) : le
+  bilan sur toute boîte qui traverse le sillage de la couche trouve une
+  traînée qui croît avec la marge, jusqu'à six fois la vraie. Non
+  diagnostiqué plus avant ; les couches par zones s'en passent
+  (`--raff-paroi-sillage 0`, défaut). À vérifier pour `--raff-auto`, dont
+  les essais (TR-1208) mesuraient sur des boîtes plus petites.
+- *Raccord qui coupe la paroi le long de la corde* : là où la zone
+  s'arrête sur la surface (intrados), la traînée gagne 0,008 (+55 %) et
+  la portance 0,6 %, comme pour les grilles des bords. Cause probable
+  (non isolée) : les mailles fantômes voisines de la paroi reçoivent les
+  moments de la grille parente, dont les populations venues de la paroi
+  sont prises par rebond à mi-chemin et non par la loi de paroi ; un
+  raccord dans la couche limite, en travers de l'écoulement, n'est pas
+  neutre. Un raccord qui coupe la paroi
+  dans le sens de l'envergure (zone limitée en y) est, lui, sans effet
+  mesurable (0,4646 / 0,0158 contre 0,4699 / 0,0153).
+
+Les zones du critère ne sont donc utilisables qu'à condition de ne pas
+couper la paroi le long de l'écoulement ; sur l'aile infinie, cela
+revient à toute la surface. Les calculs ci-dessous prennent toute la
+surface sur une corde d'envergure autour de la tranche centrale
+(`AILE_ZONE_TOUT=1 AILE_ZONE_Y=16 --raff-paroi 1`, 128 mailles par corde
+de base, 256 à la paroi), sans sillage.
+
+**Résultats** (bilan sur boîte de la tranche centrale, plus grande marge
+valide ; au-delà de 14°, 4 cordes de moyenne, ± écart type des relevés ;
+base : 128 mailles par corde partout, même programme) :
+
+| α | Base Cz / Cx | ×16 à la paroi Cz / Cx | Ladson Cz | TMR SA Cz / Cx |
+| --- | --- | --- | --- | --- |
+| 4° | 0,462 / 0,0143 | **0,442** / 0,0122 | 0,43–0,44 | — |
+| 8° | 0,899 / 0,0222 | **0,897** / 0,0198 | 0,87–0,89 | — |
+| 14° | 1,504 / 0,045 | 1,501 / 0,038 | 1,44–1,45 | — |
+| 15° | 1,591 ± 0,007 / 0,049 | 1,608 ± 0,008 / 0,039 | 1,51–1,53 | 1,546 / 0,021 |
+| 16° | 1,672 ± 0,003 / 0,042 | 1,762 ± 0,006 / 0,063 | 1,57–1,58 | 1,62 / 0,025 |
+| 17° | 1,794 ± 0,020 / 0,082 | diverge (NaN pendant l'établissement) | 1,61–1,63 | 1,67 / 0,030 |
+| 18° | 1,711 ± 0,016 / 0,092 | 1,751 ± 0,018 / 0,078 | 1,0–1,2 | 1,69 / 0,039 |
+| 19° | 1,789 ± 0,008 / 0,107 | 1,778 ± 0,008 / 0,095 | — | 1,60 / 0,060 |
+
+Suite en maillage à la paroi (16° et 18°, base 64 mailles par corde,
+puis couches ×8 et ×8 + ×16 sur la même corde d'envergure ; base 128 et
+128 + ×16 du tableau) :
+
+| Paroi (mailles par corde) | 64 | 64 → 128 | 64 → 256 | 128 | 128 → 256 |
+| --- | --- | --- | --- | --- | --- |
+| 16° Cz / Cx | 1,622 / 0,047 | 1,700 / 0,048 | 1,731 / 0,056 | 1,672 / 0,042 | 1,762 / 0,063 |
+| 18° Cz / Cx | 1,706 / 0,106 | 1,715 / 0,087 | 1,755 / 0,082 | 1,711 / 0,092 | 1,751 / 0,078 |
+
+- *Écoulement attaché (4°, 8°)* : la couche ×16 améliore. À 4°, Cz passe
+  de 0,462 à 0,442 (dans la fourchette de Ladson pour la première fois sur
+  l'aile infinie) et Cx de 0,0143 à 0,0122 (mesure 0,008) ; à 8°, Cz reste
+  juste (0,897) et Cx baisse de 11 %. Bilan indépendant de la marge
+  (Cx à 1,3 % près, Cz à 0,1 %).
+- *Décrochage : non.* Aucun décollement, ni à la paroi ni le long de la
+  normale, jusqu'à 19° ; au dernier 40e de l'extrados, le minimum de u·t
+  vaut encore 0,7 à 0,9 U∞. La portance *augmente* quand la paroi est
+  affinée (16° : 1,62 → 1,70 → 1,73 à base 64, 1,67 → 1,76 à base 128),
+  au lieu de baisser vers SA (1,62) et Ladson (1,57) ; pas de maximum
+  marqué (1,76 à 16°, 1,75 à 18°, 1,78 à 19°), divergence à 17°, aucune
+  convergence en maillage. Le défaut de fond n'est donc pas levé par
+  deux fois plus de résolution à la paroi : avec h = 2 mailles à 256
+  mailles par corde (0,8 % de corde, y⁺ ≈ 800 à 2000), β (moitié de
+  celui relevé à 128) reste de 2 à 36 sur l'extrados, la couche [0, h] reste un filet glissant, et le
+  gradient adverse ne l'arrête pas. Le critère dit qu'il faudrait 3 à 6
+  niveaux de plus ; ×32 sur une corde d'envergure ferait environ 65 M
+  mailles à l'épaisseur de règle (0,125 L), hors de portée de la carte.
+- *Corps d'Ahmed* : non essayé. Le raffinement local refuse le sol mobile
+  (`Gpu3D::with_plan`), seule condition au sol de la soufflerie, et le
+  calcul de référence (L = 136) prend déjà 5,7 Go ; il faudrait d'abord
+  des couches sans boîtes rattachées directement à la veine.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -2164,7 +2286,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, voir « Raffinement de paroi par zones ») |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `tools/essais_tble.sh` | loi de paroi TBLE (`SOUFFLERIE_TBLE` : base, eq, gp, gpc) sur l'aile infinie, même CSV ; voir « Loi de paroi hors équilibre » |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
@@ -3524,6 +3646,30 @@ calculs (215 à 560 millions de mailles par seconde selon la charge) : le
 coût y est donné par les mises à jour par pas, proportionnelles au temps à
 débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
 mailles du sillage ×8).
+
+### Raffinement de paroi par zones (`aile_infinie --raff-paroi 1`)
+
+Aile infinie, 128 mailles par corde de base (`16 3 6e6 α t - 60`), GTX 1070
+partagée, demi-précision (≈ 100 octets par maille sur le GPU). Sans
+l'option, le calcul est inchangé (un tableau de booléens par maille de
+couche creuse sur le processeur pour les relevés de surface).
+
+| Cas | Base 128 | 128 + couche ×16 (1 corde d'envergure) |
+| --- | --- | --- |
+| Mailles (toutes grilles) | 11,2 à 13,4 M | 19,4 à 21,8 M (couche ×16 : 8,2 à 8,6 M) |
+| Mises à jour par pas de la veine | 65 à 77 M | 195 à 208 M (×2,7 à ×3) |
+| Mémoire du GPU | ≈ 1,1 à 1,3 Go | ≈ 1,9 à 2,2 Go |
+| Mémoire de l'hôte (engagée) | 4,3 Go | 5,4 Go |
+| Durée, 12 cordes (4°) | 183 s | 890 s (GPU partagé) |
+| Durée, 15 cordes (14° à 19°) | 189 à 302 s | 575 à 708 s (×2,1 à ×3) |
+| Mise en place de la couche | — | ≈ 70 s (distances aux triangles retenus) |
+| Premier calcul (β, 6 cordes, sans cache) | — | ≈ 210 s |
+
+Pleine envergure (48 mailles de veine au lieu de 16), la couche ×16 ferait
+20 M mailles à elle seule (33 M en tout) : c'est la limite pratique de la
+GTX 1070 partagée. La mémoire de l'hôte est la contrainte la plus serrée
+quand plusieurs calculs tournent (échecs d'allocation de 115 à 130 Mo
+observés à 21 M mailles).
 
 ### Aéroacoustique : sondes et couches absorbantes
 

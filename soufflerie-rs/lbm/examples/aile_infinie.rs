@@ -124,13 +124,129 @@ fn main() {
     let t0 = std::time::Instant::now();
     // `--raff-auto N` (en fin de ligne) : raffinement automatique au lieu
     // de `raff` et `bandes`.
-    let mut sim = match lbm::raff_auto::options_from_args(&a) {
-        Some(o) => lbm::raff_auto::build(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), &o).unwrap(),
-        None => Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &bands).unwrap(),
+    // `--raff-paroi n` : raffinement de paroi par zones de gradient adverse
+    // (`lbm::raff_paroi`), n niveaux de plus que la grille de base, choisis
+    // sur un premier calcul de la grille de base (`--raff-paroi-t` cordes,
+    // défaut min(t, 6)) ; `--raff-paroi-bande b` : épaisseur du niveau le
+    // plus fin (mailles ; défaut max(16, 0,125 L)) ; `--raff-paroi-sillage s` :
+    // sillage des couches de s fois leur épaisseur (défaut 0 : le sillage des
+    // couches creuses fausse le bilan, voir le README) ; AILE_ZONE_Y=w : zones
+    // limitées à une largeur w (mailles de la veine) autour de la tranche
+    // centrale (coût).
+    let opt = |k: &str| a.iter().position(|v| v == k).and_then(|i| a.get(i + 1)).and_then(|v| v.parse::<f64>().ok());
+    let paroi_plan = opt("--raff-paroi").map(|nz| {
+        let nz = nz as usize;
+        assert!(bands.is_empty(), "--raff-paroi : sans couches pariétales de base");
+        let t1 = opt("--raff-paroi-t").unwrap_or(t_end.min(6.0));
+        let tp = std::time::Instant::now();
+        let tris = &body.mesh.as_ref().unwrap().tris;
+        // AILE_BETA=fichier : β du premier calcul relu s'il existe (même
+        // maquette, incidence et grille de base), sinon écrit.
+        let cache = std::env::var("AILE_BETA").ok();
+        let lu: Option<Vec<f64>> = cache.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.split_whitespace().map(|v| v.parse().unwrap_or(f64::NAN)).collect());
+        let beta = match lu.filter(|b| b.len() == tris.len()) {
+            Some(b) => b,
+            None => {
+        let mut s0 = Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &[]).unwrap();
+        s0.periodic_span = true;
+        if essai != 0 {
+            let cap = std::env::var("AILE_NUCAP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            s0.set_essai(essai, cap * u as f64 * lf / re);
+        }
+        s0.run(((t1 - 1.0).max(0.0) * spt) as usize, &ramp);
+        let mut zs = lbm::raff_paroi::ZoneStats::new(tris.len());
+        for _ in 0..4 {
+            s0.run((0.25 * spt) as usize, &ramp);
+            if let Some(sf) = s0.surface_forces() {
+                zs.add(&sf);
+            }
+        }
+        drop(s0);
+        let b = zs.beta(tris);
+        if let Some(f) = cache.as_ref() {
+            let _ = std::fs::write(f, b.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("
+"));
+        }
+        b
+            }
+        };
+        let yc = 2.0 * (ny / 4) as f64;
+        let wy: Option<f64> = std::env::var("AILE_ZONE_Y").ok().and_then(|v| v.parse().ok());
+        let cen = |t: &lbm::stl::Tri| [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
+        let keep = |i: usize| wy.is_none_or(|w| (cen(&tris[i])[1] - yc).abs() <= 0.5 * w);
+        // AILE_ZONE_TOUT=1 : toute la surface (contrôle : couche sans raccord
+        // coupant la paroi, comme `--bande`).
+        let tout = std::env::var("AILE_ZONE_TOUT").is_ok();
+        let beta_z: Vec<f64> = if tout { vec![f64::INFINITY; beta.len()] } else { beta.clone() };
+        let zones = lbm::raff_paroi::zones(&beta_z, nz, keep);
+        let bands_z = lbm::raff_paroi::bands(lf, raff, nz, opt("--raff-paroi-bande"));
+        // Résumé sur la tranche centrale : part de corde couverte par
+        // niveau, extrados et intrados, et β le long de l'extrados.
+        let (le, tev) = (pts[n], pts[0]);
+        let ch2 = (tev[0] - le[0]).powi(2) + (tev[1] - le[1]).powi(2);
+        let xc_of = |c: [f64; 3]| ((c[0] - le[0]) * (tev[0] - le[0]) + (c[2] - le[1]) * (tev[1] - le[1])) / ch2;
+        let upper = |c: [f64; 3]| (tev[0] - le[0]) * (c[2] - le[1]) - (tev[1] - le[1]) * (c[0] - le[0]) > 0.0;
+        let row = |i: usize| (cen(&tris[i])[1] - yc).abs() < 1.0;
+        println!("  raffinement de paroi : premier calcul {t1} cordes, {:.0} s ; épaisseurs {:?} mailles", tp.elapsed().as_secs_f64(), bands_z);
+        for (j, z) in zones.iter().enumerate() {
+            let (mut se, mut si, mut ne, mut ni) = (0.0, 0.0, 0.0, 0.0);
+            let (mut xe, mut xi) = ([f64::INFINITY, f64::NEG_INFINITY], [f64::INFINITY, f64::NEG_INFINITY]);
+            for (i, t) in tris.iter().enumerate() {
+                if !row(i) {
+                    continue;
+                }
+                let c = cen(t);
+                let ar = 0.5 * {
+                    let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
+                    let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
+                    ((e1[1] * e2[2] - e1[2] * e2[1]).powi(2) + (e1[2] * e2[0] - e1[0] * e2[2]).powi(2) + (e1[0] * e2[1] - e1[1] * e2[0]).powi(2)).sqrt()
+                };
+                let x = xc_of(c);
+                let (s_, n_, xr) = if upper(c) { (&mut se, &mut ne, &mut xe) } else { (&mut si, &mut ni, &mut xi) };
+                *n_ += ar;
+                if z[i] {
+                    *s_ += ar;
+                    xr[0] = xr[0].min(x);
+                    xr[1] = xr[1].max(x);
+                }
+            }
+            println!(
+                "  niveau +{} (×{}) : {:.1} % des triangles · tranche centrale : extrados {:.0} % (x/c {:.2}–{:.2}), intrados {:.0} % (x/c {:.2}–{:.2})",
+                j + 1,
+                1u64 << (raff + j + 1),
+                100.0 * z.iter().filter(|&&k| k).count() as f64 / z.len() as f64,
+                100.0 * se / ne.max(1e-12),
+                xe[0],
+                xe[1],
+                100.0 * si / ni.max(1e-12),
+                xi[0],
+                xi[1]
+            );
+        }
+        let mut bins = [[0.0f64; 2]; 20];
+        for (i, t) in tris.iter().enumerate() {
+            let c = cen(t);
+            if row(i) && upper(c) && beta[i].is_finite() {
+                let b = ((xc_of(c) * 20.0).floor().max(0.0) as usize).min(19);
+                bins[b][0] += beta[i];
+                bins[b][1] += 1.0;
+            }
+        }
+        let v: Vec<String> = bins.iter().enumerate().map(|(b, x)| format!("{:.2}:{:.2}", (b as f64 + 0.5) / 20.0, x[0] / x[1].max(1.0))).collect();
+        println!("  β extrados (x/c:β moyen) {}", v.join(" "));
+        lbm::raff_paroi::plan(raff, &zones, &bands_z, opt("--raff-paroi-sillage").unwrap_or(0.0))
+    });
+    let mut sim = match (paroi_plan, lbm::raff_auto::options_from_args(&a)) {
+        (Some(p), _) => Gpu3D::with_plan(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), &p).unwrap(),
+        (None, Some(o)) => lbm::raff_auto::build(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), &o).unwrap(),
+        (None, None) => Gpu3D::with_refinement_edges(&body, nu, u, std::env::var("AILE_F32").is_err(), lbm::gpu3d::Turbulence::rans_from_env(), raff, false, false, &bands).unwrap(),
     };
     {
-        let cells: usize = sim.grid_cells().iter().map(|c| c.0).sum();
-        println!("  mailles (toutes grilles) : {:.2} M, modèle {}", cells as f64 / 1e6, if sim.keps { "k-ε RNG" } else { "Spalart–Allmaras" });
+        let gc = sim.grid_cells();
+        let cells: usize = gc.iter().map(|c| c.0).sum();
+        let upd: f64 = gc.iter().map(|c| c.0 as f64 * (1u64 << c.1) as f64).sum();
+        let per: Vec<String> = gc.iter().map(|c| format!("×{} {:.2} M", 1u64 << c.1, c.0 as f64 / 1e6)).collect();
+        println!("  mailles (toutes grilles) : {:.2} M ({}), {:.1} M mises à jour par pas de la veine, modèle {}", cells as f64 / 1e6, per.join(", "), upd / 1e6, if sim.keps { "k-ε RNG" } else { "Spalart–Allmaras" });
     }
     if let Ok(f) = std::env::var("AILE_DUMP") {
         // Champ fin (u, w, ρ de la rangée centrale) après AILE_DUMP_T cordes.
