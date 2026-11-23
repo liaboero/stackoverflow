@@ -3,7 +3,8 @@
 # alternance sur les cas de référence, médiane des durées de calcul, et
 # écart relatif maximal des efforts et sommes de contrôle du champ.
 #   banc/vitesse.sh avant.exe apres.exe [n] [cas…]
-# Vérifier que le GPU est libre (nvidia-smi) avant de lancer.
+# Vérifier que le GPU est libre (nvidia-smi) avant de lancer. PAUSE=s : pause
+# entre deux lancements (la GTX 1070 portable chauffe et baisse sa fréquence).
 A=$1; B=$2; N=${3:-3}
 shift 3 2>/dev/null
 CAS=${*:-"ahmed:1 ahmedr:1 aile:1 ailer:0.5 ar4c3:0.25"}
@@ -15,6 +16,7 @@ for ct in $CAS; do
   for i in $(seq "$N"); do
     for e in A B; do
       [ $e = A ] && x=$A || x=$B
+      sleep "${PAUSE:-0}"
       "$x" "$c" --t "$t" --sortie "$T/$c.$e.txt" 2>/dev/null | grep MLUPS >> "$T/$c.$e.log"
     done
   done

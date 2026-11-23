@@ -436,6 +436,53 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ";
 
+/// Transport de ν̃ (ou de k, ε) des grilles boîtes à grands plans : mailles parcourues
+/// par briques de rangées x entières, SA_BY rangées en y et SA_BZ en z
+/// (briques voisines en y consécutives), au lieu de plans entiers. Au-delà
+/// de SA_PLAN mailles par plan, les trois plans voisins d'une maille ne
+/// tiennent plus dans le cache (2 Mo) et ν̃, u y étaient relus trois fois ;
+/// en deçà, l'ordre des plans reste plus rapide. Même calcul par maille que
+/// `SA3_WGSL` (ou `KE3_WGSL`, même en-tête). Essais (Ahmed, plan de 53 k mailles) : 4 × 16 1,455 → 0,82 ms,
+/// 8 × 8 0,85, 4 × 4 0,93, 8 × 2 1,10 ; colonnes z en registres (un fil par
+/// (x, y) et 4 à 64 plans) 0,93 à 1,21, et plus lentes sur les petits plans.
+const SA_BY: u32 = 4;
+const SA_BZ: u32 = 16;
+const SA_PLAN: usize = 32768;
+
+fn bricked(base: String, bricks: bool) -> String {
+    if !bricks {
+        return base;
+    }
+    let head = "  let idx = gid.x + gid.y * nwg.x * 64u;
+  if (idx >= P.N) { return; }
+  let pp = pos_of(idx);
+  let x = pp.x;
+  let y = pp.y;
+  let z = pp.z;
+";
+    assert!(base.contains(head), "transport : en-tête");
+    let (by, bz) = (SA_BY, SA_BZ);
+    base.replace(
+        head,
+        &format!(
+            "  let t = gid.x + gid.y * nwg.x * 64u;
+  let r = t / P.nx;
+  let x = i32(t % P.nx);
+  let b = r / {bb}u;
+  let w = r % {bb}u;
+  let nby = (P.ny + {by}u - 1u) / {by}u;
+  let yu = b % nby * {by}u + w % {by}u;
+  let zu = b / nby * {bz}u + w / {by}u;
+  if (yu >= P.ny || zu >= P.nz) {{ return; }}
+  let y = i32(yu);
+  let z = i32(zu);
+  let idx = u32(x) + P.nx * (yu + P.ny * zu);
+",
+            bb = by * bz
+        ),
+    )
+}
+
 /// k-ε RNG (Yakhot et al. 1992) : constantes, viscosité turbulente et état
 /// amont, communs au transport, à la collision et aux raccords.
 const KE_FNS: &str = "
@@ -2525,6 +2572,8 @@ pub struct Gpu3D {
     pub(crate) bind: Vec<wgpu::BindGroup>,
     init_bind: Vec<wgpu::BindGroup>,
     pub(crate) disp: (u32, u32),
+    /// Lancement du transport de ν̃ (k-ε).
+    pub(crate) sa_disp: (u32, u32),
     pub(crate) cur: usize,
     pub time: u64,
     pub(crate) force_steps: u64,
@@ -4611,12 +4660,14 @@ impl Gpu3D {
             [sa as u32 + keps as u32 + vles as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
         );
         let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16, p16), true);
+        // ν̃ (ou k, ε) par briques sur les grilles boîtes à grands plans.
+        let bricks = sparse.is_none() && nx * ny > SA_PLAN;
         let sa_pipe = if keps {
             let ke = KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS);
             let ke = if vles { ke.replace("const VLES = false;", "const VLES = true;") } else { ke };
-            pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{ke}"), true)
+            pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(ke, bricks)), true)
         } else {
-            pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS)), true)
+            pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS), bricks)), true)
         };
         // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
         let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4830,6 +4881,14 @@ impl Gpu3D {
         let groups = (ns as u32).div_ceil(64);
         let dx = groups.min(65535);
         let disp = (dx, groups.div_ceil(dx));
+        let sa_disp = if bricks {
+            let (by, bz) = (SA_BY, SA_BZ);
+            let groups = (nx as u32 * (ny as u32).div_ceil(by) * by * (nz as u32).div_ceil(bz) * bz).div_ceil(64);
+            let dx = groups.min(65535);
+            (dx, groups.div_ceil(dx))
+        } else {
+            disp
+        };
         let mut s = Gpu3D {
             device,
             queue,
@@ -4895,6 +4954,7 @@ impl Gpu3D {
             bind,
             init_bind,
             disp,
+            sa_disp,
             cur: 0,
             time: 0,
             force_steps: 0,
@@ -5315,7 +5375,7 @@ impl Gpu3D {
                     if self.sa {
                         pass.set_pipeline(&self.sa_pipe);
                         pass.set_bind_group(0, &self.sa_bind[self.cur], &[off]);
-                        pass.dispatch_workgroups(self.disp.0, self.disp.1, 1);
+                        pass.dispatch_workgroups(self.sa_disp.0, self.sa_disp.1, 1);
                     }
                     self.cur = 1 - self.cur;
                 }
@@ -6104,7 +6164,7 @@ impl Gpu3D {
                     time(g, &|p| {
                         p.set_pipeline(&g.sa_pipe);
                         p.set_bind_group(0, &g.sa_bind[g.cur], &[0]);
-                        p.dispatch_workgroups(g.disp.0, g.disp.1, 1);
+                        p.dispatch_workgroups(g.sa_disp.0, g.sa_disp.1, 1);
                     }),
                 ));
             }

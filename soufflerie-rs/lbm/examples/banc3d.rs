@@ -17,6 +17,7 @@
 //! et ×16 de 16 mailles : `aile_infinie 16 2 6e6 4 t 16,16`).
 //! `--raff-auto N` remplace le raffinement du cas par le raffinement
 //! automatique (`lbm::raff_auto`, N mailles par longueur à la paroi).
+//! `SOUFFLERIE_RANS=keps|vles` : k-ε RNG ou VLES au lieu de Spalart–Allmaras.
 //! La boucle reprend celle de `soufflerie run3d` : efforts relevés tous les
 //! quarts de temps convectif, intégration sur la surface et bilan sur boîtes
 //! tous les demi-temps convectifs pendant la fenêtre de moyenne.
@@ -149,13 +150,15 @@ fn main() {
     };
     let mesh = body.mesh.is_some();
     let nu = U as f64 * l as f64 / re;
-    let sa = re >= lbm::tunnel::RE_SA_AUTO;
+    // Modèle RANS : Spalart–Allmaras, ou SOUFFLERIE_RANS=keps|vles.
+    let sa = if re >= lbm::tunnel::RE_SA_AUTO { lbm::gpu3d::Turbulence::rans_from_env() } else { lbm::gpu3d::Turbulence::Laminar };
     let t0 = Instant::now();
     let mut sim = match lbm::raff_auto::options_from_args(&args) {
         Some(o) => lbm::raff_auto::build(&body, nu, U, true, sa, &o).expect("GPU"),
         None => Gpu3D::with_refinement_edges(&body, nu, U, true, sa, depth, false, false, &bands).expect("GPU"),
     };
     let prep = t0.elapsed().as_secs_f64();
+    eprintln!("veine {} × {} × {}", sim.nx, sim.ny, sim.nz);
     let cells = sim.grid_cells();
     let per_step: f64 = cells.iter().map(|&(n, d)| (n as f64) * (1u64 << d) as f64).sum();
     eprintln!(

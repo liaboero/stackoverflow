@@ -751,8 +751,8 @@ impl Link3 {
         }
         let nn = (pnode.len() / 3) as u32;
         // Groupes de l'interpolation : au plus GWG fantômes consécutifs
-        // (couche : rangés par blocs de 8³ ; boîte : par rangées) dont les pochoirs touchent au plus GNODES nœuds
-        // parents. Fantômes [tile[2t], tile[2t + 2]), nœuds [tile[2t + 1],
+        // (couche : rangés par blocs de 8³ ; boîte : par rangées) dont les
+        // pochoirs touchent au plus GNODES nœuds parents. Fantômes [tile[2t], tile[2t + 2]), nœuds [tile[2t + 1],
         // tile[2t + 3]) de `tnode` (rangs dans `pm`) ; `gslot` passe en rangs
         // dans la liste du groupe, lue une fois en mémoire partagée.
         let mut tile: Vec<u32> = Vec::new();
@@ -858,6 +858,14 @@ impl Link3 {
                     }
                 }
             }
+        }
+        // Ordre de stockage de la grille parente (blocs de 8³ d'une couche) :
+        // écritures des nœuds recopiés contiguës dans chaque bloc.
+        if let Some(m) = parent.sparse.as_ref() {
+            rl.sort_by_key(|&q| {
+                let q = q as usize;
+                m.id(q % pnx, (q / pnx) % pny, q / (pnx * pny))
+            });
         }
         let nr = rl.len() as u32;
         let rl_pos = rl.clone();
@@ -1177,7 +1185,7 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
         if lev.sa {
             pass.set_pipeline(&lev.sa_pipe);
             pass.set_bind_group(0, &lev.sa_bind[lev.cur], &[slot]);
-            pass.dispatch_workgroups(lev.disp.0, lev.disp.1, 1);
+            pass.dispatch_workgroups(lev.sa_disp.0, lev.sa_disp.1, 1);
         }
         lev.cur = 1 - lev.cur;
     }
