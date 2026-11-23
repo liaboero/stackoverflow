@@ -158,6 +158,12 @@ fn main() {
     let z_caisse = bb.z0 + (ahmed::GARDE + depth) / h;
     let to_mm = |p: [f64; 3]| [(p[0] - bb.x0) * h, (p[1] - ymid) * h, (p[2] - z_caisse) * h];
     let xs = ahmed::LONGUEUR - ahmed::LUNETTE * phi.to_radians().cos();
+    println!(
+        "Arête du toit (réseau) : x = {:.2}, z = {:.2} ; culot x = {:.2}",
+        bb.x0 + xs / h,
+        z_caisse + ahmed::HAUTEUR / h,
+        bb.x0 + ahmed::LONGUEUR / h
+    );
     // Aire de chaque triangle placé, retrouvé par son centre.
     let key = |c: [f64; 3]| c.map(|v| v.to_bits());
     let mut aire: HashMap<[u64; 3], f64> = HashMap::new();
