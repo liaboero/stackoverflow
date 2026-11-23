@@ -1368,6 +1368,17 @@ Mesure TR-1208 : 0,257 / 0,011 à 4°, 0,499 / 0,021 à 8° ; VSPAERO 0,266 /
 
 `--raff-auto` reste une option ; le défaut ne change pas.
 
+Ces mesures précèdent la correction du sillage balayé (« Raffinement de
+paroi par zones ») : l'effet du sillage ×8 sur TR-1208 (−20 à −40 % de
+traînée) est à refaire. Vérifié depuis : `banc3d ahmedr --raff-auto 128`
+(Ahmed sans sol) est inchangé au bit près ; `aile_infinie … --raff-auto
+128` diverge, avant comme après ; avec `--raff-auto 64`, le bilan de
+l'aile infinie dépend de la marge (0,008 à 0,002 avant, 0,021 à 0,027
+après), comme celui d'Ahmed (0,309 / 0,331 à 0,05 / 0,1 L) : la grille
+entière la plus fine est une boîte serrée dont les faces passent dans la
+couche de la paroi, en partie recopiée de la grille fine (même recopie
+non conservative que dans le sillage). Le bilan y reste inexploitable.
+
 ### Normales lisses et relevés multiples sur la surface
 
 Le maillage d'une maquette ne décrit qu'une surface plane par facettes ;
@@ -2177,38 +2188,57 @@ soufflerie ne décolle pas » (h hors de la couche interne partout en
 gradient adverse), mais il ne localise rien ; la zone est l'extrados
 entier.
 
-**Deux défauts des couches creuses trouvés en chemin** (aile infinie, 4°,
-64 mailles + couche ×8 de 16 mailles, bilan à 0,05 / 0,1 / 0,15 / 0,2 c ;
-référence `--bande 16` : Cz 0,462, Cx 0,0142) :
+**Deux défauts des couches creuses trouvés en chemin, corrigés** (aile
+infinie, 4°, `aile_infinie 16 2 6e6 4 12 - 60 --raff-paroi 1` : base 64
+mailles par corde, couche ×8 de 16 mailles, 12 cordes, moyenne sur la
+dernière ; Cx du bilan sur boîte aux marges 0,05 / 0,1 / 0,15 / 0,2 c) :
 
-| Couche ×8 | Cz (0,2 c) | Cx selon la marge |
-| --- | --- | --- |
-| toute la surface, sillage = épaisseur (16 mailles) | 0,432 | 0,016 / 0,028 / 0,067 / 0,090 |
-| toute la surface, sans sillage | 0,470 | 0,0152 / 0,0153 / 0,0153 / 0,0153 |
-| toute la surface, sans sillage, 1 corde d'envergure | 0,465 | 0,0155 / 0,0156 / 0,0157 / 0,0158 |
-| zone β > 1 (coupe l'intrados), sans sillage | 0,473 | 0,0228 / 0,0237 / 0,0238 / 0,0242 |
-| base 64 sans couche | 0,456 | 0,0157 / 0,0156 / 0,0156 / 0,0158 |
+| Couche ×8 | Avant : Cx selon la marge | Après : Cx selon la marge | Cz (0,2 c) avant / après |
+| --- | --- | --- | --- |
+| toute la surface, sillage = épaisseur | 0,0135 / 0,0240 / 0,0604 / 0,0836 | 0,0126 / 0,0125 / 0,0124 / 0,0125 (1,6 %) | 0,431 / 0,471 |
+| toute la surface, sans sillage | 0,0136 / 0,0137 / 0,0137 / 0,0140 | 0,0133 / 0,0133 / 0,0133 / 0,0134 (0,8 %) | 0,469 / 0,473 |
+| zone β > 1 (coupe la paroi le long de la corde, extrados dès x/c 0,06) | 0,0271 / 0,0289 / 0,0289 / 0,0293 | 0,0172 / 0,0174 / 0,0173 / 0,0176 | 0,489 / 0,468 |
+| zone β > 1 plus x/c < 0,1 (coupe l'intrados) | 0,0132 / 0,0133 / 0,0133 / 0,0134 | 0,0132 / 0,0133 / 0,0131 / 0,0132 (1 % de la surface entière) | 0,469 / 0,471 |
+| base 64 sans couche | 0,0157 / 0,0156 / 0,0156 / 0,0158 | 0,0155 / 0,0153 / 0,0155 / 0,0157 | 0,456 / 0,458 |
 
-- *Sillage balayé* (`LayerSpec::wake`, celui de `--raff-auto`) : le
-  bilan sur toute boîte qui traverse le sillage de la couche trouve une
-  traînée qui croît avec la marge, jusqu'à six fois la vraie. Non
-  diagnostiqué plus avant ; les couches par zones s'en passent
-  (`--raff-paroi-sillage 0`, défaut). À vérifier pour `--raff-auto`, dont
-  les essais (TR-1208) mesuraient sur des boîtes plus petites.
-- *Raccord qui coupe la paroi le long de la corde* : là où la zone
-  s'arrête sur la surface (intrados), la traînée gagne 0,008 (+55 %) et
-  la portance 0,6 %, comme pour les grilles des bords. Cause probable
-  (non isolée) : les mailles fantômes voisines de la paroi reçoivent les
-  moments de la grille parente, dont les populations venues de la paroi
-  sont prises par rebond à mi-chemin et non par la loi de paroi ; un
-  raccord dans la couche limite, en travers de l'écoulement, n'est pas
-  neutre. Un raccord qui coupe la paroi
-  dans le sens de l'envergure (zone limitée en y) est, lui, sans effet
-  mesurable (0,4646 / 0,0158 contre 0,4699 / 0,0153).
+- *Sillage balayé* (`LayerSpec::wake`, celui de `--raff-auto`) : les
+  blocs de 8³ ajoutés pour le sillage ne contenaient que les mailles du
+  sillage, pas leurs voisines ; une maille active au bord d'un bloc lisait
+  alors le bloc vide 0, jamais rempli : source parasite de masse et de
+  quantité de mouvement (traînée de la surface négative, débit à travers
+  la boîte ×3), d'où la traînée six fois trop forte des grandes boîtes.
+  Les blocs voisins sont maintenant ajoutés, et la mise en place d'une
+  couche s'arrête en erreur si une maille active a une voisine hors des
+  blocs. Restait 5 % d'écart entre marges : les nœuds du sillage étaient
+  recopiés vers la grille parente, et la frontière de cette recopie (non
+  conservative : l'état parent y est remplacé par celui de la grille fine)
+  coupait le sillage, où les deux grilles diffèrent le plus ; la recopie
+  est limitée à la bande pariétale, comme sans sillage (la grille fine du
+  sillage garde son rôle : éloigner de la couche ses propres fantômes).
+  Le sillage baisse alors la traînée de 6 % (0,0125 contre 0,0133) sans
+  dépendance à la boîte.
+- *Raccord qui coupe la paroi* : le tirage des mailles fantômes
+  (`refine3d`, `pre_at`) prenait les populations venues de la paroi par
+  rebond à mi-chemin sur paroi fixe, alors que la grille parente applique
+  Bouzidi avec le glissement de la loi de paroi et la viscosité de sa
+  couche pariétale ν_w : les fantômes voisins de la paroi recevaient une
+  paroi adhérente (vitesse trop faible, contrainte trop forte). Le tirage
+  refait maintenant le pas pariétal de la grille parente (mêmes liens,
+  même glissement u_w, ν_w dans τ). Effet là où un raccord coupe la paroi
+  (zones, grilles des bords, bouts d'envergure des grilles fines de
+  l'aile infinie) ; aucun ailleurs. Coupée sur l'intrados, la zone
+  retrouve la couche entière à 1 % près. L'écart restant de la zone β > 1
+  (+30 %) n'est pas le raccord : elle laisse grossier le bord d'attaque de
+  l'extrados (x/c < 0,06), et la traînée suit la résolution de cette
+  région (zone x/c 0,3–1 : 0,0153, celle de la base 64 ; zone 0–0,7 :
+  0,0096). `SOUFFLERIE_RACCORD_PAROI=0` rend l'ancien tirage ; un relevé
+  de la loi de paroi fine sur les fantômes, essayé aussi, n'apportait
+  presque rien (0,0169 contre 0,0174) et faussait `--raff-auto 64` :
+  écarté.
 
-Les zones du critère ne sont donc utilisables qu'à condition de ne pas
-couper la paroi le long de l'écoulement ; sur l'aile infinie, cela
-revient à toute la surface. Les calculs ci-dessous prennent toute la
+Les zones du critère sont donc utilisables, à condition d'y ajouter le
+bord d'attaque. Les calculs ci-dessous, antérieurs à ces corrections,
+prennent toute la
 surface sur une corde d'envergure autour de la tranche centrale
 (`AILE_ZONE_TOUT=1 AILE_ZONE_Y=16 --raff-paroi 1`, 128 mailles par corde
 de base, 256 à la paroi), sans sillage.
@@ -2286,7 +2316,7 @@ arguments en tête de chaque fichier) :
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
 | `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, voir « Raffinement de paroi par zones ») |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, zone par tranche de corde `AILE_ZONE_XC=a,b` ou ajoutée à celle du critère `AILE_ZONE_PLUS=a,b`, bilan détaillé par faces `AILE_BILAN=2`, voir « Raffinement de paroi par zones ») |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `tools/essais_tble.sh` | loi de paroi TBLE (`SOUFFLERIE_TBLE` : base, eq, gp, gpc) sur l'aile infinie, même CSV ; voir « Loi de paroi hors équilibre » |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
@@ -3743,6 +3773,23 @@ calculs (215 à 560 millions de mailles par seconde selon la charge) : le
 coût y est donné par les mises à jour par pas, proportionnelles au temps à
 débit égal. Mise en place : +8 s sur TR-1208 (distances à la paroi des
 mailles du sillage ×8).
+
+### Raccords neutres (sillage balayé, raccord qui coupe la paroi)
+
+Aile infinie 4°, couche ×8 avec sillage (`aile_infinie 16 2 6e6 4 12 - 60
+--raff-paroi 1 --raff-paroi-sillage 1`, `AILE_ZONE_TOUT=1`), GPU partagé.
+Sans raffinement et avec des grilles boîtes qui entourent la maquette
+(`banc3d ar4n`, `ar4`), champs identiques au bit près.
+
+| | Avant | Après |
+| --- | --- | --- |
+| Mailles (toutes grilles) | 7,77 M (couche 3,39 M) | 7,85 M (couche 3,47 M : blocs voisins du sillage) |
+| Mises à jour par pas de la veine | 37,0 M | 37,6 M (+1,6 %) |
+| Durée, 12 cordes | 359 s | 383 s (GPU partagé : dans la dispersion) |
+| Mise en place | — | contrôle des voisines des mailles actives : un parcours en parallèle de la couche |
+| Tirage des fantômes | — | liens de Bouzidi aux seuls nœuds parents pariétaux des pochoirs (raccords qui coupent la paroi) |
+
+Sans sillage ni coupure de la paroi, coût inchangé.
 
 ### Raffinement de paroi par zones (`aile_infinie --raff-paroi 1`)
 

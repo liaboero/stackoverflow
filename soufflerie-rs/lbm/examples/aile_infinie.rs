@@ -129,8 +129,7 @@ fn main() {
     // sur un premier calcul de la grille de base (`--raff-paroi-t` cordes,
     // défaut min(t, 6)) ; `--raff-paroi-bande b` : épaisseur du niveau le
     // plus fin (mailles ; défaut max(16, 0,125 L)) ; `--raff-paroi-sillage s` :
-    // sillage des couches de s fois leur épaisseur (défaut 0 : le sillage des
-    // couches creuses fausse le bilan, voir le README) ; AILE_ZONE_Y=w : zones
+    // sillage des couches de s fois leur épaisseur (défaut 0) ; AILE_ZONE_Y=w : zones
     // limitées à une largeur w (mailles de la veine) autour de la tranche
     // centrale (coût).
     let opt = |k: &str| a.iter().position(|v| v == k).and_then(|i| a.get(i + 1)).and_then(|v| v.parse::<f64>().ok());
@@ -177,7 +176,20 @@ fn main() {
         // AILE_ZONE_TOUT=1 : toute la surface (contrôle : couche sans raccord
         // coupant la paroi, comme `--bande`).
         let tout = std::env::var("AILE_ZONE_TOUT").is_ok();
-        let beta_z: Vec<f64> = if tout { vec![f64::INFINITY; beta.len()] } else { beta.clone() };
+        let mut beta_z: Vec<f64> = if tout { vec![f64::INFINITY; beta.len()] } else { beta.clone() };
+        // AILE_ZONE_XC=a,b (diagnostic des raccords qui coupent la paroi) :
+        // zone = triangles de x/c dans [a, b], extrados et intrados.
+        // AILE_ZONE_PLUS=a,b : idem, ajoutés à la zone du critère.
+        let plus = std::env::var("AILE_ZONE_PLUS").is_ok();
+        if let Some(r) = std::env::var(if plus { "AILE_ZONE_PLUS" } else { "AILE_ZONE_XC" }).ok().map(|v| v.split(',').filter_map(|t| t.parse::<f64>().ok()).collect::<Vec<_>>()) {
+            let (le, tev) = (pts[n], pts[0]);
+            let ch2 = (tev[0] - le[0]).powi(2) + (tev[1] - le[1]).powi(2);
+            for (i, t) in tris.iter().enumerate() {
+                let c = cen(t);
+                let x = ((c[0] - le[0]) * (tev[0] - le[0]) + (c[2] - le[1]) * (tev[1] - le[1])) / ch2;
+                beta_z[i] = if x >= r[0] && x <= r[1] { f64::INFINITY } else if plus { beta_z[i] } else { 0.0 };
+            }
+        }
         let zones = lbm::raff_paroi::zones(&beta_z, nz, keep);
         let bands_z = lbm::raff_paroi::bands(lf, raff, nz, opt("--raff-paroi-bande"));
         // Résumé sur la tranche centrale : part de corde couverte par
@@ -393,6 +405,9 @@ fn main() {
                 let uin = u as f64;
                 let tw = |i: i64, a: i64, b: i64| if i == a || i == b { 0.5 } else { 1.0 };
                 let (mut fl, mut mass) = ([0.0f64; 2], 0.0f64);
+                // Détail (AILE_BILAN=2) : part x de chaque famille de faces
+                // (x, z, y), convection et pression.
+                let mut part = [[0.0f64; 2]; 3];
                 let mut add = |x: i64, j: i64, z: i64, n: [f64; 3], w: f64| {
                     let c = mac[x as usize + d[0] * (j as usize + d[1] * z as usize)];
                     let (ux, uy, uz, r) = (c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64);
@@ -401,6 +416,9 @@ fn main() {
                     fl[0] += w * (r * (ux - uin) * un + p * n[0]);
                     fl[1] += w * (r * uz * un + p * n[2]);
                     mass += w * r * un;
+                    let fam = if n[0] != 0.0 { 0 } else if n[2] != 0.0 { 1 } else { 2 };
+                    part[fam][0] += w * r * (ux - uin) * un;
+                    part[fam][1] += w * p * n[0];
                 };
                 let (ja, jb) = (j0 as i64, j1 as i64);
                 for j in ja..=jb {
@@ -423,6 +441,10 @@ fn main() {
                     }
                 }
                 let span = (jb - ja) as f64;
+                if std::env::var("AILE_BILAN").is_ok_and(|v| v == "2") {
+                    let k = -1.0 / span / (q * lf * sc);
+                    print!(" [x {:.4}+{:.4} z {:.4}+{:.4} y {:.4}+{:.4}]", k * part[0][0], k * part[0][1], k * part[1][0], k * part[1][1], k * part[2][0], k * part[2][1]);
+                }
                 if std::env::var("AILE_BILAN").is_ok() {
                     print!(" {:.4}/{:.4} (débit {:.2e})", -fl[1] / span / (q * lf * sc), -fl[0] / span / (q * lf * sc), mass / span / (uin * lf * sc));
                     if k + 1 == MARGES.len() { println!(); }
