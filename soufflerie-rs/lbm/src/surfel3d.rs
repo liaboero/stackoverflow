@@ -181,6 +181,11 @@ pub struct Stats {
     /// V_y − Σ w, y fluide, y + cᵢ solide) : perdu (nul pour une géométrie
     /// exacte ; les bords d'une grille fine relèvent des raccords).
     pub leak: f64,
+    /// Voxels traversés par deux faces opposées (paroi plus mince qu'un voxel).
+    pub thin: usize,
+    /// Entrées des relevés de vitesse (somme sur les surfels), surfels sans relevé.
+    pub probe_entries: usize,
+    pub no_probe: usize,
 }
 
 /// Tables de la paroi volumique d'une grille boîte.
@@ -227,8 +232,8 @@ pub const PROBE_H: f64 = 2.0;
 /// Mailles du relevé : nœuds entièrement fluides à une hauteur η de la paroi
 /// dans [PROBE_ETA0, PROBE_ETA1] et à moins de PROBE_R de la normale du surfel.
 pub const PROBE_ETA0: f64 = 0.5;
-pub const PROBE_ETA1: f64 = 3.5;
-pub const PROBE_R: f64 = 1.5;
+pub const PROBE_ETA1: f64 = 3.0;
+pub const PROBE_R: f64 = 1.0;
 
 /// Résout le système symétrique `a x = b` (élimination de Gauss avec pivot
 /// partiel) ; None s'il est singulier.
@@ -404,6 +409,19 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
             }
         });
     }
+    // Paroi mince (bord de fuite) : voxels traversés par deux faces
+    // opposées (normales à plus de 120°), où les deux côtés partagent une
+    // maille (relevé seulement ; voir README).
+    let thin = {
+        let mut by_voxel: HashMap<usize, Vec<[f64; 3]>> = HashMap::new();
+        for sf in &ls.surfels {
+            if let Some(c) = cell_of(sf.voxel) {
+                by_voxel.entry(c).or_default().push(sf.normal);
+            }
+        }
+        by_voxel.values().filter(|ns| ns.iter().any(|a| ns.iter().any(|b| dot(*a, *b) < -0.5))).count()
+    };
+    let vol = vol;
     let vol64 = |c: usize| vol[c];
     let mut stats = Stats::default();
     // Surfels gardés : voxel dans la grille (sans repli périodique, une seule
@@ -571,9 +589,14 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         let mut plain = true;
         for i in 1..19 {
             let ci = C19[i];
+            // Source hors de la grille (axe non périodique : sol, entrée,
+            // sortie) : population fournie par la condition du bord, comme
+            // d'une maille entièrement fluide.
             let t = match cell_of([x - ci[0], y - ci[1], z - ci[2]]) {
                 Some(yc) if vol[yc] > 0.0 => (vol64(yc) - win_at(yc, i)).max(0.0),
-                _ => 0.0,
+                Some(_) => 0.0,
+                None if ghost => 0.0,
+                None => 1.0,
             };
             let ents: Vec<(u32, f64)> = scat.get(&c).map_or(Vec::new(), |v| v.iter().filter(|e| e.0 == i).map(|e| (e.1, e.2)).collect());
             let wo: f64 = ents.iter().map(|e| e.1).sum();
@@ -650,6 +673,9 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
     }
     stats.surfels = keep.len();
     stats.receivers = wall_cells.len();
+    stats.thin = thin;
+    stats.probe_entries = probe.len();
+    stats.no_probe = probe_start.windows(2).filter(|w| w[0] == w[1]).count();
     SurfelSetup {
         dims,
         vol: vol.iter().map(|&v| v as f32).collect(),
@@ -739,6 +765,40 @@ mod tests {
                     assert!((mom[a] - dt[a]).abs() < 1e-10, "n = {n:?}, ΔM = {dm:?} : {mom:?}");
                 }
             }
+        }
+    }
+
+    /// Relevé : pente à la paroi et valeur à PROBE_H exactes pour un profil
+    /// u = η (a + d·ξ) + b η², quelle que soit la normale et la place du
+    /// surfel dans la maille.
+    #[test]
+    fn releve_exact() {
+        for (c, n) in [([0.3, 0.1, -0.2], [0.0, 0.0, 1.0]), ([0.13, -0.4, 0.27], [0.0, -1.0, 2.0]), ([0.0, 0.0, 0.0], [0.4, 0.5, -0.7])] {
+            let l = dot(n, n).sqrt();
+            let n = n.map(|v: f64| v / l);
+            let mut pts = Vec::new();
+            for z in -5..=5 {
+                for y in -5..=5 {
+                    for x in -5..=5 {
+                        let p = [x as f64, y as f64, z as f64];
+                        let r = [0, 1, 2].map(|a| p[a] - c[a]);
+                        let eta = dot(r, n);
+                        if (PROBE_ETA0..=PROBE_ETA1).contains(&eta) && dot(r, r) - eta * eta <= PROBE_R * PROBE_R {
+                            pts.push(p);
+                        }
+                    }
+                }
+            }
+            let w = probe_fit(c, n, &pts).unwrap();
+            // Profil : a = 0,7, b = −0,05, pente variable le long de la paroi.
+            let u = |p: [f64; 3]| {
+                let r = [0, 1, 2].map(|a| p[a] - c[a]);
+                let eta = dot(r, n);
+                eta * (0.7 + 0.03 * (r[0] - eta * n[0]) - 0.02 * (r[1] - eta * n[1])) - 0.05 * eta * eta
+            };
+            let a: f64 = pts.iter().zip(&w).map(|(p, w)| w.0 * u(*p)).sum();
+            let uh: f64 = pts.iter().zip(&w).map(|(p, w)| w.1 * u(*p)).sum();
+            assert!((a - 0.7).abs() < 1e-9 && (uh - (0.7 * PROBE_H - 0.05 * PROBE_H * PROBE_H)).abs() < 1e-9, "n = {n:?} : {a} {uh} ({} nœuds)", pts.len());
         }
     }
 

@@ -151,9 +151,9 @@ fn surfels_poiseuille_incline() {
 
 /// Sphère maillée à Re = 100, 8 mailles par diamètre (comme `sphere_stl`) :
 /// avec les surfels, l'effort par échange de quantité de mouvement est celui
-/// du bilan sur boîte (à 1 % près), et Cx celui du rebond de Bouzidi (1,236
-/// contre 1,236 ; 1,471 avec le schéma d'origine, paroi déplacée vers le
-/// fluide).
+/// du bilan sur boîte (à 1 % près), et Cx proche de celui du rebond de
+/// Bouzidi (1,248 contre 1,236 ; 1,471 avec le schéma d'origine, paroi
+/// déplacée vers le fluide).
 #[test]
 fn surfels_sphere_re100() {
     let l = 8;

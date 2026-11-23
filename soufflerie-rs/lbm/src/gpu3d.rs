@@ -1760,13 +1760,15 @@ fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
   // mouvement normale ; la perturbation δⱼ = Pⱼ wⱼ (λ₀ + Λ·cⱼ) ramène son
   // effort tangentiel 2 Σ cᵢᵗ Γᵢⁱⁿ à l'effort visé. La place de la paroi
   // n'est plus celle, mélangée, des voxels coupés, mais celle du relevé,
-  // exacte. Arête vive (loi de paroi) : rebond seul.
+  // exacte. Pas d'exception aux arêtes vives : le rebond adhérent des
+  // surfels d'arête (mailles d'arête de la loi de Bouzidi, ou arêtes du
+  // maillage) transmet tout le frottement du rebond sur leurs parallélépipèdes
+  // entiers (plaque : δ* ×2 ; aile : Cx 0,043 → 0,062 avec le seul bord de
+  // fuite ; Ahmed : bilan 0,78 → 0,87).
   {{
     let p0 = pst[s];
     let p1 = pst[s + 1u];
-    var edge = false;
-    if (home != 0xffffffffu) {{ edge = wallGeo[home].w < 0.0; }}
-    if (p1 > p0 && area > 0.0 && !(P.sa != 0u && edge)) {{
+    if (p1 > p0 && area > 0.0) {{
       var ga = vec3<f32>(0.0);
       var gh = vec3<f32>(0.0);
       for (var e = p0; e < p1; e++) {{
@@ -2564,6 +2566,7 @@ impl Turbulence {
         match std::env::var("SOUFFLERIE_RANS").as_deref() {
             Ok("keps") => Turbulence::KEpsRng,
             Ok("vles") => Turbulence::Vles,
+            Ok("laminaire") => Turbulence::Laminar,
             _ => Turbulence::Sa,
         }
     }
@@ -3493,16 +3496,14 @@ fn dense_setup(body: &Body3D, nested: bool) -> CellSetup {
 /// calculés), mailles « pariétales » = réceptrices des surfels.
 fn surfel_setup(body: &Body3D, nested: bool) -> Result<CellSetup, String> {
     let mesh = body.mesh.as_ref().ok_or("paroi volumique (surfels) : maquette maillée seulement")?;
-    if body.ground {
-        return Err("paroi volumique (surfels) : sol mobile pas encore pris en charge".into());
-    }
     let (nx, ny, nz) = (body.nx, body.ny, body.nz);
     let n = nx * ny * nz;
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
     let tt = std::time::Instant::now();
     // Veine : bords y, z périodiques (x : la maquette n'en approche pas, ou
     // veine périodique de validation) ; grille fine : couronne fantôme.
-    let st = crate::surfel3d::prepare(&mesh.tris, [nx, ny, nz], [!nested; 3], nested);
+    // Sol mobile : z non périodique (populations du plancher, `ground_code`).
+    let st = crate::surfel3d::prepare(&mesh.tris, [nx, ny, nz], [!nested, !nested, !nested && !body.ground], nested);
     temps("surfels", tt);
     if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
         eprintln!("  [mise en place] surfels : {:?}", st.stats);
