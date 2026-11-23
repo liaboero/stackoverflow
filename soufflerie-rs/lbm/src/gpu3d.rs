@@ -1554,12 +1554,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   if (sig > 0.0) {{
 {absorb_code}  }}
 {wforce}{out}{fstore}
-  if (P.writeMacro == 1u || P.sa != 0u) {{
+  if (P.writeMacro == 1u || P.sa != 0u{surf_macro}) {{
     macroBuf[idx] = vec4<f32>(u, rho);
   }}
 }}
 ",
         en = pop16_enable(p16),
+        // Paroi volumique : vitesses de tous les pas pour le relevé des surfels.
+        surf_macro = if surf { " || true" } else { "" },
         fstore = if surf {
             ""
         } else {
@@ -1654,6 +1656,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     )
 }
 
+/// Paroi volumique : contrainte tangentielle relevée au-dessus des surfels
+/// (paroi à sa place, ordre 2), sauf `SOUFFLERIE_SURFELS_O1=1` (rebond et
+/// loi de paroi de la maille pariétale, schéma d'ordre 1 d'origine).
+pub fn surfels_o2() -> bool {
+    std::env::var("SOUFFLERIE_SURFELS_O1").map_or(true, |v| v.is_empty() || v == "0")
+}
+
 /// Passe des surfels (paroi volumique, `surfel3d`), un fil par surfel, sur
 /// l'état d'avant le pas (populations après collision) : rassemblement des
 /// populations entrantes de chaque paire de directions, rebond, loi de paroi
@@ -1661,7 +1670,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 /// corps, et Γᵒᵘᵗ/P (populations décalées de leur poids) pour la propagation
 /// des mailles réceptrices. Tampon `force` : effort du surfel s en s, puis
 /// Γᵒᵘᵗ/P de ses paires en 4 n + 12 s + p (cases flottantes).
-fn wgsl_surfel(fp16: bool, p16: bool, n: u32) -> String {
+fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
     let half = if fp16 { 5 } else { 10 };
     let load = if p16 {
         "fn pop(i: u32, c: u32) -> f32 {
@@ -1739,8 +1748,56 @@ fn wgsl_surfel(fp16: bool, p16: bool, n: u32) -> String {
             comp = ["x", "y", "z", "w"][p % 4],
         );
     }
+    // Paroi à sa place (ordre 2) : contrainte tangentielle tirée du relevé
+    // de la vitesse au-dessus du surfel, à la place de celle du rebond.
+    let o2_block = if o2 {
+        format!(
+            "  // Contrainte tangentielle imposée, relevée au-dessus du surfel
+  // (`surfel3d::probe_fit`, nœuds entièrement fluides, profil nul à la
+  // paroi) : en laminaire ρ ν (∂u/∂η) A, la pente à la paroi ; en
+  // turbulent ρ u_τ² A, u_τ de la loi de Spalding à la hauteur WM_H, comme
+  // pour le rebond de Bouzidi. Le rebond renvoie masse et quantité de
+  // mouvement normale ; la perturbation δⱼ = Pⱼ wⱼ (λ₀ + Λ·cⱼ) ramène son
+  // effort tangentiel 2 Σ cᵢᵗ Γᵢⁱⁿ à l'effort visé. La place de la paroi
+  // n'est plus celle, mélangée, des voxels coupés, mais celle du relevé,
+  // exacte. Arête vive (loi de paroi) : rebond seul.
+  {{
+    let p0 = pst[s];
+    let p1 = pst[s + 1u];
+    var edge = false;
+    if (home != 0xffffffffu) {{ edge = wallGeo[home].w < 0.0; }}
+    if (p1 > p0 && area > 0.0 && !(P.sa != 0u && edge)) {{
+      var ga = vec3<f32>(0.0);
+      var gh = vec3<f32>(0.0);
+      for (var e = p0; e < p1; e++) {{
+        let uu = macroBuf[prb[3u * e]].xyz;
+        ga += bitcast<f32>(prb[3u * e + 1u]) * uu;
+        gh += bitcast<f32>(prb[3u * e + 2u]) * uu;
+      }}
+      ga -= dot(ga, nrm) * nrm;
+      gh -= dot(gh, nrm) * nrm;
+      let rho = select(1.0, mi / mw, mw > 0.0);
+      var ft = rho * P.nu * area * ga;
+      if (P.sa != 0u) {{
+        let uh = length(gh);
+        let ut = spalding_utau(uh, WM_H);
+        ft = select(vec3<f32>(0.0), gh * (rho * ut * ut * area / max(uh, 1e-30)), uh > 1e-20);
+      }}
+      let fb = 2.0 * (fin - dot(fin, nrm) * nrm);
+      let dm = fb - ft;
+      let lam = (dm.x * sgeo[8u * s + 2u] + dm.y * sgeo[8u * s + 3u] + dm.z * sgeo[8u * s + 4u]) / area;
+      sc = 1.0;
+{corr}      done = true;
+    }}
+  }}
+"
+        )
+    } else {
+        String::new()
+    };
     let en = pop16_enable(p16);
     let pt = if p16 { "u16" } else { "u32" };
+    let sa_fns = SA_FNS;
     format!(
         "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
@@ -1756,7 +1813,13 @@ fn wgsl_surfel(fp16: bool, p16: bool, n: u32) -> String {
 @group(0) @binding(6) var<storage, read> gat: array<u32>;
 @group(0) @binding(7) var<storage, read> utau: array<f32>;
 @group(0) @binding(8) var<storage, read> wallGeo: array<vec4<f32>>;
+// Relevé de la vitesse (`SurfelSetup::probe`) : vitesses du pas précédent,
+// début des entrées de chaque surfel, entrées (maille, α, β).
+@group(0) @binding(9) var<storage, read> macroBuf: array<vec4<f32>>;
+@group(0) @binding(10) var<storage, read> pst: array<u32>;
+@group(0) @binding(11) var<storage, read> prb: array<u32>;
 const SURFN = {n}u;
+{sa_fns}
 {load}
 
 @compute @workgroup_size(64)
@@ -1781,7 +1844,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   // tangentielle (part spéculaire) sans toucher masse ni pression.
   var d: array<f32, 9>;
   var sc = 0.0;
-  if (P.sa != 0u && home != 0xffffffffu && area > 0.0) {{
+  var done = false;
+{o2_block}  if (!done && P.sa != 0u && home != 0xffffffffu && area > 0.0) {{
     if (wallGeo[home].w > 0.0) {{
       let ut = utau[4u * home];
       let rho = select(1.0, mi / mw, mw > 0.0);
@@ -2670,7 +2734,7 @@ pub(crate) struct SurfPass {
     vol: Vec<f32>,
     stats: crate::surfel3d::Stats,
     gpu_bytes: usize,
-    _bufs: [wgpu::Buffer; 3],
+    _bufs: [wgpu::Buffer; 5],
 }
 
 /// Passe de la loi de paroi (voir `WALL3_WGSL`).
@@ -2765,7 +2829,7 @@ fn step_pipelines(
             cache: None,
         })
     };
-    let bulk = mk("d3q19", wgsl_step(fp16, p16, false, false).replace("WGu", &format!("{}u", step_wg())));
+    let bulk = mk("d3q19", wgsl_step(fp16, p16, false, surf).replace("WGu", &format!("{}u", step_wg())));
     let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, p16, true, surf)));
     (bulk, wall)
 }
@@ -4811,6 +4875,12 @@ impl Gpu3D {
                 gat.resize(2, 0);
             }
             let gat_buf = mk_init("surfel_gat", bytemuck::cast_slice(&gat));
+            let pst_buf = mk_init("surfel_pst", bytemuck::cast_slice(&st.probe_start));
+            let mut prb: Vec<u32> = st.probe.iter().flat_map(|&(c, a, b)| [c, a.to_bits(), b.to_bits()]).collect();
+            if prb.is_empty() {
+                prb.resize(3, 0);
+            }
+            let prb_buf = mk_init("surfel_prb", bytemuck::cast_slice(&prb));
             let lay = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("surfel3d"),
                 entries: &[
@@ -4823,9 +4893,12 @@ impl Gpu3D {
                     storage(6, true),
                     storage(7, true),
                     storage(8, true),
+                    storage(9, true),
+                    storage(10, true),
+                    storage(11, true),
                 ],
             });
-            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32), true);
+            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32, surfels_o2()), true);
             let bind = (0..2)
                 .map(|s| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4841,6 +4914,9 @@ impl Gpu3D {
                             buf_entry(6, &gat_buf, None),
                             buf_entry(7, &utau_buf, None),
                             buf_entry(8, &wall_geo, None),
+                            buf_entry(9, &macro_buf, None),
+                            buf_entry(10, &pst_buf, None),
+                            buf_entry(11, &prb_buf, None),
                         ],
                     })
                 })
@@ -4860,7 +4936,7 @@ impl Gpu3D {
                 vol,
                 stats: st.stats,
                 gpu_bytes: st.gpu_bytes(),
-                _bufs: [geo_buf, gst_buf, gat_buf],
+                _bufs: [geo_buf, gst_buf, gat_buf, pst_buf, prb_buf],
             })
         });
         let wall_disp = {
