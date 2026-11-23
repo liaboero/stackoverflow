@@ -68,6 +68,33 @@ pub(crate) fn pop16() -> bool {
     POP16.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Demi-mot de chaque direction dans le rangement en mots de 32 bits (deux
+/// populations par mot) : directions appariées tirées de mailles voisines en
+/// x (même rangée, fils voisins), puis les autres. SOUFFLERIE_PAIRES=0 :
+/// ordre des directions (ancien rangement).
+pub(crate) fn hslot() -> [usize; 19] {
+    const PAIRES: [usize; 19] = [18, 0, 1, 10, 11, 12, 13, 2, 4, 6, 8, 14, 15, 5, 3, 9, 7, 16, 17];
+    if std::env::var("SOUFFLERIE_PAIRES").is_ok_and(|v| v == "0") {
+        std::array::from_fn(|i| i)
+    } else {
+        PAIRES
+    }
+}
+
+/// Direction rangée dans chaque demi-mot (None : remplissage).
+pub(crate) fn hdir() -> [Option<usize>; 20] {
+    let mut d = [None; 20];
+    for (i, &h) in hslot().iter().enumerate() {
+        d[h] = Some(i);
+    }
+    d
+}
+
+/// Constante WGSL `HS` (demi-mot de chaque direction).
+pub(crate) fn hs_wgsl() -> String {
+    format!("const HS = array<u32, 19>({});\n", hslot().map(|h| format!("{h}u")).join(", "))
+}
+
 /// En-tête WGSL des shaders qui accèdent aux populations.
 pub(crate) fn pop16_enable(p16: bool) -> &'static str {
     if p16 {
@@ -1012,12 +1039,14 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool) -> String {
 }".to_string()
     } else if fp16 {
         format!(
-            "fn pop(i: u32, c: u32) -> f32 {{
-  let w = i >> 1u;
+            "{hs}fn pop(i: u32, c: u32) -> f32 {{
+  let h = HS[i];
+  let w = h >> 1u;
   var v: vec2<f32>;
   if (w < {half}u) {{ v = unpack2x16float(srcA[w * P.N + c]); }} else {{ v = unpack2x16float(srcB[(w - {half}u) * P.N + c]); }}
-  return select(v.x, v.y, (i & 1u) == 1u);
-}}"
+  return select(v.x, v.y, (h & 1u) == 1u);
+}}",
+            hs = hs_wgsl()
         )
     } else {
         format!(
@@ -1263,16 +1292,9 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool) -> String {
         (0..19).map(|i| format!("  putH({i}u, idx, o[{i}]);
 ")).collect()
     } else if fp16 {
-        (0..words)
-            .map(|w| {
-                let b = if 2 * w + 1 < 19 {
-                    format!("o[{}]", 2 * w + 1)
-                } else {
-                    "0.0".into()
-                };
-                format!("  putWord({w}u, idx, o[{}], {b});\n", 2 * w)
-            })
-            .collect()
+        let hd = hdir();
+        let o = |h: usize| hd[h].map_or("0.0".to_string(), |i| format!("o[{i}]"));
+        (0..words).map(|w| format!("  putWord({w}u, idx, {}, {});\n", o(2 * w), o(2 * w + 1))).collect()
     } else {
         (0..19).map(|i| format!("  putPop({i}u, idx, o[{i}]);\n")).collect()
     };
@@ -1648,12 +1670,14 @@ fn wgsl_surfel(fp16: bool, p16: bool, n: u32) -> String {
 }".to_string()
     } else if fp16 {
         format!(
-            "fn pop(i: u32, c: u32) -> f32 {{
-  let w = i >> 1u;
+            "{hs}fn pop(i: u32, c: u32) -> f32 {{
+  let h = HS[i];
+  let w = h >> 1u;
   var v: vec2<f32>;
   if (w < {half}u) {{ v = unpack2x16float(srcA[w * P.N + c]); }} else {{ v = unpack2x16float(srcB[(w - {half}u) * P.N + c]); }}
-  return select(v.x, v.y, (i & 1u) == 1u);
-}}"
+  return select(v.x, v.y, (h & 1u) == 1u);
+}}",
+            hs = hs_wgsl()
         )
     } else {
         format!(
@@ -1807,14 +1831,11 @@ fn wgsl_init(fp16: bool, p16: bool) -> String {
             })
             .collect()
     } else if fp16 {
+        let hd = hdir();
+        let e = |h: usize| hd[h].map_or("0.0".to_string(), |i| format!("e{i}"));
         (0..words)
             .map(|w| {
-                let b = if 2 * w + 1 < 19 {
-                    format!("e{}", 2 * w + 1)
-                } else {
-                    "0.0".into()
-                };
-                let v = format!("pack2x16float(vec2<f32>(e{}, {b}))", 2 * w);
+                let v = format!("pack2x16float(vec2<f32>({}, {}))", e(2 * w), e(2 * w + 1));
                 if w < half {
                     format!("A[{w}u * P.N + idx] = {v};\n  ")
                 } else {

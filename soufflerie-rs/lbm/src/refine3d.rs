@@ -115,6 +115,7 @@ fn common() -> String {
             })
             .collect(),
     );
+    let hs = crate::gpu3d::hs_wgsl();
     let mut regul = String::new();
     for i in 0..19 {
         let [x, y, z] = C3[i].map(|v| v as f64);
@@ -163,7 +164,7 @@ const CY = array<i32, 19>({cy});
 const CZ = array<i32, 19>({cz});
 const W = array<f32, 19>({w});
 const OP = array<u32, 19>({op});
-
+{hs}
 fn moments(f: array<f32, 19>) -> Mom {{
   var rho = 0.0;
   var j = vec3<f32>(0.0);
@@ -232,20 +233,21 @@ fn access(name: &str, ba: u32, bb: u32, fp16: bool, p16: bool, write: bool, n: &
     } else if fp16 {
         s += &format!(
             "fn ld_{name}(i: u32, c: u32) -> f32 {{
-  let w = i >> 1u;
+  let h = HS[i];
+  let w = h >> 1u;
   var v: vec2<f32>;
   if (w < 5u) {{ v = unpack2x16float({name}A[w * {n} + c]); }} else {{ v = unpack2x16float({name}B[(w - 5u) * {n} + c]); }}
-  return select(v.x, v.y, (i & 1u) == 1u) + W[i];
+  return select(v.x, v.y, (h & 1u) == 1u) + W[i];
 }}
 "
         );
         if write {
             s += &format!("fn st_{name}(c: u32, p: array<f32, 19>) {{\n");
+            let hd = crate::gpu3d::hdir();
+            let pw = |h: usize| hd[h].map_or("0.0".to_string(), |i| format!("p[{i}] - W[{i}]"));
             for wd in 0..10 {
-                let (a, b) = (2 * wd, 2 * wd + 1);
-                let second = if b < 19 { format!("p[{b}] - W[{b}]") } else { "0.0".into() };
                 let (buf, k) = if wd < 5 { ("A", wd) } else { ("B", wd - 5) };
-                s += &format!("  {name}{buf}[{k}u * {n} + c] = pack2x16float(vec2<f32>(p[{a}] - W[{a}], {second}));\n");
+                s += &format!("  {name}{buf}[{k}u * {n} + c] = pack2x16float(vec2<f32>({}, {}));\n", pw(2 * wd), pw(2 * wd + 1));
             }
             s += "}\n";
         }
