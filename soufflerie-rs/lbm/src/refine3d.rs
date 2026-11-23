@@ -15,6 +15,12 @@ use crate::gpu3d::{f, w3, Gpu3D, C3};
 
 /// Maille fantôme d'une grille fine (type de maille).
 pub const GHOST: u32 = 0xffff_fffe;
+/// Interpolation des fantômes : fantômes au plus par groupe de travail, et
+/// nœuds parents au plus (moments en mémoire partagée, 48 o par nœud).
+/// Essais (couche ×16 de `ar4c3`) : 64/192 et 128/288 à 3 %, 64/64 quatre
+/// fois plus lent (un pochoir cubique remplit seul un groupe).
+const GWG: usize = 128;
+const GNODES: usize = 256;
 /// Marge (mailles parentes) entre le bord de la grille fine et la zone recopiée.
 const MARGIN: usize = 2;
 
@@ -196,14 +202,34 @@ fn regul(rho: f32, u: vec3<f32>, bxx: f32, byy: f32, bzz: f32, bxy: f32, bxz: f3
 
 /// Accès aux populations `name` (deux tampons A et B, plans de `n` mailles),
 /// stockées g = f − w en simple ou demi-précision ; `ld_` rend f.
-fn access(name: &str, ba: u32, bb: u32, fp16: bool, write: bool, n: &str) -> String {
+fn access(name: &str, ba: u32, bb: u32, fp16: bool, p16: bool, write: bool, n: &str) -> String {
     let mode = if write { "read_write" } else { "read" };
+    let pt = if p16 { "u16" } else { "u32" };
     let mut s = format!(
-        "@group(0) @binding({ba}) var<storage, {mode}> {name}A: array<u32>;
-@group(0) @binding({bb}) var<storage, {mode}> {name}B: array<u32>;
+        "@group(0) @binding({ba}) var<storage, {mode}> {name}A: array<{pt}>;
+@group(0) @binding({bb}) var<storage, {mode}> {name}B: array<{pt}>;
 "
     );
-    if fp16 {
+    if p16 {
+        s += &format!(
+            "fn ld_{name}(i: u32, c: u32) -> f32 {{
+  if (i < 10u) {{ return unpack2x16float(u32({name}A[i * {n} + c])).x + W[i]; }}
+  return unpack2x16float(u32({name}B[(i - 10u) * {n} + c])).x + W[i];
+}}
+"
+        );
+        if write {
+            s += &format!("fn st_{name}(c: u32, p: array<f32, 19>) {{
+");
+            for i in 0..19 {
+                let (buf, k) = if i < 10 { ("A", i) } else { ("B", i - 10) };
+                s += &format!("  {name}{buf}[{k}u * {n} + c] = u16(pack2x16float(vec2<f32>(p[{i}] - W[{i}], 0.0)) & 0xffffu);
+");
+            }
+            s += "}
+";
+        }
+    } else if fp16 {
         s += &format!(
             "fn ld_{name}(i: u32, c: u32) -> f32 {{
   let w = i >> 1u;
@@ -346,10 +372,30 @@ fn lin(x2: i32) -> St {
   return St(2, vec4<i32>(i0, i0 + 1, 0, 0), vec4<f32>(0.5, 0.5, 0.0, 0.0));
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-  let g = flat(gid, nwg);
-  if (g >= P.ng) { return; }
+@group(0) @binding(11) var<storage, read> tile: array<u32>;
+@group(0) @binding(12) var<storage, read> tnode: array<u32>;
+// Moments des nœuds parents du groupe.
+var<workgroup> sm: array<vec4<f32>, GNODES3>;
+
+@compute @workgroup_size(GWG)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let t = wid.x + wid.y * nwg.x;
+  if (t >= arrayLength(&tile) / 2u - 1u) { return; }
+  let n0 = tile[2u * t + 1u];
+  for (var e = n0 + li; e < tile[2u * t + 3u]; e += GWGu) {
+    let l = 3u * (e - n0);
+    let s = 3u * tnode[e];
+    sm[l] = pm[s];
+    sm[l + 1u] = pm[s + 1u];
+    sm[l + 2u] = pm[s + 2u];
+  }
+  workgroupBarrier();
+  for (var g = tile[2u * t] + li; g < tile[2u * t + 2u]; g += GWGu) {
+    ghost(g);
+  }
+}
+
+fn ghost(g: u32) {
   let oa = gm[6u * g + 3u];
   let ob = gm[6u * g + 4u];
   let oc = gm[6u * g + 5u];
@@ -377,9 +423,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
           let w = sx.w[i] * sy.w[j] * sz.w[k];
           let s = 3u * gslot[ptr];
           ptr++;
-          m.a += w * pm[s];
-          m.b += w * pm[s + 1u];
-          m.c += w * pm[s + 2u];
+          m.a += w * sm[s];
+          m.b += w * sm[s + 1u];
+          m.c += w * sm[s + 2u];
         }
       }
     }
@@ -396,9 +442,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
           if (sl == 0xffffffffu) { continue; }
           let s = 3u * sl;
           let w = lx.w[i] * ly.w[j] * lz.w[k];
-          m.a += w * pm[s];
-          m.b += w * pm[s + 1u];
-          m.c += w * pm[s + 2u];
+          m.a += w * sm[s];
+          m.b += w * sm[s + 1u];
+          m.c += w * sm[s + 2u];
           ws += w;
         }
       }
@@ -584,6 +630,10 @@ pub(crate) struct Link3 {
     pm: wgpu::Buffer,
     gstart: wgpu::Buffer,
     gslot: wgpu::Buffer,
+    /// Tuiles de l'interpolation (voir `new`).
+    nt: u32,
+    tile: wgpu::Buffer,
+    tnode: wgpu::Buffer,
     pre: wgpu::ComputePipeline,
     pre_bind: Vec<wgpu::BindGroup>,
     gather: wgpu::ComputePipeline,
@@ -592,6 +642,13 @@ pub(crate) struct Link3 {
     gather_bind: Vec<wgpu::BindGroup>,
     fill_bind: Vec<wgpu::BindGroup>,
     restrict_bind: Vec<wgpu::BindGroup>,
+}
+
+/// Lancement de `n` groupes de travail (au plus 65535 par dimension).
+fn disp_groups(n: u32) -> (u32, u32) {
+    let groups = n.max(1);
+    let dx = groups.min(65535);
+    (dx, groups.div_ceil(dx))
 }
 
 fn disp(n: u32) -> (u32, u32) {
@@ -693,6 +750,49 @@ impl Link3 {
             }
         }
         let nn = (pnode.len() / 3) as u32;
+        // Groupes de l'interpolation : au plus GWG fantômes consécutifs
+        // (couche : rangés par blocs de 8³ ; boîte : par rangées) dont les pochoirs touchent au plus GNODES nœuds
+        // parents. Fantômes [tile[2t], tile[2t + 2]), nœuds [tile[2t + 1],
+        // tile[2t + 3]) de `tnode` (rangs dans `pm`) ; `gslot` passe en rangs
+        // dans la liste du groupe, lue une fois en mémoire partagée.
+        let mut tile: Vec<u32> = Vec::new();
+        let mut tnode: Vec<u32> = Vec::new();
+        let mut local: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let total = gslot.len();
+        let ends = |g: usize| {
+            let st = (gstart[g] & 0x7fff_ffff) as usize;
+            let en = if g + 1 < gstart.len() { (gstart[g + 1] & 0x7fff_ffff) as usize } else { total };
+            st..en
+        };
+        let mut count = 0usize;
+        for g in 0..gpos.len() {
+            let fresh = ends(g).filter(|&e| gslot[e] != u32::MAX && !local.contains_key(&gslot[e])).map(|e| gslot[e]).collect::<std::collections::BTreeSet<u32>>().len();
+            if g == 0 || count == GWG || local.len() + fresh > GNODES {
+                tile.push(g as u32);
+                tile.push(tnode.len() as u32);
+                local.clear();
+                count = 0;
+            }
+            count += 1;
+            let n0 = tile[tile.len() - 1];
+            for e in ends(g) {
+                let k = gslot[e];
+                if k == u32::MAX {
+                    continue;
+                }
+                let l = *local.entry(k).or_insert_with(|| {
+                    tnode.push(k);
+                    tnode.len() as u32 - 1 - n0
+                });
+                gslot[e] = l;
+            }
+        }
+        let nt = tile.len() as u32 / 2;
+        tile.push(gpos.len() as u32);
+        tile.push(tnode.len() as u32);
+        if tnode.is_empty() {
+            tnode.push(0);
+        }
         if pnode.is_empty() {
             pnode.extend_from_slice(&[0, 0, 0]);
         }
@@ -704,20 +804,20 @@ impl Link3 {
         }
         let base = common();
         let module = |label: &str, body: String| {
-            crate::gpu3d::compute_module(d, label, format!("{base}{body}"))
+            crate::gpu3d::compute_module(d, label, format!("{}{base}{body}", crate::gpu3d::pop16_enable(parent.p16 || child.p16)))
         };
-        let pre = module("pre3d", format!("{}{PRE}", access("pf", 3, 4, fp16, false, "P.pn")));
+        let pre = module("pre3d", format!("{}{PRE}", access("pf", 3, 4, fp16, parent.p16, false, "P.pn")));
         // Tirage et remplissage du premier demi-pas de la grille fine en une
         // passe (un lancement de moins par pas de la grille parente).
-        let gather = module("gather3d", format!("{}{GATHER}", access("cf", 3, 4, fp16, true, "P.cn")));
-        let fill = module("fill3d", format!("{}{FILL}", access("cf", 3, 4, fp16, true, "P.cn")));
+        let gather = module("gather3d", format!("{}{}", access("cf", 3, 4, fp16, child.p16, true, "P.cn"), GATHER.replace("GNODES3", &(3 * GNODES).to_string()).replace("GWG", &GWG.to_string())));
+        let fill = module("fill3d", format!("{}{FILL}", access("cf", 3, 4, fp16, child.p16, true, "P.cn")));
         let restrict = module(
             "restrict3d",
             format!(
                 "{}{}{}{RESTRICT}",
-                access("cs", 1, 2, fp16, false, "P.cn"),
-                access("cc", 3, 4, fp16, false, "P.cn"),
-                access("pf", 7, 8, fp16, true, "P.pn")
+                access("cs", 1, 2, fp16, child.p16, false, "P.cn"),
+                access("cc", 3, 4, fp16, child.p16, false, "P.cn"),
+                access("pf", 7, 8, fp16, parent.p16, true, "P.pn")
             ),
         );
         let pipe = |m: &wgpu::ShaderModule, label: &str| {
@@ -806,6 +906,17 @@ impl Link3 {
             gslot: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ghost_slot3d"),
                 contents: bytemuck::cast_slice(&gslot),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            nt,
+            tile: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost_tile3d"),
+                contents: bytemuck::cast_slice(&tile),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            tnode: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost_tile_node3d"),
+                contents: bytemuck::cast_slice(&tnode),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
             pre: pipe(&pre, "pre3d"),
@@ -903,6 +1014,8 @@ impl Link3 {
                         (8, &self.gidx),
                         (9, &self.gstart),
                         (10, &self.gslot),
+                        (11, &self.tile),
+                        (12, &self.tnode),
                     ],
                 )
             })
@@ -975,7 +1088,7 @@ impl Link3 {
                 "tirage, interpolation et remplissage".into(),
                 self.ng as usize,
                 time(p, &|pass| {
-                    let (dx, dy) = disp(self.ng);
+                    let (dx, dy) = disp_groups(self.nt);
                     pass.set_pipeline(&self.gather);
                     pass.set_bind_group(0, &self.gather_bind[c.cur], &[]);
                     pass.dispatch_workgroups(dx, dy, 1);
@@ -1010,7 +1123,7 @@ impl Link3 {
             pass.set_bind_group(0, &self.pre_bind[pcur], &[]);
             pass.dispatch_workgroups(dx, dy, 1);
         }
-        let (dx, dy) = disp(self.ng);
+        let (dx, dy) = disp_groups(self.nt);
         pass.set_pipeline(&self.gather);
         pass.set_bind_group(0, &self.gather_bind[ccur], &[]);
         pass.dispatch_workgroups(dx, dy, 1);

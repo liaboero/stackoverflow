@@ -10,6 +10,11 @@
 //! `ar4b` (idem plus une couche pariétale ×4 de 16 mailles), `ar4r2` (grilles
 //! ×2 et ×4), `ar4c3` (grille ×2 et trois couches ×4, ×8, ×16 : `--bande auto`), `ar4n` (sans
 //! raffinement), `sphere` (Re = 1000, L = 16, sous-maille sans loi de paroi).
+//! Cas proches des calculs de validation : `ahmed` (corps d'Ahmed 25°, sol
+//! mobile, L = 64, sans raffinement), `ahmedr` (L = 32, sans sol, grille ×2
+//! et couche ×4 de 16 mailles), `aile` (aile infinie NACA 0012, 4°, Re = 6·10⁶,
+//! envergure 40 mailles, L = 48, sans raffinement), `ailer` (L = 16, grilles ×2 et ×4, couches ×8
+//! et ×16 de 16 mailles : `aile_infinie 16 2 6e6 4 t 16,16`).
 //! `--raff-auto N` remplace le raffinement du cas par le raffinement
 //! automatique (`lbm::raff_auto`, N mailles par longueur à la paroi).
 //! La boucle reprend celle de `soufflerie run3d` : efforts relevés tous les
@@ -17,10 +22,84 @@
 //! tous les demi-temps convectifs pendant la fenêtre de moyenne.
 use std::time::Instant;
 
-use lbm::bodies3d::{Body3D, Shape3D};
+use std::sync::Arc;
+
+use lbm::bodies3d::{ahmed, ahmed_tris, Body3D, Shape3D};
 use lbm::cpu::Ramp;
 use lbm::gpu3d::Gpu3D;
-use lbm::stl::{MeshSetup, Unit};
+use lbm::shapes::Naca;
+use lbm::stl::{MeshBody, MeshSetup, Tri, Unit};
+
+/// Corps d'Ahmed (lunette 25°, pieds, sol mobile), comme l'exemple `ahmed` ;
+/// sans sol (veine libre) si `sol` est faux : le raffinement local ne gère
+/// pas le sol mobile.
+fn ahmed_body(l: usize, marge: f64, sol: bool) -> Body3D {
+    let h = ahmed::LONGUEUR / l as f64;
+    let tris = ahmed_tris(25.0, true, (2.0 * h).min(10.0), h);
+    let setup = MeshSetup {
+        unit: Unit::Mm,
+        ref_length: Some(ahmed::LONGUEUR),
+        ref_area: Some(ahmed::LARGEUR * ahmed::HAUTEUR),
+        margin: marge,
+        ground: sol.then_some(-h - 0.25 * h),
+        ..Default::default()
+    };
+    Body3D::from_mesh(&tris, l, &setup).expect("maquette").0
+}
+
+/// Aile infinie NACA 0012 (veine périodique en envergure), comme l'exemple
+/// `aile_infinie` (12 cordes de haut, envergure `ny` mailles).
+fn aile_body(l: usize, ny: usize, alpha: f64) -> Body3D {
+    let lf = l as f64;
+    let (nx, nz) = ((12.0 * lf).round() as usize, (12.0 * lf).round() as usize);
+    let naca = Naca::parse("0012").unwrap();
+    let n = 120;
+    let mut prof: Vec<[f64; 2]> = Vec::new();
+    for k in 0..n {
+        let x = 0.5 * (1.0 + (std::f64::consts::PI * k as f64 / n as f64).cos());
+        prof.push([x, naca.thickness(x)]);
+    }
+    for k in 0..n {
+        let x = 0.5 * (1.0 - (std::f64::consts::PI * k as f64 / n as f64).cos());
+        prof.push([x, -naca.thickness(x)]);
+    }
+    let (sa, ca) = alpha.to_radians().sin_cos();
+    let rot = |p: [f64; 2]| {
+        let (x, z) = ((p[0] - 0.25) * lf, p[1] * lf);
+        [x * ca + z * sa, -x * sa + z * ca]
+    };
+    let te = rot([1.0, 0.0]);
+    let xq = (4.0 * lf + 0.75 * lf).floor() + 0.7 - te[0];
+    let zq = 0.5 * nz as f64 + 0.37;
+    let pts: Vec<[f64; 2]> = prof.iter().map(|&p| {
+        let r = rot(p);
+        [xq + r[0], zq + r[1]]
+    }).collect();
+    let ys: Vec<f64> = (-2..=(ny as i64 / 2 + 2)).map(|k| 2.0 * k as f64).collect();
+    let mut tris: Vec<Tri> = Vec::new();
+    let m = pts.len();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        for k in 0..m {
+            let (p, q) = (pts[k], pts[(k + 1) % m]);
+            let (a0, b0, a1, b1) = ([p[0], y0, p[1]], [q[0], y0, q[1]], [p[0], y1, p[1]], [q[0], y1, q[1]]);
+            tris.push([a0, b0, b1]);
+            tris.push([a0, b1, a1]);
+        }
+    }
+    let setup = MeshSetup { unit: Unit::parse("m").unwrap(), margin: 0.2, ..Default::default() };
+    let (mut body, _) = Body3D::from_mesh(&tris, l, &setup).unwrap();
+    let mesh = MeshBody::new(tris, false);
+    body.nx = nx;
+    body.ny = ny;
+    body.nz = nz;
+    body.bounds = lbm::bodies3d::Bounds { x0: mesh.lo[0], x1: mesh.hi[0], y0: 0.0, y1: ny as f64 - 1.0, z0: mesh.lo[2], z1: mesh.hi[2] };
+    body.center = [xq, 0.5 * ny as f64, zq];
+    body.area = lf * ny as f64;
+    body.mesh = Some(Arc::new(mesh));
+    body.features = None;
+    body
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,8 +109,17 @@ fn main() {
     let t_end = num("t", 6.0);
     let avg = num("avg", 2.0);
     const U: f32 = 0.1;
-    let l = 16usize;
+    let l = match case.as_str() {
+        "ahmed" => 64usize,
+        "aile" => 48,
+        "ahmedr" => 32,
+        _ => 16,
+    };
     let (body, re, depth, bands): (Body3D, f64, usize, Vec<f64>) = match case.as_str() {
+        "ahmed" => (ahmed_body(l, 0.4, true), 2.78e6, 0, vec![]),
+        "ahmedr" => (ahmed_body(l, 0.4, false), 2.78e6, 1, vec![16.0]),
+        "aile" => (aile_body(l, 40, 4.0), 6e6, 0, vec![]),
+        "ailer" => (aile_body(l, 40, 4.0), 6e6, 2, vec![16.0, 16.0]),
         "ar4" | "ar4b" | "ar4n" | "ar4r2" | "ar4c3" => {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../banc/wing_ar4.stl");
             let tris = lbm::stl::read_stl(&path).expect("banc/wing_ar4.stl");
@@ -55,7 +143,7 @@ fn main() {
         }
         "sphere" => (Body3D::new(Shape3D::Sphere, l, 0.0), 1000.0, 0, vec![]),
         _ => {
-            eprintln!("cas : ar4, ar4b, ar4n, ar4r2, ar4c3, sphere");
+            eprintln!("cas : ar4, ar4b, ar4n, ar4r2, ar4c3, sphere, ahmed, ahmedr, aile, ailer");
             std::process::exit(2)
         }
     };

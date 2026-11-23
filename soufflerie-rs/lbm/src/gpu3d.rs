@@ -56,6 +56,28 @@ fn opp3(i: usize) -> usize {
     C3.iter().position(|d| d[0] == -c[0] && d[1] == -c[1] && d[2] == -c[2]).unwrap()
 }
 
+/// Populations en demi-précision rangées une par case de 16 bits
+/// (`array<u16>`, plan de N cases par direction) au lieu de deux par mot de
+/// 32 bits : chaque population tirée d'un voisin est une lecture de 2 octets,
+/// contiguë d'un fil à l'autre (mot de 4 octets à moitié utile sinon). Mêmes
+/// conversions, mêmes valeurs au bit près. Fixé à l'ouverture du périphérique
+/// (`SHADER_I16`, VK_KHR_16bit_storage) ; SOUFFLERIE_U16=0 garde les mots.
+static POP16: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn pop16() -> bool {
+    POP16.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// En-tête WGSL des shaders qui accèdent aux populations.
+pub(crate) fn pop16_enable(p16: bool) -> &'static str {
+    if p16 {
+        "enable wgpu_int16;
+"
+    } else {
+        ""
+    }
+}
+
 pub(crate) const SOLID: u32 = 0xffff_ffff;
 /// Maille d'une grille parente recouverte par une grille fine (voir
 /// `Gpu3D::mark_covered`).
@@ -930,13 +952,18 @@ pub(crate) fn step_wg() -> u32 {
     std::env::var("SOUFFLERIE_WG").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
 }
 
-fn wgsl_step(fp16: bool, walls: bool, surf: bool) -> String {
+fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool) -> String {
     // Paroi volumique (surfels) : la propagation des mailles réceptrices
     // passe par les surfels (`surfel3d`), sans liens de Bouzidi.
     let bouzidi = walls && !surf;
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
-    let load = if fp16 {
+    let load = if p16 {
+        "fn pop(i: u32, c: u32) -> f32 {
+  if (i < 10u) { return unpack2x16float(u32(srcA[i * P.N + c])).x; }
+  return unpack2x16float(u32(srcB[(i - 10u) * P.N + c])).x;
+}".to_string()
+    } else if fp16 {
         format!(
             "fn pop(i: u32, c: u32) -> f32 {{
   let w = i >> 1u;
@@ -953,7 +980,12 @@ fn wgsl_step(fp16: bool, walls: bool, surf: bool) -> String {
 }}"
         )
     };
-    let store = if fp16 {
+    let store = if p16 {
+        "fn putH(i: u32, c: u32, a: f32) {
+  let v = u16(pack2x16float(vec2<f32>(a, 0.0)) & 0xffffu);
+  if (i < 10u) { dstA[i * P.N + c] = v; } else { dstB[(i - 10u) * P.N + c] = v; }
+}".to_string()
+    } else if fp16 {
         format!(
             "fn putWord(w: u32, c: u32, a: f32, b: f32) {{
   let v = pack2x16float(vec2<f32>(a, b));
@@ -1180,7 +1212,10 @@ fn wgsl_step(fp16: bool, walls: bool, surf: bool) -> String {
             w135 = f(13.5 * w),
         );
     }
-    let out: String = if fp16 {
+    let out: String = if p16 {
+        (0..19).map(|i| format!("  putH({i}u, idx, o[{i}]);
+")).collect()
+    } else if fp16 {
         (0..words)
             .map(|w| {
                 let b = if 2 * w + 1 < 19 {
@@ -1198,13 +1233,14 @@ fn wgsl_step(fp16: bool, walls: bool, surf: bool) -> String {
         .map(|i| format!("if (i == {i}u) {{ cx = {}; w = {}; }}\n  ", f(C3[i][0] as f64), f(w3(i))))
         .collect();
     let fv: String = (0..19).map(|i| format!("fv[{i}] = g[{i}] + {}; ", f(w3(i)))).collect();
+    let pt = if p16 { "u16" } else { "u32" };
     format!(
-        "{PARAMS_WGSL}
+        "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> srcA: array<u32>;
-@group(0) @binding(2) var<storage, read> srcB: array<u32>;
-@group(0) @binding(3) var<storage, read_write> dstA: array<u32>;
-@group(0) @binding(4) var<storage, read_write> dstB: array<u32>;
+@group(0) @binding(1) var<storage, read> srcA: array<{pt}>;
+@group(0) @binding(2) var<storage, read> srcB: array<{pt}>;
+@group(0) @binding(3) var<storage, read_write> dstA: array<{pt}>;
+@group(0) @binding(4) var<storage, read_write> dstB: array<{pt}>;
 @group(0) @binding(5) var<storage, read> wall: array<u32>;
 @group(0) @binding(6) var<storage, read> qbuf: array<f32>;
 @group(0) @binding(7) var<storage, read_write> force: array<vec4<f32>>;
@@ -1454,6 +1490,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   }}
 }}
 ",
+        en = pop16_enable(p16),
         fstore = if surf {
             ""
         } else {
@@ -1555,9 +1592,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 /// corps, et Γᵒᵘᵗ/P (populations décalées de leur poids) pour la propagation
 /// des mailles réceptrices. Tampon `force` : effort du surfel s en s, puis
 /// Γᵒᵘᵗ/P de ses paires en 4 n + 12 s + p (cases flottantes).
-fn wgsl_surfel(fp16: bool, n: u32) -> String {
+fn wgsl_surfel(fp16: bool, p16: bool, n: u32) -> String {
     let half = if fp16 { 5 } else { 10 };
-    let load = if fp16 {
+    let load = if p16 {
+        "fn pop(i: u32, c: u32) -> f32 {
+  if (i < 10u) { return unpack2x16float(u32(srcA[i * P.N + c])).x; }
+  return unpack2x16float(u32(srcB[(i - 10u) * P.N + c])).x;
+}".to_string()
+    } else if fp16 {
         format!(
             "fn pop(i: u32, c: u32) -> f32 {{
   let w = i >> 1u;
@@ -1626,11 +1668,13 @@ fn wgsl_surfel(fp16: bool, n: u32) -> String {
             comp = ["x", "y", "z", "w"][p % 4],
         );
     }
+    let en = pop16_enable(p16);
+    let pt = if p16 { "u16" } else { "u32" };
     format!(
-        "{PARAMS_WGSL}
+        "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> srcA: array<u32>;
-@group(0) @binding(2) var<storage, read> srcB: array<u32>;
+@group(0) @binding(1) var<storage, read> srcA: array<{pt}>;
+@group(0) @binding(2) var<storage, read> srcB: array<{pt}>;
 @group(0) @binding(3) var<storage, read_write> force: array<vec4<f32>>;
 // Par surfel : (n, A), (centre, maille pariétale de u_τ), les trois
 // colonnes de M (`surfel3d::wall_law_matrix`), puis 1 / Σ des poids de
@@ -1690,7 +1734,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     )
 }
 
-fn wgsl_init(fp16: bool) -> String {
+fn wgsl_init(fp16: bool, p16: bool) -> String {
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
     let eq: String = (0..19)
@@ -1702,7 +1746,20 @@ fn wgsl_init(fp16: bool) -> String {
             )
         })
         .collect();
-    let put: String = if fp16 {
+    let put: String = if p16 {
+        (0..19)
+            .map(|i| {
+                let v = format!("u16(pack2x16float(vec2<f32>(e{i}, 0.0)) & 0xffffu)");
+                if i < 10 {
+                    format!("A[{i}u * P.N + idx] = {v};
+  ")
+                } else {
+                    format!("B[{}u * P.N + idx] = {v};
+  ", i - 10)
+                }
+            })
+            .collect()
+    } else if fp16 {
         (0..words)
             .map(|w| {
                 let b = if 2 * w + 1 < 19 {
@@ -1729,11 +1786,13 @@ fn wgsl_init(fp16: bool) -> String {
             })
             .collect()
     };
+    let pt = if p16 { "u16" } else { "u32" };
+    let en = pop16_enable(p16);
     format!(
-        "{PARAMS_WGSL}
+        "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read_write> A: array<u32>;
-@group(0) @binding(2) var<storage, read_write> B: array<u32>;
+@group(0) @binding(1) var<storage, read_write> A: array<{pt}>;
+@group(0) @binding(2) var<storage, read_write> B: array<{pt}>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
   let idx = gid.x + gid.y * nwg.x * 64u;
@@ -2394,6 +2453,8 @@ pub struct Gpu3D {
     pub nz: usize,
     pub n: usize,
     pub fp16: bool,
+    /// Rangement des populations (voir `POP16`).
+    pub(crate) p16: bool,
     pub u_in: f32,
     pub tau0: f64,
     tau_sponge: f64,
@@ -2601,8 +2662,13 @@ fn specialize(code: &str, c: [u32; 7]) -> String {
         .replace("P.bnx", "BNX_C")
         .replace("P.\u{1}A", "P.lesA")
         .replace("P.\u{2}Nu", "P.essaiNu");
+    // Directives `enable` en tête du module.
+    let (en, body) = match body.strip_prefix("enable wgpu_int16;\n") {
+        Some(b) => ("enable wgpu_int16;\n", b.to_string()),
+        None => ("", body),
+    };
     format!(
-        "const SA_C = {}u;\nconst LES_C = {}u;\nconst ROWS_C = {}u;\nconst ESSAI_C = {}u;\nconst BNX_C = {}u;\nconst WALLN_C = {}u;\nconst ACTN_C = {}u;\n{body}",
+        "{en}const SA_C = {}u;\nconst LES_C = {}u;\nconst ROWS_C = {}u;\nconst ESSAI_C = {}u;\nconst BNX_C = {}u;\nconst WALLN_C = {}u;\nconst ACTN_C = {}u;\n{body}",
         c[0], c[1], c[2], c[3], c[4], c[5], c[6]
     )
 }
@@ -2613,6 +2679,7 @@ fn step_pipelines(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     fp16: bool,
+    p16: bool,
     walls: bool,
     surf: bool,
     c: [u32; 7],
@@ -2628,8 +2695,8 @@ fn step_pipelines(
             cache: None,
         })
     };
-    let bulk = mk("d3q19", wgsl_step(fp16, false, false).replace("WGu", &format!("{}u", step_wg())));
-    let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, true, surf)));
+    let bulk = mk("d3q19", wgsl_step(fp16, p16, false, false).replace("WGu", &format!("{}u", step_wg())));
+    let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, p16, true, surf)));
     (bulk, wall)
 }
 
@@ -2647,6 +2714,7 @@ impl Gpu3D {
             &self.device,
             &self.step_layout,
             self.fp16,
+            self.p16,
             self.step_wall_pipe.is_some(),
             self.surf.is_some(),
             [p.sa, k[0], k[1], k[2], p.bnx, self.wall_count as u32, self.n_active],
@@ -4168,9 +4236,12 @@ impl Gpu3D {
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
         limits.max_storage_buffers_per_shader_stage = limits.max_storage_buffers_per_shader_stage.max(16);
+        let i16 = adapter.features().contains(wgpu::Features::SHADER_I16);
+        POP16.store(i16 && std::env::var("SOUFFLERIE_U16").map_or(true, |v| v != "0"), std::sync::atomic::Ordering::Relaxed);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soufflerie 3D"),
             required_limits: limits,
+            required_features: if i16 { wgpu::Features::SHADER_I16 } else { wgpu::Features::empty() },
             ..Default::default()
         }))
         .map_err(|e| format!("GPU indisponible : {e}"))?;
@@ -4247,6 +4318,10 @@ impl Gpu3D {
             slab,
             surf,
         } = cs;
+        // Populations une par case de 16 bits sur les grilles boîtes ; les
+        // couches creuses gardent deux populations par mot (12 % plus rapide
+        // pour elles, voir `POP16`).
+        let p16 = fp16 && pop16() && sparse.is_none();
         let biggest = (words_a * ns * 4).max(16 * ns) as u64;
         if biggest > max_bind {
             return Err(format!(
@@ -4530,11 +4605,12 @@ impl Gpu3D {
             &device,
             &step_layout,
             fp16,
+            p16,
             wall_count > 0,
             surf.is_some(),
             [sa as u32 + keps as u32 + vles as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
         );
-        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16), true);
+        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16, p16), true);
         let sa_pipe = if keps {
             let ke = KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS);
             let ke = if vles { ke.replace("const VLES = false;", "const VLES = true;") } else { ke };
@@ -4677,7 +4753,7 @@ impl Gpu3D {
                     storage(8, true),
                 ],
             });
-            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, ns_ as u32), true);
+            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32), true);
             let bind = (0..2)
                 .map(|s| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4763,6 +4839,7 @@ impl Gpu3D {
             nz,
             n: ns,
             fp16,
+            p16,
             u_in,
             tau0: 0.5,
             tau_sponge: 0.8,
@@ -6735,7 +6812,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        specialize(&wgsl_step(fp16, false, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
+        specialize(&wgsl_step(fp16, false, false, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
     }
 }
 
