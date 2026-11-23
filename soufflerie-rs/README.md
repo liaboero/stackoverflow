@@ -3306,17 +3306,99 @@ valeur instantanée (Cx au dernier relevé) en sort, de 6·10⁻⁴ en relatif.
   demi-diagonales) : couche ×16 plus rapide, couches ×4 et ×8 plus
   lentes ; écarté.
 
-**Ce qui reste.** GPU libre, la collision de la veine prend 1,40 ms ;
-sans calcul ni tirage des voisins (mêmes lectures et écritures), elle
-prendrait 1,11 ms (≈ 200 Go/s, 80 % de la bande passante de la carte).
-Sur `ar4c3`, le pas se répartit en collision de la couche ×16 (cœur et
-mailles pariétales, 54 %), transport de ν̃ (14 %), raccord ×8 → ×16
-(19 %, dont l'interpolation des fantômes 10 %) et le reste. Pistes non
-faites : interpolation des fantômes par maille parente en mémoire
-partagée (≈ 5 %) ; transport de ν̃ dans la collision du pas suivant
-(≈ 5 %, mais un second champ de vitesses, 16 octets de plus par maille,
-et un décalage d'un pas à reporter dans les raccords) ; vitesses rangées
-en tableaux séparés (≈ 2 %).
+**Seconde série (banc Ahmed et aile infinie).** Le banc a quatre cas de
+plus, proches des calculs de validation : `ahmed` (corps d'Ahmed 25°, sol
+mobile, L = 64, 4,5 M mailles, sans raffinement), `ahmedr` (L = 32, sans
+sol, que le raffinement ne gère pas : grille ×2 et couche ×4 de 16
+mailles), `aile` (aile infinie NACA 0012, 4°, Re = 6·10⁶, envergure 40
+mailles, L = 48, 13 M mailles) et `ailer` (`aile_infinie 16 2 6e6 4 t
+16,16` : grilles ×2 et ×4, couches ×8 et ×16). `SOUFFLERIE_RANS=keps|vles`
+y choisit le modèle. `banc/vitesse.sh avant.exe apres.exe n` lance deux
+versions de `banc3d` en alternance, rend la médiane des durées par pas de
+la veine et l'écart relatif maximal des efforts et des sommes de contrôle
+du champ ; `PAUSE=10` laisse refroidir la carte entre deux lancements (la
+GTX 1070 de ce portable est à 87–89 °C au repos et baisse sa fréquence en
+charge : sans pause, deux mesures successives d'une même passe diffèrent
+de 5 à 10 %).
+
+Avant / après (GTX 1070 seule sur le GPU, médiane de trois lancements
+alternés avec pause, ms par pas de la veine ; `banc/vitesse.sh`) :
+
+| cas | mailles (mises à jour par pas de la veine) | avant | après | gain | M mises à jour/s avant → après | écart des efforts et du champ |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ahmed` (t* = 1) | 4,48 M (4,48 M) | 4,56 ms | 3,50 ms | ×1,30 | 982 → 1 279 | 0 (au bit) |
+| `ahmedr` (t* = 1) | 4,09 M (9,00 M) | 9,19 ms | 8,28 ms | ×1,11 | 981 → 1 087 | 0 |
+| `aile` (t* = 1) | 13,3 M (13,3 M) | 10,44 ms | 9,29 ms | ×1,12 | 1 272 → 1 429 | 0 |
+| `ailer` (t* = 0,5) | 11,0 M (123,5 M) | 122,5 ms | 116,1 ms | ×1,05 | 1 008 → 1 064 | 0 |
+| `ar4b` (t* = 1) | 4,27 M (9,10 M) | 9,06 ms | 8,50 ms | ×1,07 | 1 004 → 1 073 | 0 |
+| `ar4c3` (t* = 0,25) | 24,1 M (292 M) | 295,3 ms | 279,5 ms | ×1,06 | 990 → 1 046 | 0 |
+
+Mise en place inchangée (`ar4c3` : 13,1 et 13,5 s).
+
+Toutes les optimisations de cette série sont identiques au bit : champs
+et efforts égaux, maille par maille (`--champs-ref`), sur tous les cas du
+banc, avec Spalart–Allmaras, k-ε RNG et VLES.
+
+| optimisation | passe | avant | après |
+| --- | --- | --- | --- |
+| populations des grilles boîtes une par case de 16 bits (`array<u16>`, `enable wgpu_int16`, VK_KHR_16bit_storage) au lieu de deux par mot de 32 bits : chaque population tirée d'un voisin est une lecture de 2 octets contiguë d'un fil à l'autre, au lieu d'un mot de 4 octets à moitié utile ; mêmes conversions | collision, veine `ar4` / `ahmed` | 1,33 / 2,98 ms | 1,20 / 2,51 ms |
+| interpolation des fantômes par groupes de 128 fantômes consécutifs touchant au plus 256 nœuds parents : moments des nœuds lus une fois dans la mémoire partagée du groupe (12 k octets) au lieu d'une fois par fantôme (16,8 nœuds de 48 octets par fantôme en moyenne) | tirage, raccord ×8 → ×16 (`ar4c3`) | 4,39 ms | 2,8–2,9 ms |
+| transport de ν̃ (et de k, ε) des grilles boîtes à plus de 32 k mailles par plan, parcouru par briques (x entier × 4 rangées y × 16 plans z) au lieu de plans entiers : ν̃ et u des plans z ± 1 relus pendant qu'ils sont dans le cache (trois plans de 53 k mailles n'y tiennent plus) | ν̃, veine `ahmed` (SA / k-ε / VLES) | 1,45 / 1,70 / 1,89 ms | 0,82 / 1,03 / 1,21 ms |
+| recopie des raccords dans l'ordre de stockage de la grille parente (blocs de 8³) au lieu de l'ordre de la boîte | recopie, raccord ×8 → ×16 | 1,26 ms | 0,90 ms |
+| deux populations par mot (couches) : directions appariées selon la rangée x d'où elles sont tirées ((+x, −x), (+x+y, −x+y)…), le mot sert à deux fils voisins | collision ×16, recopie ×16 | 6,72 / 0,90 ms | 6,57 / 0,84 ms |
+
+**Essais écartés (seconde série).**
+
+- Populations une par case de 16 bits sur les couches creuses : collision
+  ×16 12 % plus lente (6,7 → 7,45 ms), recopie +25 % ; gardées en mots
+  (le rangement est choisi grille par grille).
+- Interpolation des fantômes par tuile de 8³ mailles fines (cube de 7³
+  nœuds parents, 16,5 k octets de mémoire partagée par groupe) : plus
+  lente que l'ancienne (occupation de 320 fils par multiprocesseur) ;
+  groupes de 64 fantômes et 64 nœuds : quatre fois plus lents (un pochoir
+  cubique de 64 nœuds remplit seul un groupe) ; 64/192, 128/288, 128/320
+  à 3–10 % de 128/256.
+- Transport de ν̃ par colonnes z (un fil par (x, y) et 4 à 64 plans, ν̃ et u
+  des plans voisins gardés en registres) : Ahmed 0,93 à 1,21 ms (briques :
+  0,82), et plus lent que l'ordre des plans sur l'aile (plan de 23 k
+  mailles : moins de lectures en vol par fil) ; briques sur tous les plans :
+  aile +15 %, `ar4` +17 % (plans qui tiennent dans le cache, accès
+  dispersés sur 16 plans) : briques au-delà de 32 k mailles par plan.
+- Populations par blocs de 512 mailles (10 plans de mots par bloc au lieu
+  de plans de N mailles, pour le TLB des grandes couches) : identique au
+  bit, collision ×16 de +0 à +5 % ; écarté.
+- Nœuds parents des pochoirs dans l'ordre de stockage de la grille
+  parente (passe des moments) : aucun gain (0,83 → 0,86 ms, dans le
+  bruit) ; écarté.
+- Taille des groupes de la collision des couches (`SOUFFLERIE_WG`, GPU
+  libre) : 64, 128, 256 équivalents (±2 %), 32 deux fois plus lent.
+- Collision pariétale : sans les branches de Bouzidi (liens traités comme
+  fluides), 1,64 ms au lieu de 1,79 ; sans les normales (codes lus),
+  1,59 ms. Le coût vient des accès dispersés des 0,6 M mailles pariétales
+  (2,8 ns par maille contre 0,7 au cœur) : rien de simple à gagner.
+- Remplissage du second demi-pas des fantômes dans la passe de tirage (les
+  deux instants sont connus) : ≈ 1 % au plus, mais les vitesses des
+  fantômes au demi-pas doivent rester celles de l'instant 0 pendant le
+  premier pas fin (ν̃, loi de paroi) : passe de plus ; non fait.
+- Propagation en place (AA-pattern, esoteric twist) : mêmes lectures et
+  écritures par pas, gain en mémoire seulement (la moitié des
+  populations) ; refonte de toutes les passes qui lisent les populations
+  (raccords, surfels, efforts) ; non fait.
+
+**Ce qui reste.** Les collisions des grilles boîtes sont à ≈ 175 Go/s
+(veine d'Ahmed : 4,48 M mailles en 2,51 ms, ≈ 98 octets par maille), 70 %
+de la bande passante de la carte ; sans calcul, 10 % de moins. Sur
+`ar4c3`, le pas se répartit en collision de la couche ×16 (cœur 37 %,
+mailles pariétales 10 %, loi de paroi 3 %), transport de ν̃ (14 %), raccord
+×8 → ×16 (16 %, dont l'interpolation des fantômes 8 %) et le reste. Le cœur
+de la collision creuse reste 20 % plus lent par maille que celui des
+grilles boîtes : tables des blocs (≈ 8 %, mesuré en lisant les voisins
+dans le bloc de la maille), mailles fantômes et solides intercalées.
+Pistes non faites : transport de ν̃ dans la collision du pas suivant
+(≈ 3 % des octets, second champ de vitesses, décalage d'un pas dans les
+raccords) ; blocs des couches munis d'une marge (voisins sans table) ;
+listes de liens compactées pour les mailles pariétales (144 octets de
+fractions et de normales lus par maille, 5 liens en moyenne).
 
 ## Aéroacoustique : cylindre 2D, rayonnement direct et Ffowcs Williams–Hawkings
 
@@ -3576,6 +3658,21 @@ Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
 totale varie de ±30 % d'un passage à l'autre ; les temps par passe
 (`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
 alternés par modèle, on garde le plus rapide.
+
+### Optimisations du solveur GPU (seconde série)
+
+GTX 1070 seule sur le GPU, médiane de trois lancements alternés avec
+pause (`PAUSE=10 banc/vitesse.sh`), ms par pas de la veine ; résultats
+identiques au bit.
+
+| Cas | Avant | Après |
+| --- | --- | --- |
+| `banc3d ahmed` (4,48 M mailles, sans raffinement) | 4,56 ms | 3,50 ms (−23 %) |
+| `banc3d aile` (13,3 M mailles, sans raffinement) | 10,44 ms | 9,29 ms (−11 %) |
+| `banc3d ahmedr` / `ar4b` (couche ×4) | 9,19 / 9,06 ms | 8,28 / 8,50 ms |
+| `banc3d ailer` / `ar4c3` (couches ×8, ×16) | 122,5 / 295,3 ms | 116,1 / 279,5 ms |
+| Mise en place (`ar4c3`) | 13,1 s | 13,5 s (bruit ; groupes de l'interpolation calculés sur le processeur) |
+| Mémoire | — | inchangée pour les populations ; groupes de l'interpolation ≈ 12 octets par maille fantôme |
 
 ### Soumissions en vol bornées (`Gpu3D::run`)
 
