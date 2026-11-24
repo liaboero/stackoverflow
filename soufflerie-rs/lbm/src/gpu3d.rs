@@ -3326,6 +3326,50 @@ fn wall_links(body: &Body3D, p: [usize; 3], solid_at: &dyn Fn(i64, i64, i64) -> 
     Some((row, nrow, cmin as f32, beside_solid))
 }
 
+/// Diagnostic des arêtes vives : cosinus seuil entre les normales des faces
+/// touchées par une maille pariétale au-dessous duquel elle est une arête
+/// vive, sans loi de paroi (`SOUFFLERIE_ARETE_DEG`, angle entre faces en
+/// degrés, 60 par défaut) ; et paroi adhérente partout, sans loi de paroi
+/// (`SOUFFLERIE_SANS_LOI=1`).
+fn arete_env() -> (f32, bool) {
+    let deg = std::env::var("SOUFFLERIE_ARETE_DEG").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(60.0);
+    (deg.to_radians().cos() as f32, std::env::var("SOUFFLERIE_SANS_LOI").is_ok_and(|v| v == "1"))
+}
+
+/// Arêtes saillantes de la maquette (coordonnées de cette grille) qui
+/// coupent la loi de paroi, si `SOUFFLERIE_ARETE_CONVEXE` donne l'angle
+/// minimal entre les faces (degrés ; « 1 » : 20°). La loi de paroi suppose une
+/// paroi plane sous le nœud et sous le point relevé à h = `WM_H` le long de la
+/// normale. À moins de h d'une arête saillante, ce n'est plus vrai : le relevé
+/// voit l'écoulement de l'autre face (le toit, au-dessus de la lunette), et
+/// le glissement qui en sort porte le fluide de paroi à travers l'arête. On y
+/// traite la paroi comme aux arêtes vives à 90° (maille touchant les deux
+/// faces) : adhérente, sans loi de paroi. L'angle sépare seulement les arêtes
+/// de la géométrie des facettes d'une surface lisse (quelques degrés) ; seules
+/// comptent les arêtes que l'écoulement amont franchit.
+fn aretes_convexes(body: &Body3D) -> Option<crate::geom3d::FeatureSet> {
+    let v = std::env::var("SOUFFLERIE_ARETE_CONVEXE").ok()?;
+    let deg: f64 = v.parse().ok().filter(|&d: &f64| d > 1.0).unwrap_or(20.0);
+    let mesh = body.mesh.as_ref()?;
+    let m = crate::geom3d::Indexed::from_tris(&mesh.tris);
+    // Arêtes que l'écoulement amont (+x) traverse : plus près de la
+    // perpendiculaire que de la direction de l'écoulement. Une arête
+    // longitudinale (flanc d'une caisse, coins avant presque vifs) n'est pas
+    // franchie : le glissement n'y porte rien d'une face à l'autre.
+    let traversee = |e: &crate::geom3d::FeatureEdge| {
+        let d = [e.b[0] - e.a[0], e.b[1] - e.a[1], e.b[2] - e.a[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        d[0].abs() < std::f64::consts::FRAC_1_SQRT_2 * l
+    };
+    let edges: Vec<_> = crate::geom3d::feature_edges(&m, deg).into_iter().filter(|e| e.convex && e.angle_deg < 179.0 && traversee(e)).collect();
+    if std::env::var("SOUFFLERIE_ARETE_LISTE").is_ok() {
+        for e in &edges {
+            eprintln!("arête {:.1}° : {:.1?} → {:.1?}", e.angle_deg, e.a, e.b);
+        }
+    }
+    Some(crate::geom3d::FeatureSet::new(edges))
+}
+
 /// Grille boîte (veine ou grille fine qui entoure la maquette).
 fn dense_setup(body: &Body3D, nested: bool) -> CellSetup {
     let (nx, ny, nz) = (body.nx, body.ny, body.nz);
@@ -4545,6 +4589,15 @@ impl Gpu3D {
         let geo: Vec<[f32; 4]> = if sa {
             // Distance négative : maille d'arête vive (faces touchées à plus
             // de 60° l'une de l'autre).
+            let (cos_arete, sans_loi) = arete_env();
+            // Arêtes convexes (`SOUFFLERIE_ARETE_CONVEXE`, voir `aretes_convexes`).
+            let convexes = aretes_convexes(body);
+            // Diagnostic : paroi adhérente dans la boîte x0,x1,z0,z1 (mailles
+            // de la veine, `SOUFFLERIE_SANS_LOI_BOITE`), grille boîte seule.
+            let boite_sans_loi: Option<[f64; 4]> = std::env::var("SOUFFLERIE_SANS_LOI_BOITE").ok().and_then(|v| {
+                let b: Vec<f64> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                (b.len() == 4).then(|| [b[0], b[1], b[2], b[3]])
+            });
             wall_pos
                 .par_iter()
                 .enumerate()
@@ -4554,8 +4607,11 @@ impl Gpu3D {
                     // Avec les arêtes vives du maillage : seulement à portée
                     // de lien (√2) de l'une d'elles (pas autour d'un bord
                     // d'attaque arrondi plus fin qu'une maille).
-                    let sharp = edge_cos[w] < 0.5
-                        && body.features.as_ref().is_none_or(|f| f.distance(p, 2.0) <= std::f64::consts::SQRT_2);
+                    let sharp = sans_loi
+                        || convexes.as_ref().is_some_and(|f| f.distance(p, WM_H + 1.0) <= WM_H)
+                        || boite_sans_loi.is_some_and(|b| p[0] >= b[0] && p[0] <= b[1] && p[2] >= b[2] && p[2] <= b[3])
+                        || edge_cos[w] < cos_arete
+                            && body.features.as_ref().is_none_or(|f| f.distance(p, 2.0) <= std::f64::consts::SQRT_2);
                     let d = if sharp { -d } else { d };
                     // Surfels : réceptrice sans lien vers la paroi, hors loi de paroi.
                     let d = if surf.as_ref().is_some_and(|(_, law)| !law[w]) { 0.0 } else { d };

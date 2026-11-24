@@ -2021,7 +2021,9 @@ limite (de l'ordre de 500 mailles par corde au voisinage du bord de fuite,
 par raffinement local de paroi), ou un modèle de couche limite intégrale
 hors équilibre (Park et Moin 2014 ; mais il suppose aussi h dans la
 couche limite). L'arête de toit d'Ahmed à 35° relève du même défaut :
-le glissement de la lunette laisse l'écoulement contourner l'arête.
+le glissement de la lunette laisse l'écoulement contourner l'arête
+(précisé depuis : le glissement des deux ou trois mailles qui suivent
+l'arête, voir « Décollement aux arêtes vives »).
 
 **Décision.** Défaut inchangé : toutes les variantes restent derrière des
 bits (`Gpu3D::set_essai`, `ahmed --essai`). Aucune n'est sans régression
@@ -2319,6 +2321,7 @@ arguments en tête de chaque fichier) :
 | `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, zone par tranche de corde `AILE_ZONE_XC=a,b` ou ajoutée à celle du critère `AILE_ZONE_PLUS=a,b`, bilan détaillé par faces `AILE_BILAN=2`, voir « Raffinement de paroi par zones ») |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `tools/essais_tble.sh` | loi de paroi TBLE (`SOUFFLERIE_TBLE` : base, eq, gp, gpc) sur l'aile infinie, même CSV ; voir « Loi de paroi hors équilibre » |
+| `marche` | marche descendante de Driver et Seegmiller (canal extrudé d'envergure périodique) : couche limite amont à −4 h, recollement x_r/h (premier nœud et frottement), Cf(x), Cp(x) ; `--n`, `--amont`, `--essai` (voir « Décollement aux arêtes vives ») |
 | `banc3d` | banc de mesure de la vitesse 3D (voir « Vitesse de calcul 3D ») : durées de mise en place, de calcul et de relevé, profil par passe, résultats à temps fixé comparés à une référence |
 
 L'essai d'aile d'envergure infinie (section « Aile infinie ») reposait sur
@@ -3007,10 +3010,121 @@ durée de moyenne change Cx d'environ 1 %.
   paroi) et la résolution de l'arête (une maille) laissent l'écoulement
   franchir une arête vive à 35° ; c'est le défaut de fond à corriger
   avant tout cas automobile (voir « Pourquoi la soufflerie ne décolle
-  pas » ; `ahmed --essai` passe les variantes de `set_essai`).
+  pas » ; `ahmed --essai` passe les variantes de `set_essai`). Cause
+  isolée depuis, corrigée en option : voir « Décollement aux arêtes
+  vives ».
 - *Boîte et surface* : 3 à 11 % d'écart, de signe variable selon la
   grille ; l'échange de quantité de mouvement (0,46 et 0,70 à L = 136)
   surestime nettement, comme sur l'aile.
+
+### Décollement aux arêtes vives (marche descendante, lunette d'Ahmed)
+
+À une arête vive, le décollement est fixé par la géométrie : un logiciel
+commercial le prédit sans résoudre la couche limite. Ici, la lunette à 35°
+du corps d'Ahmed restait collée (décollement complet à l'arête chez
+Lienhart). Résultats dans `validation/marche/` et
+`validation/decollement/arete_vive.csv`.
+
+**Cas de validation : marche de Driver et Seegmiller (1985).**
+`cargo run --release --example marche -- --n 32 --amont 30` : canal
+extrudé d'envergure périodique (8 mailles), 8 h en amont, 9 h en aval
+(expansion 1,125), Re_h ≈ 36 000 sur la vitesse d'entrée, parois haute et
+basse visqueuses (loi de paroi), couche limite développée depuis l'entrée
+sur 30 h, 240 h/U dont 60 de moyenne. Recollement : changement de signe de
+u au premier rang de nœuds (½ maille de la paroi) et du frottement
+(échange de quantité de mouvement) sur la paroi basse.
+
+| h (mailles) | Re_h (U_ref) | δ₉₉ / h à −4 h | H | x_r/h (u, 1er nœud) | x_r/h (frottement) | Cf min | Durée |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 43 600 | 1,44 | 1,82 | 5,14 | 6,63 | −0,0081 | 18 s |
+| 16 | 42 300 | 1,22 | 1,72 | 5,45 | 6,54 | −0,0069 | 130 s |
+| 32 | 41 400 | 1,02 | 1,58 | 5,76 | 6,79 | −0,0051 | 20 min |
+| Mesure | 36 000 | 1,5 | ≈ 1,3 | 6,26 ± 0,10 | | | |
+
+- L'arête à 90° est déjà traitée comme arête vive (paroi adhérente, sans
+  loi de paroi) : l'écoulement décolle à l'arête à toutes les résolutions
+  et x_r est à 8 % près de la mesure (les deux relevés l'encadrent ; celui
+  du premier nœud s'en rapproche en affinant). L'écart entre les deux
+  relevés vient de la paroi : le premier nœud repart vers l'aval avant que
+  la contrainte transmise s'annule.
+- Couche amont trop pleine (H 1,6 à 1,8 contre 1,3 ; Re_θ 7 600 à 11 500
+  contre 5 000 pour un δ voisin) : c'est la couche lente numérique de la
+  plaque plane (voir « Couche limite de la plaque plane »).
+- Après le recollement, le frottement par échange (Cf ≈ 0,004 à 0,007 de
+  10 à 20 h) est de l'ordre de 2 à 3 fois celui d'une couche limite qui se
+  reconstruit (de l'ordre de 0,002 chez Driver et Seegmiller), et 10 à 20
+  fois celui de la loi de paroi (2 u_τ²/U², colonne `cf_loi`) : en aval de
+  la bulle, la contrainte que reçoit le premier nœud vient de la viscosité
+  de Spalart–Allmaras de la couche cisaillée advectée, pas de la loi. Cp
+  monte de −0,08 (x ≈ 1,5 h) à 0,17–0,18 (x ≈ 9 h). Les données Cf(x),
+  Cp(x) de la NASA (TMR) n'ont pas pu être téléchargées : comparaison sur
+  x_r seulement.
+
+**Diagnostic sur Ahmed 35°** (L = 64, 12 t*, moyenne 4 t* ; « écart » :
+|ΔU|/U moyen sur les profils de Lienhart au-dessus de la lunette ; bulle :
+longueur de la bulle de culot à mi-hauteur) :
+
+| Essai (une variable) | Cx surface | C_S | Écart lunette | Bulle (mm) |
+| --- | --- | --- | --- | --- |
+| Défaut | 0,598 | 0,312 | 0,442 | 0 |
+| Maille d'arête du toit adhérente (`SOUFFLERIE_ARETE_DEG=30`) | 0,607 | 0,309 | 0,443 | 0 |
+| ν_t de SA retiré (`--essai 1`) | 0,791 | 0,361 | 0,499 | 0 |
+| k-ε RNG / VLES (`SOUFFLERIE_RANS`) | 0,631 / 0,675 | 0,324 / 0,320 | 0,459 / 0,457 | 0 |
+| Glissement sans plancher (`--essai 4194304`) / signé (201326592) | 0,545 / 0,544 | 0,284 / 0,278 | 0,424 / 0,421 | 0 |
+| Glissement libre (`--essai 16`) | diverge | | | |
+| **Sans loi de paroi** (`SOUFFLERIE_SANS_LOI=1`) | 0,630 | **0,145** | **0,236** | 253 |
+| Sans loi sur la lunette seule | 0,481 | 0,174 | 0,119 | 237 |
+| Sans loi à moins de 3 mailles de l'arête | 0,517 | 0,203 | **0,088** | 237 |
+| Sans loi sur la lunette hors de ces 3 mailles | 0,445 | 0,179 | 0,331 | 106 |
+
+Zones par `SOUFFLERIE_SANS_LOI_BOITE=x0,x1,z0,z1` (mailles de la veine ;
+`ahmed` imprime la position de l'arête). Ni la turbulence (SA retiré, k-ε,
+VLES), ni Bouzidi (la paroi adhérente décolle), ni la seule maille d'arête
+ne sont en cause : c'est le **glissement de la loi de paroi sur les deux
+ou trois mailles qui suivent l'arête**. Le relevé à h = 2 mailles le long
+de la normale y voit l'écoulement rapide du toit (normale radiale depuis
+l'arête, puis point relevé à moins de h du toit) ; le glissement qui en
+sort porte le fluide de paroi à travers l'arête, et la lunette n'a jamais
+de fluide lent à arrêter. Une arête à 35° n'était pas « vive » pour le
+solveur (seuil de 60° entre les faces touchées par une maille), et rendre
+adhérente la seule maille d'arête ne suffit pas : le glissement reprend
+dès la maille suivante.
+
+**Correction** (`SOUFFLERIE_ARETE_CONVEXE=1`, ou l'angle minimal entre
+faces en degrés ; désactivée par défaut) : à moins de h = `WM_H` d'une
+arête saillante que l'écoulement amont franchit, paroi adhérente sans loi
+de paroi, comme aux arêtes à 90°. La loi suppose une paroi plane sous le
+nœud et sous le point relevé ; à moins de h d'une arête, ce n'est plus
+vrai. Aucun réglage : h est la hauteur de la loi ; l'angle (20°) ne sert
+qu'à séparer les arêtes de la géométrie des facettes d'une surface lisse
+(5 à 6° pour les congés d'Ahmed à L = 64) ; « franchie » : arête plus
+proche de la perpendiculaire à l'écoulement amont que de sa direction (les
+arêtes longitudinales de la caisse et les coins avant presque vifs ne sont
+pas traversés ; les compter montait C_K de 0,124 à 0,169). Les pieds
+(cylindres de deux mailles, facettes à 21°) sont pris aussi.
+
+| Cas | L | Cx surface avant / après | Cx boîte avant / après | C_S avant / après | Écart lunette avant / après | Lunette |
+| --- | --- | --- | --- | --- | --- | --- |
+| 35° | 64 | 0,598 / 0,542 | 0,594 / 0,680 | 0,312 / 0,220 | 0,442 / 0,087 | collée → décollée (bulle de culot 237 mm) |
+| 35° | 96 | 0,664 / **0,476** | 0,666 / 0,498 | 0,393 / 0,217 | 0,506 / 0,134 | collée → décollée (207 mm) |
+| 35°, mesure | | ≈ 0,26 | | | | décollée dès l'arête |
+| 25° | 64 | 0,468 / 0,493 | 0,468 / 0,664 | 0,119 / 0,159 | 0,070 / 0,137 | collée → trop décollée près de l'arête |
+| 25° | 96 | 0,385 / 0,448 | 0,432 / 0,498 | 0,124 / 0,158 | 0,084 / **0,051** | collée → bulle d'arête, recollée |
+| 25°, mesure | | 0,285 | | 0,140 | | bulle d'arête puis recollement |
+
+- *35°* : le régime est enfin le bon. La lunette décolle dès l'arête,
+  C_S baisse de moitié, une bulle de culot apparaît, les profils de
+  Lienhart sont trois à cinq fois mieux suivis ; Cx −28 % à L = 96. Il
+  reste 1,8 fois la mesure (C_K et C_B trop forts, voir « Corps d'Ahmed »).
+- *25°* : à L = 96, les profils au-dessus de la lunette sont meilleurs
+  (bulle près de l'arête, fluide lent en bas de lunette, comme mesuré),
+  mais Cx monte de 16 % (C_S 0,158 contre 0,140 mesuré, C_B 0,155) ; à
+  L = 64, la zone adhérente (h = 32 mm) est trop large et la lunette se
+  décharge trop. La zone rétrécit avec la maille (h = 2 mailles) : il faut
+  L = 136 pour juger. **Option non activée par défaut** tant que 25° n'y
+  est pas validé.
+- *Marche* : sans effet (x_r 5,77 / 6,64 contre 5,76 / 6,79 à n = 32) :
+  l'arête à 90° était déjà traitée.
 
 ## Modèle k-ε RNG (3D)
 
@@ -3667,6 +3781,10 @@ soufflerie-rs/
 
 ## Pistes
 
+- Arêtes vives : juger `SOUFFLERIE_ARETE_CONVEXE` sur Ahmed 25° à
+  L = 136 avant de l'activer par défaut (voir « Décollement aux arêtes
+  vives ») ; frottement en aval du recollement de la marche, 2 à 3 fois
+  trop fort.
 - Décollement (voir « Pourquoi la soufflerie ne décolle pas ») :
   raffinement local de paroi jusqu'à une dizaine de mailles dans la couche
   limite là où le gradient est adverse (bord de fuite, lunette), puis loi
@@ -3726,6 +3844,17 @@ Mesures sur la GTX 1070, minimum de trois passages (GPU partagé).
 | --- | --- | --- | --- |
 | Essais du décollement (bits 67108864 à 1073741824) et gradient de pression (8388608), bits à 0 | `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 12 cordes) | 27 s | 28 s (bruit de mesure ; les bits sont des constantes de compilation de la collision) |
 | Loi de Townsend–Mellor filtrée, κu_τh (562036736) | idem | 28 s | 98 s (×3,5 : fausse position sur la loi de Spalding dans la passe de paroi) |
+
+### Arêtes convexes sans loi de paroi (`SOUFFLERIE_ARETE_CONVEXE`)
+
+Mise en place seulement (arêtes du maillage et distance de chaque maille
+pariétale à l'arête la plus proche, sur le processeur) ; le pas de calcul
+n'est pas modifié. Option désactivée : mêmes résultats au bit près
+(marche n = 16 : x_r 5,454 / 6,544 avant et après l'ajout des options).
+Corps d'Ahmed 35°, L = 64, mise en place et 0,01 t* : 10 à 15 s avec ou
+sans l'option (écart dans le bruit du GPU partagé). Nouveau cas `marche` :
+n = 16 (1,8 M mailles, 240 h/U) en 130 à 200 s ; n = 32 (7,2 M mailles)
+en 20 à 25 min.
 
 ### Modèle k-ε RNG
 
