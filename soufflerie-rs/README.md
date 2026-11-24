@@ -2317,8 +2317,8 @@ arguments en tête de chaque fichier) :
 | `decamber2d` | décambrage visqueux 2D : couplage faible (1 et 20 itérations) contre couplage simultané (Newton), traînée, transition ; `decamber2d 0012 6e6 0 0:15:1`, `decamber2d 2412 3e6 libre -2:12:2` |
 | `geom3d_check`, `geom_edges` | géométrie d'une aile maillée : rayon du bord d'attaque, facettes, parois minces, mailles d'arête vive loin des arêtes du maillage ; angles dièdres |
 | `edge_boxes`, `te_map` | boîtes des grilles des bords (étendue, domaine propre) ; mailles autour du bord de fuite selon `--decalage` |
-| `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) |
-| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, zone par tranche de corde `AILE_ZONE_XC=a,b` ou ajoutée à celle du critère `AILE_ZONE_PLUS=a,b`, bilan détaillé par faces `AILE_BILAN=2`, voir « Raffinement de paroi par zones ») |
+| `plaque3d` | couche limite turbulente d'une plaque plane d'envergure périodique contre la théorie (δ*, θ, H, Cf, profil de Coles), perte de pression totale le long de x, variantes de diagnostic de la loi de paroi (`Gpu3D::set_essai`) ; efforts d'échange du nez par maille et Cx d'échange nez / partie plane / queue (`PLAQUE_NEZ=1`), u et ν̃ au-dessus du nez et de la partie plane (`PLAQUE_NUT=1`), sans modèle de turbulence (`SOUFFLERIE_RANS=laminaire`, aussi pour `aile_infinie`, `ahmed`) |
+| `aile_infinie` | aile NACA 0012 d'envergure infinie (veine périodique en y) contre Ladson et TMR : traînée de profil sans traînée induite (surface, échange et bilan sur boîte de la tranche centrale ; relevés du bilan : `AILE_BILAN=1`, nombre de relevés : `AILE_NREL`), Cz et Cx par tranche d'envergure (`AILE_BANDES=1`), décalage de la maquette (`AILE_DX`, `AILE_DZ`), perte de pression totale le long de la corde (`AILE_P0=1`), profils pariétaux avec u_τ, glissement et ν̃ (`AILE_COL=a,b`, x/c), carte du bord de fuite (`AILE_TE=1`, ou centrée sur l'intrados à x/c avec `AILE_CARTE=x`), mailles pariétales de la tranche centrale (`AILE_PAROI=i` ou `e` : x/c, y_n, u_τ, glissement, perte de p₀), plafond de viscosité des essais 1024 et 2048 (`AILE_NUCAP`, multiple de ν), Cz par dixième de corde (`AILE_CORDE=1`), Cx d'échange par dixième de corde (`AILE_XBINS=1`), vitesse verticale moyenne de la veine (`AILE_W=1`), arête vive du bord de fuite (`AILE_ARETE=1`), simple précision (`AILE_F32=1`), temps par passe (`AILE_PROFIL=n`, n pas ; fausse les relevés suivants), modèle k-ε RNG (`SOUFFLERIE_RANS=keps`, aussi pour `plaque3d`) ou VLES (`SOUFFLERIE_RANS=vles`, aussi pour `plaque3d`, `ahmed`, `cylindre3d`) ; toujours : Cm au quart de corde, moyenne et écart type des relevés, abscisse du décollement (vitesse tangentielle moyenne des nœuds pariétaux, et minimum le long de la normale jusqu'à 0,08 c ; détail par 40e de corde `AILE_DECOL=1`), durée de moyenne `AILE_MOY` (cordes), relevés un à un `AILE_SERIE=1` ; raffinement de paroi par zones `--raff-paroi n` (`--raff-paroi-t`, `--raff-paroi-bande`, `--raff-paroi-sillage`, `AILE_BETA`, `AILE_ZONE_Y`, `AILE_ZONE_TOUT`, zone par tranche de corde `AILE_ZONE_XC=a,b` ou ajoutée à celle du critère `AILE_ZONE_PLUS=a,b`, bilan détaillé par faces `AILE_BILAN=2`, voir « Raffinement de paroi par zones ») |
 | `tools/essais_decol.sh` | variantes de `set_essai` sur l'aile infinie à une liste d'incidences (une ligne CSV par calcul : Cz, Cx, Cm, décollement) ; voir « Pourquoi la soufflerie ne décolle pas » |
 | `tools/essais_tble.sh` | loi de paroi TBLE (`SOUFFLERIE_TBLE` : base, eq, gp, gpc) sur l'aile infinie, même CSV ; voir « Loi de paroi hors équilibre » |
 | `marche` | marche descendante de Driver et Seegmiller (canal extrudé d'envergure périodique) : couche limite amont à −4 h, recollement x_r/h (premier nœud et frottement), Cf(x), Cp(x) ; `--n`, `--amont`, `--essai` (voir « Décollement aux arêtes vives ») |
@@ -2727,15 +2727,18 @@ populations. La condition limite à surfels devra garder des populations
 dans ces voxels partiellement fluides (fraction fluide > 0), ou rendre leur
 part du volume balayé aux voxels voisins.
 
-## Paroi volumique par surfels sur GPU (essai, désactivée par défaut)
+## Paroi volumique par surfels sur GPU (option, désactivée par défaut)
 
 Condition limite de Chen, Teixeira et Molvig (1998), celle de PowerFLOW,
 branchée dans le solveur : `Body3D::surfels = true` (bancs `aile_infinie`,
 `plaque3d`, `ahmed` : `SOUFFLERIE_SURFELS=1`) remplace le rebond de Bouzidi
 sur toutes les grilles boîtes (veine et grilles fines imbriquées) ; maquette
-maillée seulement, ni couche pariétale creuse ni sol mobile. Défaut
-inchangé. Modules : `lbm/src/surfel3d.rs` (tables, sur le processeur),
-passe `surfel3d` et variante de la collision pariétale (`gpu3d.rs`).
+maillée seulement, sans couche pariétale creuse ; sol mobile accepté (z non
+périodique, populations venant de sous la grille fournies par le plancher).
+Défaut inchangé. Modules : `lbm/src/surfel3d.rs` (tables, sur le
+processeur), passe `surfel3d` et variante de la collision pariétale
+(`gpu3d.rs`). `SOUFFLERIE_SURFELS_O1=1` rend le schéma d'origine (ordre 1,
+colonne « avant » des tableaux).
 
 **Schéma.** Les mailles sont les voxels de volume fluide V > 0 (fractions
 de `surfel.rs`) : un voxel coupé dont le nœud est dans le corps est
@@ -2745,14 +2748,11 @@ calculé. Chaque pas, avant la collision :
   Γⁱⁿ = Σ w f* (parts w de son parallélépipède dans les voxels, populations
   après collision) ;
 - *réflexion* : rebond Γᵒᵘᵗ = Γⁱⁿ dans la direction opposée (masse et
-  pression renvoyées exactement ; au repos, effort −p A n exact) ; avec la
-  loi de paroi existante (passe `wall3d`, u_τ de la maille pariétale la plus
-  recouverte par le surfel), une perturbation de forme d'équilibre
-  δⱼ = Pⱼ wⱼ (λ₀ + Λ·cⱼ) rend la part spéculaire de la quantité de mouvement
-  tangentielle, de sorte que l'effort tangentiel transmis au corps soit
-  ρ u_τ² A (au plus celui du rebond ; masse et quantité de mouvement normale
-  inchangées ; pseudo-inverse de la matrice de Gram, singulière pour une
-  normale d'axe). Aux arêtes vives, rebond seul, comme avant ;
+  pression renvoyées exactement ; au repos, effort −p A n exact), puis une
+  perturbation de forme d'équilibre δⱼ = Pⱼ wⱼ (λ₀ + Λ·cⱼ), sans masse ni
+  quantité de mouvement normale, qui ramène l'effort tangentiel du rebond à
+  l'effort visé (pseudo-inverse de la matrice de Gram, singulière pour une
+  normale d'axe ; positivité des populations sortantes gardée) ;
 - *propagation* : la maille x reçoit dans la direction i la part transmise
   de la maille amont, Tᵢ f*, avec Tᵢ = V_amont − Σ w (ce qui n'a frappé aucun
   surfel), plus les parts émises Σ w Γᵒᵘᵗ / Σ w, divisées par
@@ -2760,55 +2760,123 @@ calculé. Chaque pas, avant la collision :
   le diviseur Dᵢ garde une combinaison convexe là où la géométrie discrète
   s'en écarte.
 
-Seules les mailles « réceptrices » (≈ 2 à 3 fois les mailles pariétales de
-Bouzidi) passent par la variante de la collision ; les autres sont
-inchangées. L'effort sur le corps est accumulé par surfel (efforts par
-position : `take_forces`, `take_wall_forces`). Correctif annexe : un maillage
-dont les normales rentrent (profil extrudé parcouru dans l'autre sens, cas de
-`aile_infinie`) est retourné avant la découpe (signe de Σ A_a c_a) ; les
-fractions solides peuvent être intégrées selon y ou z (axe de plus grande
-aire projetée ; un canal parallèle à x n'a aucune composante Aₓ).
+**Paroi à sa place (ordre 2).** Dans sa forme d'origine, l'effort
+tangentiel était celui du rebond : les voxels coupés, supposés homogènes,
+placent alors la paroi au centre du volume rassemblé, de 0,2 à 0,35 maille
+vers le fluide sauf à mi-maille (ordre 1 : Poiseuille incliné −10 % de
+débit, sphère +19 % de traînée). L'effort tangentiel est maintenant tiré
+d'un relevé de vitesse au-dessus de chaque surfel, qui ne dépend que de la
+place exacte du surfel et non de la découpe des voxels :
 
-**Validation** (`cargo test --release --test surfels`, `canal_surfels`) :
+- *relevé* (`surfel3d::probe_fit`, tables préparées une fois) : nœuds
+  entièrement fluides (V = 1) à une hauteur η ∈ [0,5 ; 3] au-dessus du plan
+  du surfel et à moins d'une maille de sa normale (7 en moyenne) ;
+  moindres carrés du profil u = η (a + d·ξ) + b η², nul à la paroi (ξ : le
+  long de la paroi, pente variable d'un bord à l'autre du relevé) ; la pente
+  à la paroi a et la vitesse à h = 2 mailles, u_h = a h + b h², sont des
+  combinaisons linéaires fixes des vitesses du pas précédent. Le profil de
+  Poiseuille est exactement de cette forme ; un profil courbe le long de la
+  paroi (conduite) laisse une erreur d'ordre 2. Moins de 6 nœuds : profil
+  a η + b η² ; moins de 3 (0,8 % des surfels de l'aile, coins du bord de
+  fuite) : loi de paroi de la maille pariétale comme avant ;
+- *effort visé* : laminaire, ρ ν a A (contrainte visqueuse à la paroi) ;
+  turbulent, ρ u_τ² A le long de u_h, u_τ de la loi de Spalding à
+  h = 2 mailles, la même hauteur de raccord que la loi de paroi de Bouzidi
+  (`WM_H`) ; en sous-couche visqueuse elle se réduit à ν u_h / h. L'effort
+  n'est plus borné par celui du rebond ;
+- *arêtes vives* : aucune exception. La paroi adhérente (rebond seul) des
+  mailles d'arête de la loi de Bouzidi touchait tout nez arrondi : un
+  voxel coupé dont le nœud est dans le corps a des liens vers le solide
+  dans presque toutes les directions et passe pour une arête (plaque :
+  couche lente de 4 mailles dès le nez, δ* ×2). Le rebond limité aux arêtes
+  du maillage (angle dièdre > 60°) dégrade aussi : aile, bord de fuite seul,
+  Cx 0,043 → 0,062 ; Ahmed, bilan 0,78 → 0,87.
 
-| Cas | Surfels | Bouzidi | Commentaire |
-| --- | --- | --- | --- |
-| Tables, sphère maillée périodique | max \|V − Dᵢ\| 5·10⁻¹⁴, fuite 10⁻¹², masse d'un pas à 2·10⁻⁶ | — | test unitaire `tables_conservatives` |
-| Masse Σ V ρ, sphère, 4 000 pas, veine périodique | dérive −4·10⁻⁶ par rapport à la veine vide | +1,0·10⁻⁴ | la veine vide dérive de 6·10⁻⁵ (arrondi f32 de la collision) |
-| Poiseuille, parois droites à mi-maille | débit −0,3 %, profil 0,4 % | — | rebond à mi-chemin, ordre 2 |
-| Poiseuille, parois droites en c₁ = 3,3 / 3,0 | −7,4 % / −10,6 % | — | H = 12 mailles |
-| Poiseuille incliné (normale (0, −1, 2)/√5) | débit −9,9 %, profil 7,1 % | (non comparable : nœuds solides mal classés par le maillage périodique) | H = 10,7 mailles |
-| Sphère Re = 100, 8 mailles par diamètre | Cx 1,471 (bilan sur boîte 1,475) | 1,236 (bilan 1,244) | |
-| `aile_infinie 16 2 6e6 α 12 - 60` (64 mailles), bilan sur boîte Cz / Cx | 0° : 0,009 / 0,103 · 4° : 0,249 / 0,109 · 8° : 0,384 / 0,139 | 4° : 0,456 / 0,0158 | Ladson 0,43–0,44 / 0,0081–0,0088 à 4°, 0,87–0,89 à 8° |
-| idem, échange de quantité de mouvement (tranche centrale) | 4° : 0,2496 / 0,1087 (bilan 0,2491 / 0,1087) | 4° : 0,4625 / 0,0026 (bilan 0,4562 / 0,0158) | |
-| `plaque3d 64`, x/L = 0,6 : δ*, Cf loi | 1,31 maille, 0,00189 (échange 0,00209 = ρu_τ² 0,00206) | 0,27, 0,00360 | théorie Cf 0,00389 |
+Le relevé lit les vitesses de tous les pas : en laminaire, la collision les
+écrit désormais à chaque pas quand les surfels sont actifs (elle le faisait
+déjà avec un modèle de turbulence).
 
-**Bilan.** Ce qui est acquis : conservation exacte de la masse (à
-l'arrondi), effort par échange de quantité de mouvement égal au bilan sur
-boîte (sphère 0,3 %, aile 0,02 % ; le rebond de Bouzidi en est loin sur
-l'aile), contrainte de la loi de paroi transmise exactement (plaque :
-frottement d'échange = ρ u_τ²). Ce qui ne va pas : **la paroi volumique,
-dans cette forme (voxels coupés supposés homogènes), est d'ordre 1 en
-position** — exacte à mi-maille, elle se comporte comme une paroi déplacée
-de 0,2 à 0,35 maille vers le fluide ailleurs (Poiseuille −7 à −11 % de
-débit, sphère +19 % de traînée à 8 mailles par diamètre). Avec la loi de
-paroi aux Reynolds élevés, une couche lente de plusieurs mailles se forme
-dès le bord d'attaque (plaque : u/U_e = 0,49 au premier nœud contre 0,88,
-δ* ×5), et l'aile perd la moitié de sa portance avec une traînée ×7 ; au
-bord de fuite, plus mince qu'un voxel, les deux faces partagent aussi les
-mêmes voxels (sans dédoublement de voxel, la condition de Kutta en
-souffre). Le défaut n'est donc pas réglable par un facteur : il faut une
-représentation sous-maille des voxels coupés (position du centre fluide
-dans le rassemblement et la dispersion, ou interpolation des populations
-rassemblées à la place du surfel comme dans les versions ultérieures de
-PowerFLOW) et le dédoublement des voxels traversés par une paroi mince.
-Option laissée désactivée.
+**Bord de fuite.** Les voxels traversés par les deux faces (normales à plus
+de 120°) sont comptés (`Stats::thin` : 120, 321 et 603 sur les trois
+grilles de l'aile à 64 mailles) mais pas dédoublés : un second jeu de
+populations par voxel demande des mailles hors grille dans toutes les
+passes (collision, ν̃, raccords, briques), hors de portée de ce travail.
+Essai écarté : rendre ces voxels solides coupe les liens de leurs voisins
+(fuite de masse de 3 800 volumes de maille sur la grille fine, Cx −1,3).
 
-Reste à faire, dans l'ordre : (1) rassemblement et dispersion qui tiennent
-compte de la place du fluide dans le voxel coupé (viser l'ordre 2 du
-Poiseuille incliné, test `surfels_poiseuille_incline`) ; (2) voxels
-dédoublés au bord de fuite ; (3) seulement ensuite, l'aile, la plaque et le
-corps d'Ahmed (non relancé ici).
+**Validation** (`cargo test --release --test surfels`) :
+
+| Cas | Avant (ordre 1) | Après (relevé) | Bouzidi | Commentaire |
+| --- | --- | --- | --- | --- |
+| Tables, sphère maillée périodique | max \|V − Dᵢ\| 5·10⁻¹⁴, masse d'un pas à 2·10⁻⁶ | inchangé | — | `tables_conservatives` ; relevé exact pour u = η(a + d·ξ) + bη² (`releve_exact`) |
+| Masse Σ V ρ, sphère, 4 000 pas | dérive −4·10⁻⁶ par rapport à la veine vide | −4·10⁻⁶ | +1,0·10⁻⁴ | |
+| Poiseuille, parois droites à mi-maille (H = 12) | débit −0,3 %, profil 0,4 % | débit +0,35 %, profil < 0,01 % | — | |
+| Poiseuille incliné, normale (0, −1, 2)/√5 (H = 10,7) | débit −9,9 %, profil 7,1 % | débit +0,71 %, profil 0,05 % | — | |
+| Sphère Re = 100, 8 mailles par diamètre, Cx | 1,471 (bilan 1,475) | 1,248 (bilan 1,249) | 1,236 (bilan 1,244) | |
+
+**Convergence en maillage** (`surfels_convergence`, laminaire, ν = 0,1 ;
+moyenne quadratique sur 4 places de la paroi dans la maille ; canal
+incliné : normale (0, −1, 2)/√5, H = 5,4 / 10,7 / 21,5 mailles ; conduite
+circulaire d'axe x : R = 5 / 10 / 20 ; débit Σ V u_x et profil des nœuds
+entièrement fluides, L2 rapporté à u_max). Ordre mesuré entre résolutions
+successives :
+
+| Cas | Avant : écarts (débit / profil) | Avant : ordre | Après : écarts | Après : ordre | Bouzidi (conduite) : écarts (ordre) |
+| --- | --- | --- | --- | --- | --- |
+| Canal, H = 5,4 | 19 % / 15 % | | 2,9 % / 0,15 % | | |
+| Canal, H = 10,7 | 10 % / 7,1 % | 0,94 / 1,05 | 0,74 % / 0,065 % | **1,99** / 1,22 | |
+| Canal, H = 21,5 | 5,1 % / 3,5 % | 0,97 / 1,03 | 0,20 % / 0,030 % | **1,89** / 1,09 | |
+| Conduite, R = 5 | 15 % / 8,7 % | | 4,6 % / 1,1 % | | 13 % / 4,5 % |
+| Conduite, R = 10 | 7,4 % / 4,0 % | 0,99 / 1,11 | 1,2 % / 0,30 % | **2,01** / 1,93 | 5,5 % / 2,4 % (1,27 / 0,92) |
+| Conduite, R = 20 | 3,7 % / 1,9 % | 0,99 / 1,05 | 0,29 % / 0,079 % | **1,97** / 1,91 | 2,5 % / 1,2 % (1,15 / 1,03) |
+
+L'ordre mesuré du débit est 2 (1,89 à 2,01) sur les deux cas, celui du
+profil de la conduite 1,9. Le profil du canal est déjà au niveau de
+l'erreur de compressibilité et de régime établi (10⁻⁴ à 10⁻³ de u_max) :
+son ordre n'est pas significatif. Bouzidi, dans les mêmes conduites,
+compte le débit par Σ u des nœuds (quadrature d'ordre 1), d'où son ordre
+apparent ≈ 1.
+
+**Écoulements turbulents** (Spalart–Allmaras, loi de Spalding) :
+
+| Cas | Avant | Après | Bouzidi | Référence |
+| --- | --- | --- | --- | --- |
+| `aile_infinie 16 2 6e6 α 12 - 60` (64 mailles), bilan Cz / Cx, 0° | 0,009 / 0,103 | 0,005 / 0,033 | — | 0 / 0,0081 |
+| idem, 4° | 0,249 / 0,109 | 0,400 / 0,043 | 0,456 / 0,016 | Ladson 0,43–0,44 / 0,0081–0,0088 |
+| idem, 8° | 0,384 / 0,139 | 0,731 / 0,068 | — | Ladson 0,87–0,89 |
+| idem, 4°, échange (tranche centrale) | 0,250 / 0,109 | 0,399 / 0,043 | 0,463 / 0,0025 | |
+| `plaque3d 64`, x/L = 0,6 : δ* (mailles), Cf loi, frottement d'échange | 1,31, 0,00189, 0,00209 | 0,62, 0,00292, 0,00365 | 0,27, 0,00360, 0,00433 | δ* 0,12, Cf 0,00389 |
+| idem, u/U_e au premier nœud (y = 1,3) ; Cx d'échange | 0,57 ; 0,090 | 0,79 ; 0,055 | 0,93 ; 0,018 | |
+| Ahmed 25°, L = 64, 12 t* (moyenne 4 t*) : Cx surface, C_K | non pris en charge (sol mobile) | 0,428, 0,029 | 0,479, 0,114 | 0,285, 0,020 |
+| idem : Cx d'échange ; bilan sur boîtes ±0,1 / 0,2 / 0,3 L | — | 0,90 ; 0,84 / 0,64 / 0,56 | 0,56 ; 0,46 / 0,53 / 0,50 | 0,285 |
+
+**Bilan.** Acquis : conservation exacte de la masse ; effort d'échange égal
+au bilan sur boîte (aile, 0,5 %) ; ordre 2 en position de paroi pour le
+frottement (débit des écoulements laminaires) ; frottement turbulent
+transmis juste sur la plaque (0,00365 contre 0,00389) ; l'aile retrouve la
+plus grande part de sa portance (4° : 0,25 → 0,40 ; 8° : 0,38 → 0,73) et sa
+traînée est divisée par 2,5 ; l'avant du corps d'Ahmed est juste (C_K 0,029
+contre 0,114 pour Bouzidi, mesure 0,020). Ce qui ne va pas encore : avec le
+modèle de turbulence, une perte de pression totale naît au point d'arrêt et
+au bord d'attaque (aile à 4° : perte de p₀ intégrée à x/c = 0 de 0,050 q c
+contre 0,011 avec Bouzidi, 0,76 q au premier rang contre 0,24), y compris
+avec une paroi glissante (effort tangentiel nul : Cx 0,035) : elle ne vient
+pas du frottement. Le rassemblement et la dispersion restent uniformes sur
+chaque parallélépipède (valeur moyenne affectée à tout le volume balayé) :
+la distribution des populations, et non plus la place de la paroi, est
+d'ordre 1 là où le gradient normal est fort. Conséquences : couche limite
+deux fois trop épaisse sur la plaque, Cx de l'aile 2,7 fois celui de
+Bouzidi, corps d'Ahmed dont l'échange (0,90) et les boîtes (0,56 à 0,84)
+s'écartent de la surface (0,43). Sans modèle de turbulence, la plaque est
+au niveau de Bouzidi ou mieux (Re = 2000 : δ* 2,05 contre 2,10 ; Re = 10⁶ :
+0,51 contre 0,92). Option laissée désactivée.
+
+Reste à faire, dans l'ordre : (1) reconstruction linéaire des populations
+dans le rassemblement et la dispersion (gradient le long de la normale,
+masse rendue par λ₀) ; (2) voxels dédoublés au bord de fuite (mailles hors
+grille) ; (3) retirer les surfels des grilles grossières dont toutes les
+mailles sont recouvertes par une grille fine (travail inutile) ; (4)
+ensuite seulement, raffinement et Ahmed à L = 136.
 
 ## Domaine de Mach du D3Q19
 
@@ -3992,19 +4060,30 @@ de 67 à 130 s contre 79 à 109 s, dans la dispersion du GPU partagé.
 
 ### Paroi volumique par surfels (`SOUFFLERIE_SURFELS=1`, désactivée par défaut)
 
-Défaut inchangé (Bouzidi) : aucun coût. Avec l'option, GPU partagé (un
-passage) :
+Défaut inchangé (Bouzidi) : aucun coût, shaders identiques. Avec l'option,
+GPU partagé avec un autre calcul pendant les mesures (dispersion ±20 %) :
+somme des passes d'un pas par `AILE_PROFIL=200`, meilleur de deux passages
+alternés, et durées totales d'un passage :
 
-| Cas | Bouzidi | Surfels | dont préparation des surfels (processeur) |
+| Cas | Bouzidi | Surfels, avant (`SOUFFLERIE_SURFELS_O1=1`) | Surfels, relevé |
 | --- | --- | --- | --- |
-| `aile_infinie 16 2 6e6 4 12 - 60` (64 mailles, 4,4 M mailles) | 64 s | 132 s | 49 s (47 520 + 76 214 + 144 640 surfels sur les trois grilles) |
-| `plaque3d 64` | 13 s | 27 s | — |
+| `aile_infinie 16 2 6e6 4 … - 60`, somme des passes d'un pas | 14,7 ms | 21,0 ms (×1,43) | 23,3 ms (×1,58) |
+| idem, second passage | 17,9 ms | 25,6 ms (×1,43) | 27,9 ms (×1,56) |
+| `aile_infinie 16 2 6e6 4 12 - 60`, durée totale | 52 à 90 s | 78 s | 160 à 224 s (GPU partagé) |
+| Ahmed 25°, L = 64, 12 t* | 115 s | — | 130 à 180 s |
+| `plaque3d 64` | 13 s | 27 s | 18 s |
 
-Pas de calcul : une passe de plus (un fil par surfel, ≈ 27 lectures de
-population par surfel) et la propagation des mailles réceptrices par listes
-(≈ 2,5 fois plus de mailles pariétales qu'avec Bouzidi). Mémoire du GPU :
-≈ 0,7 ko par surfel (sphère : 3,3 Mo pour 4 752 surfels ; aile à 64
-mailles : ≈ 190 Mo estimés pour 268 000 surfels).
+Le relevé coûte ≈ 10 % de plus que le schéma d'origine : 7 lectures de
+vitesse par surfel en moyenne (relevé d'une maille de rayon ; 21 avec un
+rayon de 1,5, pour le même ordre et des écarts un peu plus grands sur la
+conduite, réduit pour cette raison), plus, en laminaire seulement,
+l'écriture des vitesses à chaque pas. Mémoire : 12 octets par entrée du
+relevé, ≈ 20 Mo pour les 268 000 surfels de l'aile à 64 mailles (≈ 0,8 ko
+par surfel en tout). Préparation : moindres carrés 4 × 4 par surfel, en
+parallèle, négligeable devant la découpe. Piste de réduction notable :
+les surfels des grilles grossières sous une grille fine (aile : 124 000
+sur 268 000) ne servent à rien ; les retirer demande de connaître le
+recouvrement à la préparation des tables.
 
 ### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
 

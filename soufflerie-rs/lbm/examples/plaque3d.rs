@@ -169,12 +169,44 @@ fn main() {
             let q = 0.5 * (u as f64).powi(2) * ny as f64;
             let v: Vec<String> = bins.iter().enumerate().map(|(k, b)| format!("{}:{:+.3}/{:+.3}", k as i64 - 1, b[0] / q, b[1] / q)).collect();
             println!("essai {essai} nez, Fx/Fz par maille : {}", v.join(" "));
+            // Fx par région (nez, partie plane, queue), deux faces.
+            let mut reg = [0.0f64; 3];
+            for (p, f) in wf.pos.iter().zip(&wf.force) {
+                let r = if p[0] < x_le + a_ell { 0 } else if p[0] > x_le + lf - a_ell { 2 } else { 1 };
+                reg[r] += f[0];
+            }
+            let q2 = 0.5 * (u as f64).powi(2) * ny as f64 * lf;
+            println!("essai {essai} Cx nez {:.4} plat {:.4} queue {:.4}", reg[0] / q2, reg[1] / q2, reg[2] / q2);
         }
         if std::env::var("PLAQUE_COLONNES").is_ok() {
             let wc = sim.finest_wall_cells();
             let edges = wc.iter().filter(|c| c.1 < 0.5).count();
             let flat = wc.iter().filter(|c| c.1 < 0.5 && c.0[0] > x_le + 0.2 * lf && c.0[0] < x_le + 0.8 * lf).count();
             println!("essai {essai} : Cz {:.4}, {} mailles pariétales, {edges} d'arête dont {flat} sur la partie plane", f.fz / (0.5 * (u as f64).powi(2) * body.area), wc.len());
+        }
+        if std::env::var("PLAQUE_NUT").is_ok() {
+            // Diagnostic : ν̃/ν et u/U (moyennes d'envergure) au-dessus du nez.
+            let nt = sim.nu_tilde();
+            let m0 = sim.macros();
+            let vols = sim.cell_volumes();
+            let (nx, ny) = (body.nx, body.ny);
+            for dx in [0.5f64, 1.5, 2.5, 4.0, 8.0, 20.0, 38.0] {
+                let i = (x_le + dx).round() as usize;
+                let k0 = zc.floor() as usize;
+                let mut line = format!("x−x_le {dx:4.1} :");
+                for k in k0..k0 + 10 {
+                    let (mut a, mut b, mut v) = (0.0, 0.0, 0.0);
+                    for j in 0..ny {
+                        let c = i + nx * (j + ny * k);
+                        a += nt.get(c).copied().unwrap_or(0.0) as f64;
+                        b += m0[c][0] as f64;
+                        v += vols.get(c).copied().unwrap_or(1.0) as f64;
+                    }
+                    let n = ny as f64;
+                    line += &format!(" [{k}: V {:.2} u {:.2} ν̃/ν {:.0}]", v / n, b / n / u as f64, a / n / nu);
+                }
+                println!("{line}");
+            }
         }
         let (mac, d, org, s) = sim.finest_macros();
         if mac.iter().any(|m| !m[0].is_finite()) {

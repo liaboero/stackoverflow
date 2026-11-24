@@ -344,6 +344,18 @@ fn main() {
                     f[1] += v[2];
                 }
             }
+            if std::env::var("AILE_XBINS").is_ok() {
+                // Diagnostic : Cx d'échange par dixième de corde (tranche centrale).
+                let mut b = [0.0f64; 12];
+                for (p, v) in w.pos.iter().zip(&w.force) {
+                    if p[1] >= yc0 && p[1] < yc1 {
+                        let k = (((p[0] - (xq - 0.25 * lf)) / lf * 10.0).floor() + 1.0).clamp(0.0, 11.0) as usize;
+                        b[k] += v[0] / (q * lf * (yc1 - yc0));
+                    }
+                }
+                let v: Vec<String> = b.iter().map(|x| format!("{x:+.4}")).collect();
+                println!("  Cx par dixième de corde : {}", v.join(" "));
+            }
             ex[0] += f[0] / (q * lf * (yc1 - yc0));
             ex[1] += f[1] / (q * lf * (yc1 - yc0));
         }
