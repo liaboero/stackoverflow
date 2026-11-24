@@ -3178,6 +3178,7 @@ dependencies = [
  "eframe",
  "egui_plot",
  "lbm",
+ "png",
  "rayon",
  "rfd",
 ]

@@ -1236,8 +1236,8 @@ impl Refinement {
 
 /// Emprise des grilles fines autour de la maquette, en longueurs de
 /// référence de la veine : amont, aval, de part et d'autre.
-pub(crate) const EXTENT3: [(f64, f64, f64); 3] = [(0.6, 1.5, 0.6), (0.35, 0.7, 0.4), (0.2, 0.4, 0.25)];
-pub(crate) const MARGIN3: usize = MARGIN;
+pub const EXTENT3: [(f64, f64, f64); 3] = [(0.6, 1.5, 0.6), (0.35, 0.7, 0.4), (0.2, 0.4, 0.25)];
+pub const MARGIN3: usize = MARGIN;
 
 /// Un pas de la grille `k` (0 : veine, i + 1 : `levels[i]`), suivi de deux
 /// pas de chacune de ses grilles filles ; `links[c − 1]` relie la grille c à

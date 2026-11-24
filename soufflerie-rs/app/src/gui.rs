@@ -32,6 +32,9 @@ pub struct Start {
     pub tab: Option<String>,
     /// Maquette STL à charger dans la soufflerie 3D (ouvre cet onglet).
     pub stl: Option<std::path::PathBuf>,
+    /// Options de la ligne de commande (soufflerie 3D : préréglage,
+    /// lancement, mise en place de la maquette).
+    pub opts: std::collections::HashMap<String, String>,
 }
 
 /// Ouvre l'interface ; false si aucun rendu n'a pu être créé.
@@ -85,6 +88,7 @@ struct App {
     chord: f64,
     /// État de marche de la soufflerie 2D avant le passage à un autre onglet.
     resume_tunnel: bool,
+    capture: crate::capture::Capture,
 }
 
 /// Onglet affiché.
@@ -126,7 +130,7 @@ fn sig3(v: f64) -> String {
 }
 
 /// Durée lisible.
-fn duration(sec: f64) -> String {
+pub(crate) fn duration(sec: f64) -> String {
     if !sec.is_finite() {
         "—".into()
     } else if sec < 60.0 {
@@ -140,7 +144,13 @@ fn duration(sec: f64) -> String {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start: Start) -> App {
-        cc.egui_ctx.set_theme(egui::ThemePreference::System);
+        // SOUFFLERIE_THEME=clair|sombre impose le thème (captures).
+        cc.egui_ctx.set_theme(match std::env::var("SOUFFLERIE_THEME").as_deref() {
+            Ok("clair") => egui::ThemePreference::Light,
+            Ok("sombre") => egui::ThemePreference::Dark,
+            _ => egui::ThemePreference::System,
+        });
+        theme::setup_style(&cc.egui_ctx);
         match &cc.wgpu_render_state {
             Some(rs) => {
                 let i = rs.adapter.get_info();
@@ -198,6 +208,7 @@ impl App {
         } else {
             tab
         };
+        tab3d.start_options(&start.opts);
         if tab == Tab::Tunnel3D {
             tab3d.set_active(true, &cc.egui_ctx);
         }
@@ -217,6 +228,7 @@ impl App {
             fluid: Fluid::Air,
             chord: 0.2,
             resume_tunnel: true,
+            capture: crate::capture::Capture::from_env(),
         }
     }
 
@@ -1176,6 +1188,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         theme::sync(ui.ctx());
+        self.capture.tick(ui.ctx());
         let mut tab = self.tab;
         egui::Panel::top("onglets").show(ui, |ui| {
             ui.horizontal(|ui| {
