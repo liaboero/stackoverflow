@@ -2536,7 +2536,7 @@ pub struct Gpu3D {
     sdf_geom: ([f32; 4], [f32; 4]),
     /// Type des mailles pour l'affichage (2 bits par maille).
     vox: wgpu::Buffer,
-    _qbuf: wgpu::Buffer,
+    pub(crate) _qbuf: wgpu::Buffer,
     /// Spalart–Allmaras avec loi de paroi : ν̃ (deux tampons alternés),
     /// distance à la paroi, géométrie pariétale et u_τ.
     pub sa: bool,
@@ -2556,7 +2556,7 @@ pub struct Gpu3D {
     pub(crate) nut: [wgpu::Buffer; 2],
     _dist: wgpu::Buffer,
     _wall_geo: wgpu::Buffer,
-    _utau: wgpu::Buffer,
+    pub(crate) _utau: wgpu::Buffer,
     pub(crate) sa_pipe: wgpu::ComputePipeline,
     pub(crate) sa_bind: Vec<wgpu::BindGroup>,
     /// Loi de paroi : passe sur les mailles pariétales (None sans SA).
@@ -3641,8 +3641,16 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
                     continue;
                 }
                 let x1 = ((x0 as f64 + w).floor() as usize).min(nx - 1);
-                for bx in (x0 as usize + 1) / SB..=x1 / SB {
-                    used_w[bx + bd[0] * (y / SB + bd[1] * (z / SB))] = true;
+                // Blocs du sillage et de ses voisines (une maille autour) :
+                // une voisine hors des blocs serait lue dans le bloc vide 0,
+                // jamais rempli (source parasite de masse et de quantité de
+                // mouvement : traînée du bilan croissant avec la marge).
+                for bz in z.saturating_sub(1) / SB..=(z + 1).min(nz - 1) / SB {
+                    for by in y.saturating_sub(1) / SB..=(y + 1).min(ny - 1) / SB {
+                        for bx in (x0 as usize) / SB..=(x1 + 1).min(nx - 1) / SB {
+                            used_w[bx + bd[0] * (by + bd[1] * bz)] = true;
+                        }
+                    }
                 }
             }
         }
@@ -3682,6 +3690,24 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
         (map, cells)
     };
     let ns = map.slots() * SB3;
+    // Toute voisine d'une maille active doit être dans un bloc rangé : hors
+    // des blocs, elle serait lue dans le bloc vide 0, jamais rempli.
+    {
+        let lost = (SB3..ns)
+            .into_par_iter()
+            .filter(|&i| cells[i].0 == 0)
+            .filter(|&i| {
+                let Some(p) = map.pos(i, dims) else { return false };
+                (1..19).any(|k| {
+                    let q = [0, 1, 2].map(|a| p[a] as i64 + C3[k][a] as i64);
+                    (0..3).all(|a| q[a] >= 0 && (q[a] as usize) < dims[a]) && map.id(q[0] as usize, q[1] as usize, q[2] as usize) < SB3
+                })
+            })
+            .count();
+        if lost > 0 {
+            return Err(format!("couche pariétale : {lost} mailles actives voisines de blocs absents"));
+        }
+    }
     let mut wall: Vec<u32> = cells.iter().map(|c| c.0).collect();
     let dist: Vec<f32> = cells.iter().map(|c| c.1).collect();
     let solid_count = wall.iter().filter(|&&w| w == SOLID).count();
@@ -3794,7 +3820,15 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
                 })
                 .collect();
         }
-        (0..ns).map(|i| active(i) && m[i]).collect()
+        // Sillage balayé : recopie limitée à la bande pariétale, comme sans
+        // sillage. Recopiés, les nœuds du sillage mettaient la frontière de
+        // la recopie (non conservative : l'état parent y est remplacé par
+        // celui de la grille fine) en travers du sillage, où les deux
+        // grilles diffèrent le plus : le bilan sur boîte changeait de 5 %
+        // selon qu'il l'entourait ou non. La grille fine du sillage garde
+        // son rôle : éloigner de la couche ses propres fantômes.
+        let wb = spec.wake > 0.0;
+        (0..ns).map(|i| active(i) && m[i] && (!wb || (dist[i] as f64) <= band - r)).collect()
     } else {
         (0..ns).map(|i| active(i) && (dist[i] as f64) <= band - r).collect()
     };
@@ -3870,6 +3904,18 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
         slab,
         surf: None,
     })
+}
+
+/// Raccords entre niveaux qui coupent la paroi (zones, bords, bouts
+/// d'envergure de l'aile infinie) : le tirage des mailles fantômes prend,
+/// aux mailles pariétales de la grille parente, les populations venues de
+/// la paroi comme le pas de celle-ci (liens de Bouzidi, glissement et
+/// viscosité de la loi de paroi) au lieu d'un rebond à mi-chemin sur paroi
+/// fixe. `SOUFFLERIE_RACCORD_PAROI=0` : traitement d'avant. Sans maille
+/// fantôme près d'une paroi (pas de raffinement, boîtes qui entourent la
+/// maquette), aucun effet.
+pub fn raccord_paroi() -> bool {
+    std::env::var("SOUFFLERIE_RACCORD_PAROI").map_or(true, |v| v != "0")
 }
 
 /// Hauteur de raccord de la loi de paroi, en mailles de la grille.
@@ -4700,7 +4746,10 @@ impl Gpu3D {
         let wall_pass = (sa && wall_count > 0).then(|| {
             let code = format!(
                 "{PARAMS_WGSL}{}",
-                WALL3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS).replace("SA_FNS", SA_FNS)
+                WALL3_WGSL
+                    .replace("SPARSE_FNS", SPARSE_FNS)
+                    .replace("LAM_FNS", LAM_FNS)
+                    .replace("SA_FNS", SA_FNS)
             );
             let pipe_w = pipe("wall3d", &wall_layout, code, true);
             pipe_w

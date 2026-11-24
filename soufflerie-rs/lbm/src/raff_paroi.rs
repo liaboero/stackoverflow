@@ -29,12 +29,13 @@
 //! Les niveaux sont des couches creuses (`LayerSpec::zone`) imbriquées sous
 //! les grilles boîtes de base : épaisseur selon la règle de `raff_auto`
 //! (max(16 mailles, 0,125 L) au niveau le plus fin, puis `nested_bands`),
-//! sillage en fraction de l'épaisseur (0 conseillé : sur l'aile infinie, le
-//! sillage balayé des couches creuses ajoute au bilan une traînée qui croît
-//! avec la marge, README « Raffinement de paroi par zones »).
+//! sillage en fraction de l'épaisseur (défaut 0).
 //!
-//! Limite connue : là où la zone s'arrête sur la paroi, le raccord coupe la
-//! surface (comme les grilles des bords) et ajoute de la traînée.
+//! Là où la zone s'arrête sur la paroi, le raccord coupe la surface ; le
+//! tirage des fantômes y suit la loi de paroi de la grille parente
+//! (`gpu3d::raccord_paroi`) et le raccord est neutre à 1 % près sur l'aile
+//! infinie. Une zone qui laisse grossier le bord d'attaque garde, elle, la
+//! traînée de la grille grossière (README « Raffinement de paroi par zones »).
 
 use crate::gpu3d::{LayerSpec, RefinePlan, SurfaceForces, ZoneRegion};
 use crate::stl::Tri;

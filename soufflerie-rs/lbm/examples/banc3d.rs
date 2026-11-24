@@ -179,6 +179,8 @@ fn main() {
     let mut last = (0.0, 0.0, 0.0);
     let mut surf = Vec::new();
     let mut boxes: Vec<[f64; 6]> = Vec::new();
+    let marges: Vec<f64> = std::env::var("BANC_BOITES").ok().map(|v| v.split(',').filter_map(|t| t.parse().ok()).collect()).unwrap_or_default();
+    let mut par_marge = vec![[0.0f64; 3]; marges.len()];
     let t_loop = Instant::now();
     while sim.time < total {
         let ts = Instant::now();
@@ -204,11 +206,25 @@ fn main() {
             if let [Some((f1, v1)), Some((f2, v2))] = sim.box_forces_vol(&[0.1, 0.15])[..] {
                 boxes.push([f1[0], f1[2], v1, f2[0], f2[2], v2]);
             }
+            // BANC_BOITES=m1,m2,… : bilan à chaque marge (longueurs de référence).
+            if !marges.is_empty() {
+                for (k, r) in sim.box_forces_vol(&marges).into_iter().enumerate() {
+                    if let Some((f, _)) = r {
+                        par_marge[k][0] += f[0];
+                        par_marge[k][1] += f[2];
+                        par_marge[k][2] += 1.0;
+                    }
+                }
+            }
             t_read += tr.elapsed().as_secs_f64();
             next_surf += 0.5;
         }
     }
     let loop_s = t_loop.elapsed().as_secs_f64();
+    if !marges.is_empty() {
+        let v: Vec<String> = marges.iter().zip(&par_marge).map(|(m, a)| format!("{m}: {:.4}/{:.5}", a[1] / a[2].max(1.0) / q, a[0] / a[2].max(1.0) / q)).collect();
+        println!("bilan par marge (Cz/Cx) {}", v.join(" · "));
+    }
     let steps = sim.time as f64;
     let mut res: Vec<(String, f64)> = vec![
         ("cx_echange".into(), fx / nf.max(1) as f64),

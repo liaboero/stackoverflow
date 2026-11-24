@@ -58,6 +58,12 @@ struct LinkParams {
     pbny: u32,
     pbnz: u32,
     pbcoord: u32,
+    /// Traitement pariétal du tirage (`pre_at`) : 0, rebond à mi-chemin ;
+    /// 1, liens de Bouzidi et loi de paroi de la grille parente.
+    pwm: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 const LINK_WGSL: &str = "
@@ -69,6 +75,7 @@ struct L {
   sa: u32, alpha: f32, nu_p: f32, nu_c: f32,
   cbnx: u32, cbny: u32, cbnz: u32, cbcoord: u32,
   pbnx: u32, pbny: u32, pbnz: u32, pbcoord: u32,
+  pwm: u32, pad0: u32, pad1: u32, pad2: u32,
 };
 @group(0) @binding(0) var<uniform> P: L;
 const CV1_3 = 357.911;
@@ -280,6 +287,8 @@ const PRE: &str = "
 @group(0) @binding(5) var<storage, read> pnut: array<f32>;
 @group(0) @binding(6) var<storage, read> pwall: array<u32>;
 @group(0) @binding(8) var<storage, read> pblk: array<u32>;
+@group(0) @binding(9) var<storage, read> pq: array<f32>;
+@group(0) @binding(10) var<storage, read> putau: array<f32>;
 // Rang d'une maille de la grille parente (boîte, ou couche par blocs).
 fn pcell(x: i32, y: i32, z: i32) -> u32 {
   let q = vec3<u32>(clamp(vec3<i32>(x, y, z), vec3<i32>(0), vec3<i32>(i32(P.pnx), i32(P.pny), i32(P.pnz)) - vec3<i32>(1)));
@@ -292,12 +301,57 @@ fn pcell(x: i32, y: i32, z: i32) -> u32 {
 // population tirée d'un nœud solide (grille fine qui coupe la maquette)
 // est renvoyée par la paroi : population opposée du nœud lui-même (rebond à
 // mi-chemin), au lieu du contenu sans signification du nœud solide.
+fn oct_dec(k: f32) -> vec3<f32> {
+  let iu = floor(k / 2048.0);
+  let iv = k - iu * 2048.0;
+  var u = iu / 2047.0 * 2.0 - 1.0;
+  var v = iv / 2047.0 * 2.0 - 1.0;
+  let z = 1.0 - abs(u) - abs(v);
+  if (z < 0.0) {
+    let a = u;
+    u = (1.0 - abs(v)) * sign(a);
+    v = (1.0 - abs(a)) * sign(v);
+  }
+  return normalize(vec3<f32>(u, v, z));
+}
+
 fn pre_at(x: i32, y: i32, z: i32) -> Mom {
   var f: array<f32, 19>;
   let here = pcell(x, y, z);
+  // Maille pariétale de la grille parente (avec `pwm`) : populations venues
+  // de la paroi comme dans son propre pas (liens de Bouzidi, paroi qui
+  // glisse à la vitesse de la loi de paroi), et viscosité de sa couche
+  // pariétale ; sinon rebond à mi-chemin sur paroi fixe.
+  let wid = pwall[here];
+  let wm = P.pwm == 1u && wid != 0u && wid < 0xfffffffdu;
+  let wk = select(0u, wid - 1u, wm);
+  var uw = vec3<f32>(0.0);
+  var vn = 0.0;
+  if (wm) {
+    uw = vec3<f32>(putau[4u * wk + 1u], putau[4u * wk + 2u], putau[4u * wk + 3u]);
+    vn = putau[arrayLength(&putau) / 6u * 4u + wk];
+  }
   for (var i = 0u; i < 19u; i++) {
     let src = pcell(x - CX[i], y - CY[i], z - CZ[i]);
-    if (pwall[src] == 0xffffffffu) {
+    var q = 0.0;
+    if (wm && i > 0u) { q = pq[wk * 18u + i - 1u]; }
+    if (q > 0.0) {
+      let j = OP[i];
+      let fj = ld_pf(j, here);
+      let qo = pq[wk * 18u + j - 1u];
+      let nf = oct_dec(pq[arrayLength(&pq) / 2u + wk * 18u + i - 1u]);
+      let ci = vec3<f32>(f32(CX[i]), f32(CY[i]), f32(CZ[i]));
+      let uwl = uw - dot(uw, nf) * nf + vn * nf;
+      let corr = 6.0 * W[i] * dot(ci, uwl);
+      if (q < 0.5 && qo == 0.0) {
+        let nb = pcell(x + CX[i], y + CY[i], z + CZ[i]);
+        f[i] = 2.0 * q * fj + (1.0 - 2.0 * q) * ld_pf(j, nb) + corr;
+      } else if (q < 0.5) {
+        f[i] = fj + corr;
+      } else {
+        f[i] = (fj + (2.0 * q - 1.0) * ld_pf(i, here) + corr) / (2.0 * q);
+      }
+    } else if (pwall[src] == 0xffffffffu) {
       f[i] = ld_pf(OP[i], here);
     } else {
       f[i] = ld_pf(i, src);
@@ -310,6 +364,11 @@ fn pre_at(x: i32, y: i32, z: i32) -> Mom {
   if (P.sa == 1u) {
     v = pnut[pcell(x, y, z)];
     vt = nu_turb(v, P.nu_p);
+  }
+  // Couche pariétale de la loi de paroi : viscosité ν_w de la collision.
+  if (wm && P.sa == 1u) {
+    let nuw = putau[arrayLength(&putau) / 6u * 5u + wk];
+    if (nuw >= 0.0) { vt = nuw; }
   }
   if (P.sa == 2u) {
     // k inchangé d'une grille à l'autre (Δt ∝ Δx), ε réseau divisé par 2.
@@ -972,6 +1031,10 @@ impl Link3 {
                 pbny: p.sparse.as_ref().map_or(0, |m| m.bd()[1] as u32),
                 pbnz: p.sparse.as_ref().map_or(0, |m| m.bd()[2] as u32),
                 pbcoord: p.sparse.as_ref().map_or(0, |m| m.table_len() as u32),
+                pwm: (crate::gpu3d::raccord_paroi() && p.sa && !p.keps && p.surf.is_none()) as u32,
+                pad0: 0,
+                pad1: 0,
+                pad2: 0,
             };
             p.queue.write_buffer(buf, 0, bytemuck::bytes_of(&lp));
         }
@@ -1004,6 +1067,8 @@ impl Link3 {
                         (5, &p.nut[cur]),
                         (6, &p.wall),
                         (8, &p.blk_buf),
+                        (9, &p._qbuf),
+                        (10, &p._utau),
                     ],
                 )
             })
