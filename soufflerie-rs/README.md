@@ -1152,6 +1152,32 @@ affichent un avertissement et ne doivent pas servir aux calculs ;
 l'incertitude de placement (±3 % à ×4 sur la portance) est à garder en
 tête, ou à moyenner en calculant plusieurs `--decalage`.
 
+**TR-1208, 8°, ×16 au bord d'attaque.** La flèche faisait de la boîte
+unique de `--ba` une boîte de presque toute l'aile : 34 M mailles à ×16,
+hors de la mémoire du GPU. En tronçons, `--raff 3 --ba 1` tient sur une
+GTX 1070 de 8 Go : grille ×8 de 13,5 M mailles, plus 19 boîtes ×16 de
+6,5 M mailles en tout (`soufflerie geom` estime 4,7 M en huit tronçons
+égaux ; le solveur coupe selon l'étendue en x et z, d'où plus de boîtes).
+Re = 4·10⁶, L = 8, t* = 20, `--avg 8` :
+
+| | `--raff 3` | `--raff 3 --ba 1` |
+|---|---|---|
+| Cz, bilan sur boîtes | 0,559 | 0,430 |
+| Cz, surface | 0,581 | 0,453 |
+| Cx, surface (pression + frottement) | 0,0390 (0,0330 + 0,0060) | 0,0361 (0,0316 + 0,0045) |
+| Cx, bilan sur boîtes | 0,039 | 0,089 |
+| Cx, échange aux parois | 0,031 | −0,060 |
+| Cm (0,25 L) | −1,056 | −0,781 |
+| durée | 15 min | 30 min |
+
+Le défaut de l'aile AR 4 se retrouve : −23 % de portance, et des bilans
+qui ne s'accordent plus (échange aux parois négatif, bilan sur boîtes
+doublé) : là où une boîte coupe l'aile, le couplage perd de la quantité
+de mouvement. La traînée de surface baisse peu (−7 %) et ne dit donc
+rien de l'effet propre du bord d'attaque. La mémoire n'est plus le
+verrou ; le raccord l'est (conservatif, ou boîtes qui ne coupent pas la
+maquette). `--ba` reste un essai.
+
 ### Couche pariétale fine (`--bande D`)
 
 Plutôt que des boîtes, une grille deux fois plus fine sur une couche
