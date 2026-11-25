@@ -3,6 +3,8 @@
 //!
 //! plaque3d <L> <raff> <Re_L> <t> [essai] [demi-précision 1/0] [ny] [cale] [csv ou -] [nez]
 //!
+//! `SOUFFLERIE_U` : vitesse d'entrée du réseau (0,1 par défaut).
+//!
 //! Plaque épaisse (épaisseur L/16) à bords d'attaque et de fuite
 //! demi-elliptiques 4:1, alignée sur l'écoulement, d'envergure périodique (elle
 //! traverse les bords y de la veine, sans bandes absorbantes latérales) :
@@ -119,7 +121,7 @@ fn main() {
     // Paroi volumique par surfels (SOUFFLERIE_SURFELS=1) au lieu du rebond de Bouzidi.
     body.surfels = std::env::var("SOUFFLERIE_SURFELS").is_ok_and(|v| v == "1");
 
-    let u = 0.1f32;
+    let u: f32 = std::env::var("SOUFFLERIE_U").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
     let nu = u as f64 * lf / re;
     let spt = lf / u as f64;
     let ramp = lbm::cpu::Ramp { steps: (2.0 * spt) as u64, u };

@@ -3462,13 +3462,63 @@ D3Q19 ; les grilles grossières l'étalent, les couches fines le résolvent.
 | 17°, couche ×16 (`--raff-paroi 1`) | diverge | 1,478 | 1,61–1,63 |
 
 La portance baisse de 2 à 8 %, bien plus que l'effet physique du Mach
-(Prandtl–Glauert : ≈ 1 % entre 0,17 et 0,09) : c'est l'erreur de
-compressibilité du réseau (en u², défaut cubique du D3Q19), forte au pic
-d'aspiration. À U = 0,05 l'aile s'approche de Ladson à 4° comme à 16°,
-au prix de deux fois plus de pas. Toujours pas de décollement relevé à
+(Prandtl–Glauert : ≈ 1 % entre 0,17 et 0,09). À U = 0,05 l'aile
+s'approche de Ladson à 4° comme à 16°, au prix de deux fois plus de pas ;
+mais l'écart n'est pas la compressibilité (paragraphe suivant). Toujours pas de décollement relevé à
 17° ; le Cx du bilan à 4° dépend alors de la marge (0,018 à 0,022 : 12
 cordes ne suffisent plus à amortir les ondes, deux fois plus nombreuses
 par temps convectif).
+
+**L'écart n'est pas la compressibilité : erreur d'ordre 3 en 1/U.**
+Diagnostic par élimination, aile à 16°, grille uniforme de 32 mailles par
+corde (`aile_infinie 32 0 6e6 16 12 - 8 12 [essai]`, Cz du bilan) :
+
+| variante | U = 0,1 | 0,05 | 0,025 |
+| --- | --- | --- | --- |
+| défaut (SA, loi de paroi) | 1,656 | 1,528 | 1,467 |
+| k-ε RNG | 1,664 | 1,531 | |
+| ν_t hors collision (essai 1) | 1,692 | 1,524 | |
+| Smagorinsky ÷ 4 (128), et sans ν_t (129) | 1,662 / 1,685 | 1,546 / 1,552 | |
+| paroi glissante (16) | diverge | 1,614 | 1,581 |
+| bandes absorbantes à force constante en temps physique | 1,658 | 1,524 | |
+| correction du défaut cubique (`MACH3_BIT`, 128 mailles) | 1,724 (1,692 sans) | | |
+| grille uniforme de 64 mailles | 1,789 | 1,690 | |
+| laminaire, Re = 1000, 8° | 0,229 | 0,224 | 0,222 |
+
+L'écart est linéaire en U et non en Ma² (−0,128 puis −0,061 en divisant
+U par deux), il ne vient ni des raccords, ni du modèle de turbulence, ni
+de la sous-maille, ni des bandes absorbantes, ni du défaut cubique, et il
+est faible en laminaire résolu. La plaque plane (`plaque3d 64`,
+`SOUFFLERIE_U`, θ à x/L = 0,6 en mailles, théorie 0,097) l'isole :
+
+| U | 0,025 | 0,05 | 0,1 | 0,15 | 0,2 |
+| --- | --- | --- | --- | --- | --- |
+| θ | 0,319 | 0,253 | 0,207 | 0,175 | 0,197 (U_e/U = 0,90) |
+
+θ ≈ θ₀ + c/U : l'erreur **croît** quand la vitesse du réseau baisse. Ni la
+demi-précision (même θ en simple précision), ni le glissement relaxé
+(essai 8), ni la couche de la loi de paroi n'y sont pour rien ; sans le
+ν_t de Spalart–Allmaras hors premier nœud (essai 1), θ ne dépend plus de U
+(0,177 / 0,176), alors que ν̃/ν est le même aux deux vitesses à quelques
+pour cent près (transport cohérent). Interprétation : le flux de quantité
+de mouvement d'un lien vaut ((τ − ½)/3) ∂u plus un terme discret fixe en
+unités du réseau, ⅙ (moyenne des gradients des nœuds − différence entre
+nœuds), nul en cisaillement uniforme mais pas dans le profil logarithmique
+sous-résolu des premiers nœuds (y = 1,3 et 2,3 mailles : 0,013 u_τ, contre
+u_τ² pour le flux physique, soit 3 fois ce flux à U = 0,1 et 6 fois à
+0,05). C'est l'erreur d'ordre 3 du schéma (facteur τ² − τ + ⅙ du BGK, −1/12
+à τ = ½) : avec τ − ½ = 3 ν_t ∝ U, elle pèse en 1/U. Conséquence : U = 0,05
+n'est pas plus juste ; l'accord avec Ladson à 0,05 (16° : 1,551) vient
+d'une couche limite épaissie qui compense autre chose. La vitesse du
+réseau reste 0,1.
+
+Essai de correction écarté : moments impairs d'ordre 3 relaxés à paramètre
+magique fixe (TRT, τ⁻ = ½ + Λ/(τ⁺ − ½), partie hors équilibre mesurée au
+lieu de la régularisation récursive ; sur D3Q19 les paires xxy/yzz, xyy/xzz,
+xxz/yyz ne sont pas orthogonales, coefficients (4 m₁ + 2 m₂)/3). Juste à
+τ = 0,8 (onde de cisaillement : viscosité à 0,1 % près), mais à τ⁺ → ½ les
+moments impairs ne sont presque plus amortis : plaque instable ou bruitée
+pour Λ = 1/4, 1/12, 0,02 et 0,005 à toutes les vitesses.
 
 **Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
 niveau de plus que demandait le critère β (« Raffinement de paroi par
@@ -3476,8 +3526,7 @@ zones ») : 128 mailles par corde de base, couches ×16 et ×32 sur une
 demi-corde d'envergure, 53 M mailles (33,8 M pour le ×32), 1 260 M mises à
 jour par pas de la veine. Le calcul diverge (54 min), comme le ×16 à 17° :
 les couches très fines à forte incidence ne sont pas stables à U = 0,1
-(Mach du réseau au pic d'aspiration, voir ci-dessus) ; à refaire à
-U = 0,05. Même divergence à deux
+(Mach du réseau au pic d'aspiration, voir ci-dessus). Même divergence à deux
 jeux attendue : la propagation en place donne le même résultat sur ce
 raccord qui coupe la paroi (64 mailles, couche ×16, 4° : Cz 0,4097 /
 0,4108).
