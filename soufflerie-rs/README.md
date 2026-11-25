@@ -3769,8 +3769,8 @@ la GTX 1070 (exemple `bande_passante` : copie de 256 Mo par un shader) :
 | collision pariétale, couche ×16 | 0,61 M | 1,96 | ≈ 250 (fractions et normales 144) | 78 Go/s | 39 % |
 | raccords (4), toutes passes | 2,2 M fantômes | 10,4 | — | 190 à 770 M/s | faible |
 
-Sur `ar4c3` (30,2 ms par pas, somme des passes), les collisions et le
-transport de ν̃ (≈ 60 % du temps) sont à la bande passante : ni CUDA ni
+Sur `ar4c3` (30,2 ms pour un lancement de chaque passe), les collisions et le
+transport de ν̃ (≈ 60 % de cette somme) sont à la bande passante : ni CUDA ni
 un autre langage n'y gagneraient, seule une baisse des octets le peut
 (vitesses en demi-précision : −8 octets, ≈ −8 %). Les raccords (≈ 34 %)
 et la collision pariétale (≈ 9 %) sont loin de la limite : c'est là
