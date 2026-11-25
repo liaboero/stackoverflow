@@ -227,6 +227,10 @@ pub struct Frame {
     pub adapter: String,
     /// Durée de la mise en place (s).
     pub setup_s: f64,
+    /// Mise en place en cours : étape, fraction faite, début.
+    pub setup_stage: String,
+    pub setup_frac: f64,
+    pub setup_t0: Option<Instant>,
     /// Durée de calcul depuis t* = 0 (s).
     pub run_wall: f64,
 }
@@ -274,6 +278,22 @@ fn rgbf(c: eframe::egui::Color32) -> [f32; 3] {
 
 /// Fil de calcul.
 pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
+    let rp_arc = Arc::new(repaint);
+    let repaint = {
+        let r = rp_arc.clone();
+        move || (*r)()
+    };
+    // Étapes de la mise en place, publiées au fil de l'eau.
+    {
+        let (sh, rp) = (shared.clone(), rp_arc.clone());
+        lbm::progress::set_sink(move |p| {
+            if let Ok(mut s) = sh.lock() {
+                s.frame.setup_stage = p.stage.clone();
+                s.frame.setup_frac = p.frac;
+            }
+            (*rp)();
+        });
+    }
     let mut sim: Option<Gpu3D> = None;
     let mut built: Option<Settings> = None;
     let mut body: Option<Body3D> = None;
@@ -333,6 +353,9 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 let fr = &mut s.frame;
                 fr.status = "Préparation".into();
                 fr.building = true;
+                fr.setup_stage = "préparation de la maquette".into();
+                fr.setup_frac = 0.0;
+                fr.setup_t0 = Some(Instant::now());
                 fr.advancing = false;
                 fr.finished = false;
                 fr.error = None;
@@ -375,6 +398,7 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 }
                 let n = match st.bands {
                     4 => {
+                        lbm::progress::prelude("couches automatiques : rayon du bord d'attaque", 0.8);
                         let (n, r, corner) = lbm::gpu3d::auto_band_count(b, st.refine);
                         *note = Some(format!(
                             "Couches automatiques : rayon de bord d'attaque minimal {:.2} mailles de la veine → {n} couche(s){}",

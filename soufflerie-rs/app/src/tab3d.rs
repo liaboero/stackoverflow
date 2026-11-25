@@ -49,6 +49,10 @@ const PREVIEW_L: usize = 32;
 /// Mises à jour de maille par seconde supposées tant qu'aucun calcul n'a
 /// été mesuré dans l'interface (GTX 1070, image comprise).
 const MLUPS_GUESS: [f64; 2] = [500.0, 300.0];
+/// Mise en place type d'une GTX 1070 : 0,3 s plus 0,4 s par million de
+/// mailles (banc `banc3d` : sphère 1,8 M → 0,75 s, `ar4b` 4,3 M → 2,2 s,
+/// `ar4c3` 24 M → 9,2 s), avant toute mesure.
+const SETUP_GUESS: (f64, f64) = (0.3, 0.4);
 
 /// Au-delà (mailles), les réglages ne s'appliquent pas d'eux-mêmes : la
 /// mise en place prend du temps et de la mémoire du GPU.
@@ -139,6 +143,8 @@ struct Estimate {
     per_step: f64,
     mem_mb: f64,
     seconds: f64,
+    /// Mise en place (s).
+    setup: f64,
     bands: usize,
 }
 
@@ -173,6 +179,8 @@ pub struct Tab3D {
     view_rect: Rect,
     /// Débit mesuré (M mises à jour par seconde) du dernier calcul.
     measured_mlups: Option<(bool, f64)>,
+    /// Mise en place mesurée : secondes par million de mailles.
+    measured_setup: Option<f64>,
     /// Autoriser un calcul au-delà des garde-fous.
     force: bool,
     /// Réglages affichés au-delà des garde-fous.
@@ -242,6 +250,7 @@ impl Tab3D {
             cam_target: CAM_DEFAULT,
             view_rect: Rect::NOTHING,
             measured_mlups: None,
+            measured_setup: None,
             force: false,
             guarded: false,
             heavy: false,
@@ -539,6 +548,10 @@ impl Tab3D {
         Estimate {
             mem_mb: total * bytes_per_cell(s.fp16) as f64 / 1e6,
             seconds: if s.t_end > 0.0 { steps * per_step / (self.mlups(s.fp16) * 1e6) } else { f64::NAN },
+            setup: match self.measured_setup {
+                Some(r) => r * total / 1e6,
+                None => SETUP_GUESS.0 + SETUP_GUESS.1 * total / 1e6,
+            },
             grids,
             total,
             per_step,
@@ -729,6 +742,10 @@ impl Tab3D {
             if s.frame.advancing && s.frame.mlups > 0.0 {
                 self.measured_mlups = Some((s.frame.fp16, s.frame.mlups));
             }
+            let cells: usize = s.frame.grids.iter().map(|g| g.0).sum();
+            if !s.frame.building && s.frame.setup_s > 0.0 && cells > 0 {
+                self.measured_setup = Some(s.frame.setup_s / (cells as f64 / 1e6));
+            }
         }
         if let Some((_, t)) = &*self.message.lock().unwrap() {
             if t.elapsed() < Duration::from_secs(6) {
@@ -774,9 +791,10 @@ impl Tab3D {
                     s.t_end = p.t_end;
                     let e = self.estimate(&s, pi);
                     tip += &format!(
-                        "\n\nIci : ≈ {} mailles, {} de mémoire GPU, ≈ {}",
+                        "\n\nIci : ≈ {} mailles, {} de mémoire GPU, mise en place ≈ {}, calcul ≈ {}",
                         cells(e.total),
                         mem(e.mem_mb),
+                        crate::gui::duration(e.setup),
                         crate::gui::duration(e.seconds)
                     );
                 }
@@ -785,7 +803,7 @@ impl Tab3D {
                 }
             }
             ui.separator();
-            let (status, advancing, finished, building, t_star, t_rate, error) = {
+            let (status, advancing, finished, building, t_star, t_rate, error, setup) = {
                 let s = self.shared.lock().unwrap();
                 let f = &s.frame;
                 (
@@ -796,6 +814,7 @@ impl Tab3D {
                     f.t_star,
                     f.t_rate,
                     f.error.is_some(),
+                    (f.setup_stage.clone(), f.setup_frac, f.setup_t0.map_or(0.0, |t| t.elapsed().as_secs_f64())),
                 )
             };
             let dirty = self.dirty();
@@ -852,8 +871,24 @@ impl Tab3D {
                 }
                 let w = ui.available_width().max(120.0);
                 if building {
-                    ui.add(egui::Spinner::new());
-                    ui.label("mise en place de la veine…");
+                    // Mise en place : étape, durée écoulée et reste (au prorata
+                    // de la part faite, une fois l'allure connue).
+                    let (stage, frac, el) = setup;
+                    let left = if frac > 0.15 && el > 1.0 {
+                        format!(" · reste ≈ {}", crate::gui::duration(el * (1.0 - frac) / frac))
+                    } else {
+                        String::new()
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac as f32)
+                            .desired_width(w)
+                            .text(format!("Mise en place · {stage} · {}{left}", crate::gui::duration(el)))
+                            .animate(true),
+                    )
+                    .on_hover_text(
+                        "Voxelisation de la maquette, puis pour chaque grille (veine, boîtes, couches) : types de maille et distances à la paroi, liens, tampons du GPU, compilation des calculs, raccord à la grille parente",
+                    );
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                 } else {
                     let frac = if t_end > 0.0 { (t_star / t_end).clamp(0.0, 1.0) as f32 } else { 0.0 };
                     let left = if t_end > 0.0 && t_rate > 0.0 && advancing {
@@ -1124,13 +1159,24 @@ impl Tab3D {
                     ui.label("Mémoire GPU");
                     ui.label(RichText::new(mem(e.mem_mb)).strong());
                     ui.end_row();
-                    ui.label("Durée");
+                    ui.label("Mise en place");
+                    ui.label(RichText::new(format!("≈ {}", crate::gui::duration(e.setup))).strong()).on_hover_text(format!(
+                        "Voxelisation, grilles, liens de paroi, compilation ; {}",
+                        if self.measured_setup.is_some() {
+                            "au prorata des mailles de la dernière mise en place mesurée"
+                        } else {
+                            "valeur type d'une GTX 1070 (0,3 s + 0,4 s par million de mailles)"
+                        }
+                    ));
+                    ui.end_row();
+                    ui.label("Calcul");
                     ui.label(RichText::new(format!("≈ {}", crate::gui::duration(e.seconds))).strong())
                         .on_hover_text(format!(
-                            "{} mises à jour de maille par pas de la veine, {:.0} M par seconde ({}) ; sans la mise en place",
+                            "{} mises à jour de maille par pas de la veine, {:.0} M par seconde ({}) ; jusqu'à t* = {:.0}",
                             cells(e.per_step),
                             self.mlups(s.fp16),
-                            if self.measured_mlups.is_some_and(|m| m.0 == s.fp16) { "mesuré au dernier calcul" } else { "valeur type d'une GTX 1070" }
+                            if self.measured_mlups.is_some_and(|m| m.0 == s.fp16) { "mesuré au dernier calcul" } else { "valeur type d'une GTX 1070" },
+                            s.t_end
                         ));
                     ui.end_row();
                 });

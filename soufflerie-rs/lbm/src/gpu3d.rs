@@ -115,6 +115,23 @@ pub(crate) fn temps(label: &str, t0: std::time::Instant) {
     if std::env::var("SOUFFLERIE_TEMPS").is_ok() {
         eprintln!("  [mise en place] {label} : {:.3} s", t0.elapsed().as_secs_f64());
     }
+    // Étape suivante et part de la grille faite (au jugé, d'après les durées
+    // relevées avec SOUFFLERIE_TEMPS).
+    let next = match label {
+        "couche : blocs" => Some(("couche : types et distances", 0.15)),
+        "couche : types et distances" => Some(("couche : sillage et liens", 0.3)),
+        "couche : sillage" => Some(("couche : liens", 0.35)),
+        "couche : liens" => Some(("couche : fantômes", 0.45)),
+        "mailles" => Some(("tampons du GPU", 0.5)),
+        "tampons" => Some(("compilation des calculs", 0.6)),
+        "pipelines calcul" => Some(("compilation de l'affichage", 0.85)),
+        "pipelines affichage" => Some(("état initial", 0.9)),
+        "fin" => Some(("raccord à la grille parente", 0.95)),
+        _ => None,
+    };
+    if let Some((l, f)) = next {
+        crate::progress::stage(l, f);
+    }
 }
 
 /// Module de calcul sans les contrôles que wgpu ajoute par défaut au code
@@ -4244,7 +4261,10 @@ impl Gpu3D {
     pub fn with_plan(body: &Body3D, nu: f64, u_in: f32, fp16: bool, sa: impl Into<Turbulence>, plan: &RefinePlan) -> Result<Gpu3D, String> {
         let sa: Turbulence = sa.into();
         let (le, te) = (plan.le, plan.te);
+        crate::progress::prelude("ouverture du GPU", 1.0);
         let (device, queue, name) = Self::open_device()?;
+        let n_grids = 1 + plan.boxes.len() + if plan.layers.is_empty() { usize::from(le || te) } else { plan.layers.len() };
+        crate::progress::grid(0, n_grids);
         let mut top = Self::build(device.clone(), queue.clone(), name.clone(), body, nu, u_in, fp16, sa, false, &LayerSpec::default())?;
         let depth = plan.boxes.len();
         if depth == 0 {
@@ -4282,6 +4302,7 @@ impl Gpu3D {
             let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
             let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
             let nu_k = nu * (1u64 << k) as f64;
+            crate::progress::grid(k, n_grids);
             let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &LayerSpec::default())?;
             child.les = top.les;
             {
@@ -4337,6 +4358,7 @@ impl Gpu3D {
                     }),
                     ..spec.clone()
                 };
+                crate::progress::grid(k, n_grids);
                 let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &spec_k)?;
                 child.les = top.les;
                 // Mémoire du GPU : environ 100 octets par maille en demi-précision
@@ -4382,7 +4404,9 @@ impl Gpu3D {
                     n_tot as f64 / 1e6
                 ));
             }
-            for (lo, hi, cr) in boxes {
+            let n_edge = 1 + depth + boxes.len();
+            for (i, (lo, hi, cr)) in boxes.into_iter().enumerate() {
+                crate::progress::grid(depth + 1 + i, n_edge);
                 let dims = [0, 1, 2].map(|a| 2 * (hi[a] - lo[a]) + 1);
                 let cb = parent_body.refined([lo[0] as f64, lo[1] as f64, lo[2] as f64], dims);
                 let nu_k = nu * (1u64 << k) as f64;

@@ -36,6 +36,7 @@ pub mod raff_auto;
 #[cfg(feature = "gpu")]
 pub mod raff_paroi;
 pub mod panel;
+pub mod progress;
 #[cfg(feature = "gpu")]
 pub mod refine;
 pub mod sa;

@@ -2545,6 +2545,21 @@ seconde avant toute mesure). Au-delà de 40 M mailles en demi-précision
 (20 M en simple), limite du calcul, ou de 6,5 Go, le lancement demande
 « Lancer quand même ». Quand la veine fait l'essentiel des mailles d'une
 maquette allongée, l'estimation conseille de réduire la marge de la veine.
+La durée de mise en place est estimée à part : 0,3 s plus 0,4 s par
+million de mailles sur la GTX 1070 (`banc3d` : sphère 1,8 M → 0,75 s,
+`ar4c3` 24 M → 9,2 s), puis au prorata des mailles de la dernière mise en
+place mesurée.
+
+**Progression.** Pendant la mise en place, la barre d'état montre l'étape
+en cours (préparation de la maquette, ouverture du GPU, puis pour chaque
+grille : voxelisation et liens, couche, tampons du GPU, compilation des
+calculs, état initial, raccord à la grille parente), la durée écoulée et
+le reste estimé au prorata de la part faite (grilles de poids égaux : un
+ordre de grandeur, la couche la plus fine coûtant souvent plus). Les étapes
+viennent de `lbm::progress`, que `Gpu3D::with_plan` alimente aux mêmes
+points que les durées de `SOUFFLERIE_TEMPS`. Pendant le calcul, la barre
+montre t* atteint sur t* demandé, le reste estimé et la vitesse en t* par
+seconde ; à la fin, le résumé donne la durée de mise en place et de calcul.
 
 **Vitesse.** Pendant le calcul, l'image n'est refaite qu'environ 8 fois par
 seconde (tout de suite si la vue change) et les lots de pas visent 40 à
@@ -4219,3 +4234,11 @@ inchangée). Mesuré GPU seul : 84 s pour 12 cordes sans le bit, 24 s pour
 4 cordes avec (28 s attendues au prorata) ; pas d'écart mesurable. Les
 autres mesures ont été faussées par des calculs d'autres sessions sur le
 même GPU (×1,5 à ×2,7 dans un sens comme dans l'autre).
+
+### Progression de la mise en place (`lbm::progress`)
+
+Aucun effet sur le calcul : seule la mise en place signale ses étapes,
+une vingtaine d'appels par grille (lecture d'une variable locale au fil,
+puis, dans l'interface, un verrou et une demande de rafraîchissement).
+Sans récepteur installé (ligne de commande, bancs), l'appel ne fait rien.
+Mémoire : aucune.
