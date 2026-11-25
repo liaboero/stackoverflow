@@ -2562,8 +2562,13 @@ place mesurée.
 en cours (préparation de la maquette, ouverture du GPU, puis pour chaque
 grille : voxelisation et liens, couche, tampons du GPU, compilation des
 calculs, état initial, raccord à la grille parente), la durée écoulée et
-le reste estimé au prorata de la part faite (grilles de poids égaux : un
-ordre de grandeur, la couche la plus fine coûtant souvent plus). Les étapes
+le reste estimé au prorata de la part faite, chaque grille pesant sa
+durée estimée (0,3 s + 0,4 s par million de mailles, comme « Coût
+estimé ») : la couche la plus fine fait souvent l'essentiel. L'étape est
+aussi écrite au centre de la vue. Vérifié par capture (aile AR 4,
+préréglage Validation, 35,6 M mailles) : grille 2/5 à 3 s, 3/5 à 8 s, 4/5
+à 12 s ; le reste estimé ne se stabilise qu'une fois la plus grosse grille
+commencée. Les étapes
 viennent de `lbm::progress`, que `Gpu3D::with_plan` alimente aux mêmes
 points que les durées de `SOUFFLERIE_TEMPS`. Pendant le calcul, la barre
 montre t* atteint sur t* demandé, le reste estimé et la vitesse en t* par
@@ -4085,13 +4090,7 @@ soufflerie-rs/
 Travaux repérés et non faits : [EVOLUTIONS.md](EVOLUTIONS.md) (cylindre 3D à
 Re = 3900, suites aéroacoustiques).
 
-- Soufflerie 3D : rendu directement dans la fenêtre (texture partagée avec
-  egui) plutôt que par relecture de l'image, pour les grandes fenêtres.
-- Stockage en demi-précision et propagation en place sur GPU (deux à quatre
-  fois moins de mémoire), raffinement local de maillage.
-- Version mobile : egui fonctionne sur Android ; il faudrait l'empaqueter
-  (cargo-apk / xbuild). Sur téléphone, l'application web reste la plus
-  simple à installer.
+Liste de travail à jour, avec l'état de chaque point : [TRAVAUX.md](TRAVAUX.md).
 
 ## Coût de calcul des modifications
 

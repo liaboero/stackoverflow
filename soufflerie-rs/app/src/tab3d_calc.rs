@@ -230,6 +230,7 @@ pub struct Frame {
     /// Mise en place en cours : étape, fraction faite, début.
     pub setup_stage: String,
     pub setup_frac: f64,
+    pub setup_grid: Option<(usize, usize, f64)>,
     pub setup_t0: Option<Instant>,
     /// Durée de calcul depuis t* = 0 (s).
     pub run_wall: f64,
@@ -290,6 +291,7 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             if let Ok(mut s) = sh.lock() {
                 s.frame.setup_stage = p.stage.clone();
                 s.frame.setup_frac = p.frac;
+                s.frame.setup_grid = p.grid;
             }
             (*rp)();
         });
@@ -355,6 +357,7 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 fr.building = true;
                 fr.setup_stage = "préparation de la maquette".into();
                 fr.setup_frac = 0.0;
+                fr.setup_grid = None;
                 fr.setup_t0 = Some(Instant::now());
                 fr.advancing = false;
                 fr.finished = false;

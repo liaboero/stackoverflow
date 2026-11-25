@@ -11,6 +11,9 @@ pub struct Progress {
     pub stage: String,
     /// Fraction faite, entre 0 et 1 (au jugé : grilles de poids égaux).
     pub frac: f64,
+    /// Grille en construction : (indice, nombre, part faite), pour qui
+    /// connaît le poids de chaque grille.
+    pub grid: Option<(usize, usize, f64)>,
 }
 
 type Sink = Box<dyn Fn(&Progress)>;
@@ -32,10 +35,10 @@ pub fn clear_sink() {
     SINK.with(|s| *s.borrow_mut() = None);
 }
 
-fn send(stage: String, frac: f64) {
+fn send(stage: String, frac: f64, grid: Option<(usize, usize, f64)>) {
     SINK.with(|s| {
         if let Some(f) = s.borrow().as_ref() {
-            f(&Progress { stage, frac: frac.clamp(0.0, 1.0) });
+            f(&Progress { stage, frac: frac.clamp(0.0, 1.0), grid });
         }
     });
 }
@@ -45,7 +48,7 @@ const PRE: f64 = 0.1;
 
 /// Étape hors des grilles (maquette) : fraction de la part préparatoire.
 pub fn prelude(stage: &str, f: f64) {
-    send(stage.to_string(), PRE * f);
+    send(stage.to_string(), PRE * f, None);
 }
 
 /// Début de la grille `k` (0 = veine) sur `n`.
@@ -58,9 +61,9 @@ pub fn grid(k: usize, n: usize) {
 pub fn stage(label: &str, f: f64) {
     let (k, n) = GRID.with(|g| g.get());
     if n == 0 {
-        send(label.to_string(), PRE);
+        send(label.to_string(), PRE, None);
         return;
     }
     let name = if k == 0 { "veine".to_string() } else { format!("grille {}/{}", k + 1, n) };
-    send(format!("{name} : {label}"), PRE + (1.0 - PRE) * (k as f64 + f) / n as f64);
+    send(format!("{name} : {label}"), PRE + (1.0 - PRE) * (k as f64 + f) / n as f64, Some((k, n, f)));
 }

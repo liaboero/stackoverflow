@@ -814,7 +814,7 @@ impl Tab3D {
                     f.t_star,
                     f.t_rate,
                     f.error.is_some(),
-                    (f.setup_stage.clone(), f.setup_frac, f.setup_t0.map_or(0.0, |t| t.elapsed().as_secs_f64())),
+                    (f.setup_stage.clone(), f.setup_frac, f.setup_t0.map_or(0.0, |t| t.elapsed().as_secs_f64()), f.setup_grid),
                 )
             };
             let dirty = self.dirty();
@@ -873,7 +873,19 @@ impl Tab3D {
                 if building {
                     // Mise en place : étape, durée écoulée et reste (au prorata
                     // de la part faite, une fois l'allure connue).
-                    let (stage, frac, el) = setup;
+                    let (stage, mut frac, el, grid) = setup;
+                    // Grilles pondérées par leur durée estimée (0,3 s + 0,4 s
+                    // par million de mailles, comme « Coût estimé ») : la
+                    // couche la plus fine fait souvent l'essentiel.
+                    if let (Some((k, n, f)), Some(p)) = (grid, self.preview.as_ref().and_then(|(_, r)| r.as_ref().ok())) {
+                        let e = self.estimate(&self.applied, p);
+                        if e.grids.len() == n {
+                            let w: Vec<f64> = e.grids.iter().map(|g| SETUP_GUESS.0 + SETUP_GUESS.1 * g.0 / 1e6).collect();
+                            let tot: f64 = w.iter().sum();
+                            let done: f64 = w[..k].iter().sum::<f64>() + f * w[k];
+                            frac = 0.1 + 0.9 * done / tot;
+                        }
+                    }
                     let left = if frac > 0.15 && el > 1.0 {
                         format!(" · reste ≈ {}", crate::gui::duration(el * (1.0 - frac) / frac))
                     } else {
@@ -1851,7 +1863,14 @@ impl Tab3D {
             (f.image.clone(), f.slice_id, f.camera, f.dims, f.l, f.plane_pos, f.center, f.status.clone(), f.t_star)
         };
         let Some(img) = image else {
-            waiting(&painter, rect, "Préparation du calcul 3D…");
+            let stage = {
+                let s = self.shared.lock().unwrap();
+                s.frame.building.then(|| s.frame.setup_stage.clone())
+            };
+            match stage {
+                Some(st) if !st.is_empty() => waiting(&painter, rect, &format!("Mise en place : {st}…")),
+                _ => waiting(&painter, rect, "Préparation du calcul 3D…"),
+            }
             return;
         };
         let (w, h, px) = (&img.0, &img.1, &img.2);
