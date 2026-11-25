@@ -3442,13 +3442,42 @@ attachée, et le frottement en aval du recollement reste 2 à 3 fois trop
 fort (la loi seule en donnerait 10 fois moins : l'écart tient maintenant
 au nœud pariétal, voir « Pourquoi la soufflerie ne décolle pas »).
 
+*k-ε* : même couche (k = u_τ²/√C_μ, ε = u_τ³/(κ y) sous h). Marche
+n = 16 : recollement au premier nœud 4,17 → **6,19 h** (mesure 6,26),
+frottement à 10 h / 20 h 0,0095 / 0,0104 → 0,0046 / 0,0072 ; plaque plane
+inchangée (0,00415 → 0,00420).
+
+**Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
+à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
+implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
+U = 0,1 (Mach 0,17 à l'entrée), le pic d'aspiration du bord d'attaque
+(Cp ≈ −10, |u| ≈ 3,3 U) atteint Mach 0,57, au-delà de la stabilité du
+D3Q19 ; les grilles grossières l'étalent, les couches fines le résolvent.
+`aile_infinie` prend `AILE_U` (vitesse d'entrée du réseau, 0,1 par défaut) :
+
+| Aile infinie, 128 mailles | U = 0,1 | U = 0,05 | Ladson |
+| --- | --- | --- | --- |
+| 4° Cz (bilan) | 0,459 | **0,449** | 0,43–0,44 |
+| 16° Cz | 1,692 | **1,551** | 1,57–1,58 |
+| 17°, couche ×16 (`--raff-paroi 1`) | diverge | 1,478 | 1,61–1,63 |
+
+La portance baisse de 2 à 8 %, bien plus que l'effet physique du Mach
+(Prandtl–Glauert : ≈ 1 % entre 0,17 et 0,09) : c'est l'erreur de
+compressibilité du réseau (en u², défaut cubique du D3Q19), forte au pic
+d'aspiration. À U = 0,05 l'aile s'approche de Ladson à 4° comme à 16°,
+au prix de deux fois plus de pas. Toujours pas de décollement relevé à
+17° ; le Cx du bilan à 4° dépend alors de la marge (0,018 à 0,022 : 12
+cordes ne suffisent plus à amortir les ondes, deux fois plus nombreuses
+par temps convectif).
+
 **Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
 niveau de plus que demandait le critère β (« Raffinement de paroi par
 zones ») : 128 mailles par corde de base, couches ×16 et ×32 sur une
 demi-corde d'envergure, 53 M mailles (33,8 M pour le ×32), 1 260 M mises à
 jour par pas de la veine. Le calcul diverge (54 min), comme le ×16 à 17° :
-les couches très fines à forte incidence ne sont pas stables ; à
-instruire avant tout nouvel essai de résolution. Même divergence à deux
+les couches très fines à forte incidence ne sont pas stables à U = 0,1
+(Mach du réseau au pic d'aspiration, voir ci-dessus) ; à refaire à
+U = 0,05. Même divergence à deux
 jeux attendue : la propagation en place donne le même résultat sur ce
 raccord qui coupe la paroi (64 mailles, couche ×16, 4° : Cz 0,4097 /
 0,4108).

@@ -643,6 +643,25 @@ fn lam_xl(x: i32, y: i32) -> vec2<f32> {
 
 const KAPPA = 0.41;
 const WM_H = 2.0;
+const COUCHE_LOI = false;
+fn spalding_ut(ut: f32, y: f32) -> f32 {
+  if (!(ut > 1e-12)) { return 0.0; }
+  let e_kb = 0.12873490;
+  let rey = y * ut / P.nu;
+  var up = sqrt(rey);
+  if (rey >= 30.0) { up = log(rey) / KAPPA; }
+  for (var k = 0; k < 20; k++) {
+    let ku = KAPPA * up;
+    let e = exp(ku);
+    let yy = up + e_kb * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+    let dy = 1.0 + e_kb * KAPPA * (e - 1.0 - ku - ku * ku / 2.0);
+    let h = up * yy - rey;
+    let next = up - h / (yy + up * dy);
+    up = select(0.5 * up, next, next > 0.0);
+    if (abs(h) < 1e-6 * rey) { break; }
+  }
+  return ut / up;
+}
 // Yakhot et al. (1992) : σ_k = σ_ε = 1/1,393, C_ε1, C_ε2, η₀, β.
 const SIGK = 0.7194;
 const SIGE = 0.7194;
@@ -775,6 +794,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // Destruction implicite pour C_ε2* > 0, explicite (source) sinon.
     let en = (v.y + CE1 * tinv * prod + se + max(-ce2s, 0.0) * ee * tinv + diff.y - adv.y) / (1.0 + max(ce2s, 0.0) * tinv);
     out = max(vec2<f32>(kn, en), 1e-4 * vec2<f32>(kin, ein));
+    // Couche de la loi de paroi (comme `SA3_WGSL`) : sous h, équilibre de la
+    // zone logarithmique à la distance du nœud, k = u_τ²/√C_μ, ε = u_τ³/(κ y).
+    if (COUCHE_LOI && dist[idx] < WM_H) {
+      let gn = vec3<f32>(dist[ixp] - dist[ixm], dist[iyp] - dist[iym], dist[izp] - dist[izm]);
+      let ln = length(gn);
+      if (ln > 1e-6) {
+        let n = gn / ln;
+        let dd = max(dist[idx], 0.5);
+        let ut = spalding_ut(length(u - dot(u, n) * n), dd);
+        out = max(vec2<f32>(ut * ut / sqrt(CMU), ut * ut * ut / (KAPPA * dd)), 1e-4 * vec2<f32>(kin, ein));
+        vt_out = -1.0;
+      }
+    }
   }
   keOut[2u * idx] = out.x;
   keOut[2u * idx + 1u] = out.y;
@@ -5387,6 +5419,7 @@ impl Gpu3D {
         let sa_pipe = if keps {
             let ke = KE3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("KE_FNS", KE_FNS);
             let ke = if vles { ke.replace("const VLES = false;", "const VLES = true;") } else { ke };
+            let ke = if couche_loi() { ke.replace("const COUCHE_LOI = false;", "const COUCHE_LOI = true;") } else { ke };
             pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(ke, bricks)), true)
         } else {
             let sa = SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS);

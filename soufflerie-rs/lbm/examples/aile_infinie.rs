@@ -117,7 +117,9 @@ fn main() {
     // Paroi volumique par surfels (SOUFFLERIE_SURFELS=1) au lieu du rebond de Bouzidi.
     body.surfels = std::env::var("SOUFFLERIE_SURFELS").is_ok_and(|v| v == "1");
 
-    let u = 0.1f32;
+    // Vitesse d'entrée en unités du réseau (`AILE_U`, défaut 0,1) : plus faible,
+    // Mach du réseau plus bas au pic d'aspiration, au prix de plus de pas.
+    let u: f32 = std::env::var("AILE_U").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
     let nu = u as f64 * lf / re;
     let spt = lf / u as f64;
     let ramp = lbm::cpu::Ramp { steps: (2.0 * spt * std::env::var("AILE_RAMPE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)) as u64, u };
