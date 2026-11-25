@@ -1272,8 +1272,9 @@ une surface fermée). `--bande auto` choisit le nombre de couches pour
 mettre au moins 2 mailles dans le plus petit rayon de bord d'attaque des
 coupes (au plus 4 couches de 16 mailles) et prévient si le bord d'attaque
 est à facettes (coin de plus de 60° : le rayon mesuré est celui des
-facettes, `--lisser 1` le rend). Au-delà de 40 M mailles en tout, la mise
-en place s'arrête.
+facettes, `--lisser 1` le rend). Au-delà de 4 Go de mailles en tout
+(≈ 66 M mailles en demi-précision avec la propagation en place, 40 M à deux
+jeux), la mise en place s'arrête.
 
 Aile AR 4, 4°, grille ×2 :
 
@@ -2547,8 +2548,9 @@ L = 16 et ×2, 2,91 M réelles ; test `estimation_des_grilles`) ; les couches
 pariétales, creuses, sont estimées par la surface mouillée (±25 % ; 35,6 M
 pour le préréglage Validation, 36 M réelles). La durée vient du débit mesuré
 au dernier calcul de l'interface (environ 500 M mises à jour de maille par
-seconde avant toute mesure). Au-delà de 40 M mailles en demi-précision
-(20 M en simple), limite du calcul, ou de 6,5 Go, le lancement demande
+seconde avant toute mesure). Au-delà de 4 Go de mailles (≈ 66 M mailles en
+demi-précision, 41 M en simple avec la propagation en place ; 40 M et 20 M à
+deux jeux), limite du calcul, ou de 6,5 Go, le lancement demande
 « Lancer quand même ». Quand la veine fait l'essentiel des mailles d'une
 maquette allongée, l'estimation conseille de réduire la marge de la veine.
 La durée de mise en place est estimée à part : 0,3 s plus 0,4 s par
@@ -3735,10 +3737,7 @@ banc, avec Spalart–Allmaras, k-ε RNG et VLES.
   deux instants sont connus) : ≈ 1 % au plus, mais les vitesses des
   fantômes au demi-pas doivent rester celles de l'instant 0 pendant le
   premier pas fin (ν̃, loi de paroi) : passe de plus ; non fait.
-- Propagation en place (AA-pattern, esoteric twist) : mêmes lectures et
-  écritures par pas, gain en mémoire seulement (la moitié des
-  populations) ; refonte de toutes les passes qui lisent les populations
-  (raccords, surfels, efforts) ; non fait.
+- Propagation en place : faite depuis (voir « Propagation en place »).
 
 **Ce qui reste.** Les collisions des grilles boîtes sont à ≈ 175 Go/s
 (veine d'Ahmed : 4,48 M mailles en 2,51 ms, ≈ 98 octets par maille), 70 %
@@ -3754,6 +3753,60 @@ Pistes non faites : transport de ν̃ dans la collision du pas suivant
 raccords) ; blocs des couches munis d'une marge (voisins sans table) ;
 listes de liens compactées pour les mailles pariétales (144 octets de
 fractions et de normales lus par maille, 5 liens en moyenne).
+
+**Propagation en place (Esoteric Pull, novembre 2026).** Un seul jeu de
+populations au lieu de deux, comme FluidX3D (M. Lehmann, « Esoteric Pull
+and Esoteric Push: Two Simple In-Place Streaming Schemes for the Lattice
+Boltzmann Method on GPUs », *Computation* 10(6), 92, 2022, héritier
+d'Esoteric Twist, Geier et Schönherr, *Computation* 5(2), 19, 2017) ; par
+défaut, `SOUFFLERIE_EP=0` revient aux deux jeux. Directions par paires
+opposées (a positive, a + 1) : au pas de parité P, une maille lit sa
+population positive dans sa propre case (plan P ? a : a + 1) et la négative
+chez la voisine n + c_a, puis écrit ses sortantes dans ces mêmes cases ;
+aucune case n'est touchée par deux mailles dans un pas. Ce qui diffère du
+schéma de FluidX3D :
+
+- *Parois.* Le rebond « implicite » d'Esoteric Pull (maille solide jamais
+  calculée) rend, d'après les formules de `load_f`/`store_f` de FluidX3D, la
+  population sortie de la maille deux pas plus tôt, pas au pas précédent.
+  Il n'est pas utilisé : chaque lien de paroi est reconstruit (Bouzidi,
+  paroi mobile de la loi de paroi, transpiration) avec les mêmes opérations
+  qu'à deux jeux. Les seules lectures hors des cases de la maille sont ses
+  propres sortantes du pas précédent (Bouzidi q ≥ 0,5 et rebond, sortie à
+  gradient nul, sol mobile, plafond glissant, rebond des surfels) : la
+  maille les garde à part, 18 valeurs par maille pariétale et 5 par maille
+  des faces de la veine (≈ 72 octets par maille pariétale). C'est l'idée de
+  la passe `surface_0` de FluidX3D (valeurs reconstruites rangées là où la
+  maille les relira), sans passe de plus.
+- *Raccords de grilles* (FluidX3D n'en a pas). Le tirage lit l'état de la
+  grille parente d'avant son pas, avec le ν̃ d'après : les moments sont
+  relevés juste avant le pas parent (après la loi de paroi), mis à
+  l'échelle après. La recopie lit les populations fines avant collision au
+  temps t + 1, que le second pas fin écrase : relevées après le premier
+  pas fin (48 octets par nœud recopié), recopiées après le second (ν̃ au
+  temps t + 1). Fantômes et nœuds recopiés sont écrits comme si la maille
+  avait fait le pas (cases de la sortante, parité du dernier pas) ; les
+  sortantes gardées des mailles pariétales parentes suivent la recopie.
+- *Couches creuses* : une population par case de 16 bits (les mots de deux
+  populations seraient écrits par deux mailles différentes).
+
+Contrôle : à deux jeux, champ identique au bit à la version précédente
+(`ar4c3`, 3,07 M valeurs). En place, les intérieurs de la veine sont
+identiques au bit ; autour des parois et dans la zone éponge, l'arrondi
+diffère (le compilateur du pilote fusionne autrement multiplications et
+additions dans un code voisin), d'environ 10⁻⁷ par pas. À t* = 2–3, les
+coefficients s'écartent autant qu'entre deux calculs à deux jeux dont la
+viscosité diffère de 10⁻⁶ (`banc3d --perturbe 1e-6`) :
+
+| cas | Cx surface en place / perturbé | Cz surface en place / perturbé | somme de u_x en place / perturbé |
+| --- | --- | --- | --- |
+| `ar4` (×2, SA) | −1,4·10⁻³ / −8,3·10⁻⁴ | +3,5·10⁻⁴ / +8,7·10⁻⁴ | +1,1·10⁻⁵ / −3,2·10⁻⁶ |
+| `ar4` (×2, k-ε) | −2,1·10⁻³ / −5,5·10⁻⁴ | −2,0·10⁻⁴ / −1,8·10⁻⁴ | +1,9·10⁻⁵ / +8·10⁻⁹ |
+| `ar4c3` (couches ×4 à ×16) | −1,8·10⁻³ / −2,3·10⁻⁴ | −1,2·10⁻³ / −1,6·10⁻³ | +2,2·10⁻⁵ / +4,2·10⁻⁶ |
+| `ahmedr` (×2, couche ×4) | +1,2·10⁻³ / +4,5·10⁻³ | +4,4·10⁻⁴ / +4,2·10⁻³ | −6,9·10⁻⁶ / +8,8·10⁻⁶ |
+| `ahmed` (sol mobile, t* = 3) | −1,5·10⁻³ / −3,9·10⁻³ | −2,3·10⁻² / +8,1·10⁻² | +6,6·10⁻⁵ / +1,4·10⁻⁵ |
+
+Les 83 tests passent dans les deux modes (surfels et `set_state` compris).
 
 **Efficacité par passe (novembre 2026).** Bande passante atteignable sur
 la GTX 1070 (exemple `bande_passante` : copie de 256 Mo par un shader) :
@@ -4290,3 +4343,26 @@ alternés : moments des nœuds 1,73 → 1,57 ms, interpolation 3,28 → 2,84 ms 
 pas complet 51,1 → 50,0 s pour t* = 1 (−2 %). Mémoire : identique
 (tampons des moments 2 × 48 au lieu de 96 octets par fantôme ; masque :
 +4 octets par nœud parent ; rangs : −3 octets par entrée).
+
+### Propagation en place (Esoteric Pull)
+
+GTX 1070, GPU libre, deux passages alternés, t* = 1 ; mémoire du GPU
+relevée pendant le calcul (affichage et autres processus compris).
+
+| cas | calcul deux jeux | en place | mémoire deux jeux | en place |
+| --- | --- | --- | --- | --- |
+| `ahmed` (4,48 M mailles, sans raffinement, sol mobile) | 2,32 s | 2,57 s (+11 %) | 1 358 Mo | 1 102 Mo |
+| `ar4c3` (24,1 M mailles, couches ×4, ×8, ×16) | 47,4–50,4 s | 47,2–48,6 s | 3 836 Mo | 2 992 Mo (−844 Mo) |
+
+Par passe (`--profil 1`) : collision de la couche ×16 6,6 → 6,1 ms (une
+population par case de 16 bits, lectures du côté positif dans la maille
+même) ; collision de la veine boîte d'Ahmed 2,6–2,75 → 2,9–3,1 ms (écritures
+positives chez la voisine, décalées d'une case : la moitié des écritures
+moins bien groupées, comme l'indique Lehmann) ; interpolation des fantômes
+2,3 → 3,0 ms (sortantes positives chez les voisines, table des blocs) ;
+moments des nœuds parents 1,3 → 0,85 ms (mise à l'échelle par ν̃ dans une
+passe à part, après le pas parent). Mémoire : populations 40 au lieu de
+80 octets par maille en demi-précision (76 au lieu de 152 en simple), plus
+72 octets par maille pariétale et 48 par nœud recopié : environ 60 octets
+par maille en tout au lieu de 100, d'où ≈ 66 M mailles au plus au lieu de
+40 M sur 4 Go.

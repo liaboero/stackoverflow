@@ -149,7 +149,9 @@ fn main() {
         }
     };
     let mesh = body.mesh.is_some();
-    let nu = U as f64 * l as f64 / re;
+    // `--perturbe e` : viscosité × (1 + e), pour mesurer la divergence
+    // naturelle de deux calculs qui ne diffèrent que par l'arrondi.
+    let nu = U as f64 * l as f64 / re * (1.0 + num("perturbe", 0.0));
     // Modèle RANS : Spalart–Allmaras, ou SOUFFLERIE_RANS=keps|vles.
     let sa = if re >= lbm::tunnel::RE_SA_AUTO { lbm::gpu3d::Turbulence::rans_from_env() } else { lbm::gpu3d::Turbulence::Laminar };
     let t0 = Instant::now();
@@ -172,7 +174,9 @@ fn main() {
     let ramp = Ramp { steps: (4.0 * spt).round() as u64, u: U };
     let q = 0.5 * (U as f64).powi(2) * body.area;
     let chunk = (0.25 * spt).round().max(1.0) as usize;
-    let total = (t_end * spt).round() as u64;
+    // `--pas n` : n pas de la veine en tout (diagnostic), au lieu de t*.
+    let chunk = if num("pas", 0.0) > 0.0 { num("pas", 0.0) as usize } else { chunk };
+    let total = if num("pas", 0.0) > 0.0 { num("pas", 0.0) as u64 } else { (t_end * spt).round() as u64 };
     let mut next_surf = t_end - avg;
     let (mut t_run, mut t_read) = (0.0f64, 0.0f64);
     let (mut fx, mut fz, mut nf) = (0.0, 0.0, 0usize);

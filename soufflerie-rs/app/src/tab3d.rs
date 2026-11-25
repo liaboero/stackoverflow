@@ -561,7 +561,7 @@ impl Tab3D {
 
     /// Le calcul dépasse-t-il les garde-fous ? (message)
     fn guard(e: &Estimate, s: &Settings) -> Option<String> {
-        let limit = if s.fp16 { 40e6 } else { 20e6 };
+        let limit = lbm::gpu3d::max_cells(s.fp16) as f64;
         if e.total > limit {
             Some(format!(
                 "≈ {:.0} M mailles : au-delà de la limite du calcul ({:.0} M en {} précision). Réduire la résolution, le raffinement ou les couches.",

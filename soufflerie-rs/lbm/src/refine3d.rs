@@ -61,9 +61,12 @@ struct LinkParams {
     /// Traitement pariétal du tirage (`pre_at`) : 0, rebond à mi-chemin ;
     /// 1, liens de Bouzidi et loi de paroi de la grille parente.
     pwm: u32,
-    pad0: u32,
-    pad1: u32,
-    pad2: u32,
+    /// Propagation en place : parité du dernier pas de la grille parente,
+    /// de la grille fine ; phase de la recopie (0 : mailles fluides, après
+    /// le premier pas fin ; 1 : les autres, après le second).
+    tp: u32,
+    tc: u32,
+    phase: u32,
 }
 
 const LINK_WGSL: &str = "
@@ -75,7 +78,7 @@ struct L {
   sa: u32, alpha: f32, nu_p: f32, nu_c: f32,
   cbnx: u32, cbny: u32, cbnz: u32, cbcoord: u32,
   pbnx: u32, pbny: u32, pbnz: u32, pbcoord: u32,
-  pwm: u32, pad0: u32, pad1: u32, pad2: u32,
+  pwm: u32, tp: u32, tc: u32, phase: u32,
 };
 @group(0) @binding(0) var<uniform> P: L;
 const CV1_3 = 357.911;
@@ -278,6 +281,77 @@ fn access(name: &str, ba: u32, bb: u32, fp16: bool, p16: bool, write: bool, n: &
     s
 }
 
+/// Accès par coordonnées : `LD{name}(i, x, y, z)` (population i sortante de la
+/// maille (x, y, z) au dernier pas) et `ST{name}(x, y, z, rang, p)`. Deux jeux :
+/// rang par `idx` ; en place (voir `gpu3d::pull_ep`) : population positive
+/// rangée chez la voisine x + c_i, plan selon la parité `par`. `idx` prend des
+/// coordonnées i32 (repliées dans la boîte s'il le faut).
+fn access_xyz(name: &str, ep: bool, p16: bool, write: bool, n: &str, idx: &str, par: &str) -> String {
+    if !ep {
+        // Fantômes (écriture seule) : pas de lecture, ni de rang par coordonnées.
+        let mut s = if write && idx == "cidw" {
+            String::new()
+        } else {
+            format!(
+                "fn LD{name}(i: u32, x: i32, y: i32, z: i32) -> f32 {{ return ld_{name}(i, {idx}(x, y, z)); }}
+"
+            )
+        };
+        if write {
+            s += &format!(
+                "fn ST{name}(x: i32, y: i32, z: i32, c: u32, p: array<f32, 19>) {{ st_{name}(c, p); }}
+"
+            );
+        }
+        return s;
+    }
+    let raw = if p16 {
+        format!(
+            "  if (pl < 10u) {{ return unpack2x16float(u32({name}A[pl * {n} + c])).x + W[i]; }}
+  return unpack2x16float(u32({name}B[(pl - 10u) * {n} + c])).x + W[i];"
+        )
+    } else {
+        format!(
+            "  if (pl < 10u) {{ return bitcast<f32>({name}A[pl * {n} + c]) + W[i]; }}
+  return bitcast<f32>({name}B[(pl - 10u) * {n} + c]) + W[i];"
+        )
+    };
+    let mut s = format!(
+        "fn LD{name}(i: u32, x: i32, y: i32, z: i32) -> f32 {{
+  var c = {idx}(x, y, z);
+  if ((i & 1u) == 1u) {{ c = {idx}(x + CX[i], y + CY[i], z + CZ[i]); }}
+  let pl = select(i, OP[i], {par} == 1u);
+{raw}
+}}
+"
+    );
+    if write {
+        let put = if p16 {
+            format!(
+                "    let v = u16(pack2x16float(vec2<f32>(p[i] - W[i], 0.0)) & 0xffffu);
+    if (pl < 10u) {{ {name}A[pl * {n} + c] = v; }} else {{ {name}B[(pl - 10u) * {n} + c] = v; }}"
+            )
+        } else {
+            format!(
+                "    let v = bitcast<u32>(p[i] - W[i]);
+    if (pl < 10u) {{ {name}A[pl * {n} + c] = v; }} else {{ {name}B[(pl - 10u) * {n} + c] = v; }}"
+            )
+        };
+        s += &format!(
+            "fn ST{name}(x: i32, y: i32, z: i32, c0: u32, p: array<f32, 19>) {{
+  for (var i = 0u; i < 19u; i++) {{
+    var c = c0;
+    if ((i & 1u) == 1u) {{ c = {idx}(x + CX[i], y + CY[i], z + CZ[i]); }}
+    let pl = select(i, OP[i], {par} == 1u);
+{put}
+  }}
+}}
+"
+        );
+    }
+    s
+}
+
 /// Tirage, première passe : moments avant collision de chaque nœud parent
 /// des pochoirs (liste `pnode`, chaque nœud une seule fois ; un nœud sert
 /// à jusqu'à 64 mailles fantômes).
@@ -317,7 +391,7 @@ fn oct_dec(k: f32) -> vec3<f32> {
 
 // `solid` : bit i mis si le voisin d'où vient la population i est solide
 // (précalculé, géométrie fixe).
-fn pre_at(x: i32, y: i32, z: i32, solid: u32) -> Mom {
+fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
   var f: array<f32, 19>;
   let here = pcell(x, y, z);
   // Maille pariétale de la grille parente (avec `pwm`) : populations venues
@@ -334,32 +408,40 @@ fn pre_at(x: i32, y: i32, z: i32, solid: u32) -> Mom {
     vn = putau[arrayLength(&putau) / 6u * 4u + wk];
   }
   for (var i = 0u; i < 19u; i++) {
-    let src = pcell(x - CX[i], y - CY[i], z - CZ[i]);
     var q = 0.0;
     if (wm && i > 0u) { q = pq[wk * 18u + i - 1u]; }
     if (q > 0.0) {
       let j = OP[i];
-      let fj = ld_pf(j, here);
+      let fj = LDpf(j, x, y, z);
       let qo = pq[wk * 18u + j - 1u];
       let nf = oct_dec(pq[arrayLength(&pq) / 2u + wk * 18u + i - 1u]);
       let ci = vec3<f32>(f32(CX[i]), f32(CY[i]), f32(CZ[i]));
       let uwl = uw - dot(uw, nf) * nf + vn * nf;
       let corr = 6.0 * W[i] * dot(ci, uwl);
       if (q < 0.5 && qo == 0.0) {
-        let nb = pcell(x + CX[i], y + CY[i], z + CZ[i]);
-        f[i] = 2.0 * q * fj + (1.0 - 2.0 * q) * ld_pf(j, nb) + corr;
+        f[i] = 2.0 * q * fj + (1.0 - 2.0 * q) * LDpf(j, x + CX[i], y + CY[i], z + CZ[i]) + corr;
       } else if (q < 0.5) {
         f[i] = fj + corr;
       } else {
-        f[i] = (fj + (2.0 * q - 1.0) * ld_pf(i, here) + corr) / (2.0 * q);
+        f[i] = (fj + (2.0 * q - 1.0) * LDpf(i, x, y, z) + corr) / (2.0 * q);
       }
     } else if (((solid >> i) & 1u) != 0u) {
-      f[i] = ld_pf(OP[i], here);
+      f[i] = LDpf(OP[i], x, y, z);
     } else {
-      f[i] = ld_pf(i, src);
+      f[i] = LDpf(i, x - CX[i], y - CY[i], z - CZ[i]);
     }
   }
-  var m = moments(f);
+  return moments(f);
+}
+
+// Mise à l'échelle de la grille fine (ν̃ ou k, ε de la grille parente après
+// son pas, viscosité de la couche pariétale).
+fn pre_scale(m0: Mom, x: i32, y: i32, z: i32) -> Mom {
+  var m = m0;
+  let here = pcell(x, y, z);
+  let wid = pwall[here];
+  let wm = P.pwm == 1u && wid != 0u && wid < 0xfffffffdu;
+  let wk = select(0u, wid - 1u, wm);
   var v = 3.0 * P.nu_p;
   var vt = 0.0;
   var ef = 0.0;
@@ -391,7 +473,20 @@ fn pre_at(x: i32, y: i32, z: i32, solid: u32) -> Mom {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let k = flat(gid, nwg);
   if (k >= arrayLength(&pnode) / 4u) { return; }
-  let m = pre_at(pnode[4u * k], pnode[4u * k + 1u], pnode[4u * k + 2u], u32(pnode[4u * k + 3u]));
+  let x = pnode[4u * k];
+  let y = pnode[4u * k + 1u];
+  let z = pnode[4u * k + 2u];
+  // Deux jeux : populations d'avant le pas de la grille parente (l'autre
+  // jeu) et ν̃ d'après. En place, l'état d'avant le pas est écrasé : moments
+  // relevés avant le pas (phase 0), mis à l'échelle après (phase 1).
+  var m: Mom;
+  if (EP_PRE && P.phase == 0u) {
+    m = pre_f(x, y, z, u32(pnode[4u * k + 3u]));
+  } else if (EP_PRE) {
+    m = pre_scale(Mom(pm[3u * k], pm[3u * k + 1u], pm[3u * k + 2u]), x, y, z);
+  } else {
+    m = pre_scale(pre_f(x, y, z, u32(pnode[4u * k + 3u])), x, y, z);
+  }
   pm[3u * k] = m.a;
   pm[3u * k + 1u] = m.b;
   pm[3u * k + 2u] = m.c;
@@ -538,7 +633,7 @@ fn ghost(g: u32) {
   let kk = 1.0 - 1.0 / tau_of(b, c3);
   let p = regul(a.x, a.yzw, kk * b.x, kk * b.y, kk * b.z, kk * c3.x, kk * c3.y, kk * c3.z);
   let idx = gidx[g];
-  st_cf(idx, p);
+  STcf(i32(x), i32(y), i32(z), idx, p);
   if (P.sa == 1u) { cnut[idx] = b.w; }
   if (P.sa == 2u) {
     cnut[2u * idx] = max(b.w, 0.0);
@@ -565,7 +660,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let k = 1.0 - 1.0 / tau_of(b, c);
   let p = regul(a.x, a.yzw, k * b.x, k * b.y, k * b.z, k * c.x, k * c.y, k * c.z);
   let idx = gidx[g];
-  st_cf(idx, p);
+  STcf(gx(g), gy(g), gz(g), idx, p);
   if (P.sa == 1u) { cnut[idx] = b.w; }
   if (P.sa == 2u) {
     cnut[2u * idx] = max(b.w, 0.0);
@@ -616,6 +711,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let cy = 2u * (py - P.oy);
   let cz = 2u * (pz - P.oz);
   let cidx = cid(cx, cy, cz);
+  EP_PHASE
   var v = 0.0;
   var vt = 0.0;
   var ev = 0.0;
@@ -634,11 +730,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   // Maille fluide, ou recouverte par une grille plus fine (même traitement).
   if (cwall[cidx] == 0u || cwall[cidx] == 0xfffffffdu) {
     // Populations avant collision au temps t + 1, tirées du demi-pas t + ½.
-    for (var i = 0u; i < 19u; i++) {
-      let s = vec3<i32>(i32(cx) - CX[i], i32(cy) - CY[i], i32(cz) - CZ[i]);
-      f[i] = ld_cs(i, cid(u32(s.x), u32(s.y), u32(s.z)));
-    }
-    m = moments(f);
+    EP_FLUID
     let tau_c = 0.5 + 3.0 * (P.nu_c + vt);
     let tau_p = 0.5 + 3.0 * (P.nu_p + 0.5 * vt);
     let k = 2.0 * (tau_p - 1.0) / tau_c;
@@ -650,7 +742,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // pour les autres mailles. Une grille fine qui coupe la maquette rend
     // ainsi à la grille parente la contrainte de paroi, et pas un équilibre.
     for (var i = 0u; i < 19u; i++) {
-      f[i] = ld_cc(i, cidx);
+      f[i] = LDcc(i, i32(cx), i32(cy), i32(cz));
     }
     m = moments(f);
     let tau_c = 0.5 + 3.0 * (P.nu_c + vt);
@@ -662,12 +754,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   } else {
     // Maille solide ou fantôme dans la grille fine : équilibre (affichage).
     for (var i = 0u; i < 19u; i++) {
-      f[i] = ld_cc(i, cidx);
+      f[i] = LDcc(i, i32(cx), i32(cy), i32(cz));
     }
     m = moments(f);
     p = regul(m.a.x, m.a.yzw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
-  st_pf(pidx, p);
+  STpf(i32(px), i32(py), i32(pz), pidx, p);
+  EP_SIDE
   if (P.sa == 1u) { pnut[pidx] = 0.5 * v; }
   if (P.sa == 2u) {
     pnut[2u * pidx] = v;
@@ -687,7 +780,12 @@ pub(crate) struct Link3 {
     nr: u32,
     rl_pos: Vec<u32>,
     rlist: wgpu::Buffer,
-    params: [wgpu::Buffer; 2],
+    /// En place : moments des nœuds recopiés entre les deux pas fins.
+    rmom: wgpu::Buffer,
+    /// Paramètres, indice (pcur · 2 + ccur) · 2 + a : états des grilles
+    /// parente et fine (parités en place), α = a / 2 (remplissage) ou phase
+    /// a de la recopie.
+    params: Vec<wgpu::Buffer>,
     /// Moments des fantômes aux deux derniers tirages, en alternance ;
     /// `gnew` : tampon du dernier.
     gm: [wgpu::Buffer; 2],
@@ -890,18 +988,134 @@ impl Link3 {
         let module = |label: &str, body: String| {
             crate::gpu3d::compute_module(d, label, format!("{}{base}{body}", crate::gpu3d::pop16_enable(parent.p16 || child.p16)))
         };
-        let pre = module("pre3d", format!("{}{PRE}", access("pf", 3, 4, fp16, parent.p16, false, "P.pn")));
+        let ep = parent.ep;
+        let pre = module(
+            "pre3d",
+            format!(
+                "const EP_PRE = {ep};\n{}{}{PRE}",
+                access("pf", 3, 4, fp16, parent.p16, false, "P.pn"),
+                access_xyz("pf", ep, parent.p16, false, "P.pn", "pcell", "P.tp")
+            ),
+        );
         // Tirage et remplissage du premier demi-pas de la grille fine en une
         // passe (un lancement de moins par pas de la grille parente).
-        let gather = module("gather3d", format!("{}{}", access("cf", 3, 4, fp16, child.p16, true, "P.cn"), GATHER.replace("GNODES3", &(3 * GNODES).to_string()).replace("GWG", &GWG.to_string())));
-        let fill = module("fill3d", format!("{}{FILL}", access("cf", 3, 4, fp16, child.p16, true, "P.cn")));
+        // En place : rang des voisines des fantômes dans la grille fine
+        // (coordonnées repliées dans la boîte, stockage creux par blocs).
+        let cidw = |blk: u32| {
+            if ep {
+                format!(
+                    "@group(0) @binding({blk}) var<storage, read> cblk: array<u32>;
+fn cidw(x0: i32, y0: i32, z0: i32) -> u32 {{
+  let x = u32((x0 + i32(P.cnx)) % i32(P.cnx));
+  let y = u32((y0 + i32(P.cny)) % i32(P.cny));
+  let z = u32((z0 + i32(P.cnz)) % i32(P.cnz));
+  if (P.cbnx == 0u) {{ return x + P.cnx * (y + P.cny * z); }}
+  let s = cblk[(x >> 3u) + P.cbnx * ((y >> 3u) + P.cbny * (z >> 3u))];
+  return s * 512u + (x & 7u) + 8u * ((y & 7u) + 8u * (z & 7u));
+}}
+"
+                )
+            } else {
+                String::new()
+            }
+        };
+        let gather = module(
+            "gather3d",
+            format!(
+                "{}{}{}{}",
+                access("cf", 3, 4, fp16, child.p16, true, "P.cn"),
+                cidw(14),
+                access_xyz("cf", ep, child.p16, true, "P.cn", "cidw", "P.tc"),
+                GATHER.replace("GNODES3", &(3 * GNODES).to_string()).replace("GWG", &GWG.to_string())
+            ),
+        );
+        let fill_pos = if ep {
+            "@group(0) @binding(8) var<storage, read> gpos: array<u32>;
+fn gx(g: u32) -> i32 { return i32(gpos[g] % P.cnx); }
+fn gy(g: u32) -> i32 { return i32((gpos[g] / P.cnx) % P.cny); }
+fn gz(g: u32) -> i32 { return i32(gpos[g] / (P.cnx * P.cny)); }
+"
+        } else {
+            "fn gx(g: u32) -> i32 { return 0; }
+fn gy(g: u32) -> i32 { return 0; }
+fn gz(g: u32) -> i32 { return 0; }
+"
+        };
+        let fill = module(
+            "fill3d",
+            format!(
+                "{}{}{fill_pos}{}{FILL}",
+                access("cf", 3, 4, fp16, child.p16, true, "P.cn"),
+                cidw(9),
+                access_xyz("cf", ep, child.p16, true, "P.cn", "cidw", "P.tc")
+            ),
+        );
+        // En place : la recopie se fait en deux phases (voir `encode`) ; les
+        // sortantes gardées des mailles pariétales de la grille parente
+        // suivent les populations recopiées.
+        let (phase, side) = if ep {
+            (
+                "if (P.phase == 0u && !(cwall[cidx] == 0u || cwall[cidx] == 0xfffffffdu)) { return; }",
+                format!(
+                    "{{
+    let w = pwall[pidx];
+    if (w != 0u && w < 0xfffffffdu) {{
+      for (var k = 1u; k < 19u; k++) {{
+        pside[(w - 1u) * 18u + k - 1u] = {};
+      }}
+    }}
+  }}",
+                    if parent.p16 { "unpack2x16float(pack2x16float(vec2<f32>(p[k] - W[k], 0.0)) & 0xffffu).x" } else { "p[k] - W[k]" }
+                ),
+            )
+        } else {
+            ("", String::new())
+        };
+        // Mailles fluides : moments avant collision au temps t + 1, tirés du
+        // demi-pas ; en place, relevés après le premier pas fin (le second
+        // les écrase) et gardés jusqu'à la recopie, après le second (ν̃ au
+        // temps t + 1, comme à deux jeux).
+        let pull = "for (var i = 0u; i < 19u; i++) {
+      let s = vec3<i32>(i32(cx) - CX[i], i32(cy) - CY[i], i32(cz) - CZ[i]);
+      f[i] = LDcs(i, s.x, s.y, s.z);
+    }
+    m = moments(f);";
+        let fluid = if ep {
+            format!(
+                "if (P.phase == 0u) {{
+      {pull}
+      rmom[3u * r] = m.a;
+      rmom[3u * r + 1u] = m.b;
+      rmom[3u * r + 2u] = m.c;
+      return;
+    }}
+    m = Mom(rmom[3u * r], rmom[3u * r + 1u], rmom[3u * r + 2u]);"
+            )
+        } else {
+            pull.to_string()
+        };
+        let restrict_src = RESTRICT.replace("EP_PHASE", phase).replace("EP_SIDE", &side).replace("EP_FLUID", &fluid);
+        let pidw = "fn pidw(x: i32, y: i32, z: i32) -> u32 { return pid(u32(x), u32(y), u32(z)); }
+fn cidr(x: i32, y: i32, z: i32) -> u32 { return cid(u32(x), u32(y), u32(z)); }
+";
         let restrict = module(
             "restrict3d",
             format!(
-                "{}{}{}{RESTRICT}",
+                "{}{}{}{}{}{}{}{}{restrict_src}",
                 access("cs", 1, 2, fp16, child.p16, false, "P.cn"),
                 access("cc", 3, 4, fp16, child.p16, false, "P.cn"),
-                access("pf", 7, 8, fp16, parent.p16, true, "P.pn")
+                access("pf", 7, 8, fp16, parent.p16, true, "P.pn"),
+                pidw,
+                access_xyz("cs", ep, child.p16, false, "P.cn", "cidr", "P.tc"),
+                access_xyz("cc", ep, child.p16, false, "P.cn", "cidr", "P.tc"),
+                access_xyz("pf", ep, parent.p16, true, "P.pn", "pidw", "P.tp"),
+                if ep {
+                    "@group(0) @binding(15) var<storage, read_write> pside: array<f32>;
+@group(0) @binding(16) var<storage, read_write> rmom: array<vec4<f32>>;
+"
+                } else {
+                    ""
+                },
             ),
         );
         let pipe = |m: &wgpu::ShaderModule, label: &str| {
@@ -963,15 +1177,13 @@ impl Link3 {
             oz: o[2],
             ng,
             nr,
+            rmom: mk("restrict_mom3d", if ep { 48 * nr as u64 } else { 16 }, wgpu::BufferUsages::STORAGE),
             rlist: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("restrict_list3d"),
                 contents: bytemuck::cast_slice(&rl),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
-            params: [
-                mk("link3_0", std::mem::size_of::<LinkParams>() as u64, uni),
-                mk("link3_1", std::mem::size_of::<LinkParams>() as u64, uni),
-            ],
+            params: (0..8).map(|_| mk("link3", std::mem::size_of::<LinkParams>() as u64, uni)).collect(),
             gm: [mk("ghost3d_0", 48 * ng as u64, wgpu::BufferUsages::STORAGE), mk("ghost3d_1", 48 * ng as u64, wgpu::BufferUsages::STORAGE)],
             gnew: std::cell::Cell::new(1),
             gidx: d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1025,7 +1237,8 @@ impl Link3 {
 
     /// Paramètres et groupes de liaison (à refaire si un tampon change).
     pub(crate) fn prepare(&mut self, p: &Gpu3D, c: &Gpu3D) {
-        for (a, buf) in self.params.iter().enumerate() {
+        for (i, buf) in self.params.iter().enumerate() {
+            let (pc, cc, a) = (i / 4, (i / 2) % 2, i % 2);
             let lp = LinkParams {
                 pnx: p.nx as u32,
                 pny: p.ny as u32,
@@ -1056,9 +1269,9 @@ impl Link3 {
                 pbnz: p.sparse.as_ref().map_or(0, |m| m.bd()[2] as u32),
                 pbcoord: p.sparse.as_ref().map_or(0, |m| m.table_len() as u32),
                 pwm: (crate::gpu3d::raccord_paroi() && p.sa && !p.keps && p.surf.is_none()) as u32,
-                pad0: 0,
-                pad1: 0,
-                pad2: 0,
+                tp: 1 - pc as u32,
+                tc: 1 - cc as u32,
+                phase: a as u32,
             };
             p.queue.write_buffer(buf, 0, bytemuck::bytes_of(&lp));
         }
@@ -1078,12 +1291,14 @@ impl Link3 {
             })
         };
         // Après un pas, `cur` désigne le nouvel état ; l'ancien fournit les tirages.
-        self.pre_bind = (0..2)
-            .map(|cur| {
+        // Indice cur · 2 + phase (en place : avant, après le pas parent).
+        self.pre_bind = (0..4)
+            .map(|i| {
+                let cur = i / 2;
                 group(
                     &self.pre,
                     vec![
-                        (0, &self.params[0]),
+                        (0, &self.params[cur * 4 + i % 2]),
                         (1, &self.pm),
                         (2, &self.pnode),
                         (3, &p.pops[1 - cur][0]),
@@ -1101,10 +1316,8 @@ impl Link3 {
         self.gather_bind = (0..4)
             .map(|i| {
                 let (cur, n) = (i / 2, i % 2);
-                group(
-                    &self.gather,
-                    vec![
-                        (0, &self.params[0]),
+                let mut e = vec![
+                        (0, &self.params[cur * 2]),
                         (1, &self.gm[n]),
                         (13, &self.gm[1 - n]),
                         (2, &self.pm),
@@ -1118,18 +1331,19 @@ impl Link3 {
                         (10, &self.gslot),
                         (11, &self.tile),
                         (12, &self.tnode),
-                    ],
-                )
+                    ];
+                if p.ep {
+                    e.push((14, &c.blk_buf));
+                }
+                group(&self.gather, e)
             })
             .collect();
         // Indice (cur · 2 + a) · 2 + n.
         self.fill_bind = (0..8)
             .map(|i| {
                 let (cur, a, n) = (i / 4, (i / 2) % 2, i % 2);
-                group(
-                    &self.fill,
-                    vec![
-                        (0, &self.params[a]),
+                let mut e = vec![
+                        (0, &self.params[cur * 2 + a]),
                         (1, &self.gm[1 - n]),
                         (7, &self.gm[n]),
                         (2, &self.gidx),
@@ -1137,17 +1351,20 @@ impl Link3 {
                         (4, &c.pops[cur][1]),
                         (5, &c.nut[cur]),
                         (6, &c.macro_buf),
-                    ],
-                )
+                    ];
+                if p.ep {
+                    e.push((8, &self.gpos));
+                    e.push((9, &c.blk_buf));
+                }
+                group(&self.fill, e)
             })
             .collect();
-        self.restrict_bind = (0..4)
+        // Indice (pc · 2 + cc) · 2 + phase.
+        self.restrict_bind = (0..8)
             .map(|i| {
-                let (pc, cc) = (i / 2, i % 2);
-                group(
-                    &self.restrict,
-                    vec![
-                        (0, &self.params[0]),
+                let (pc, cc) = (i / 4, (i / 2) % 2);
+                let mut e = vec![
+                        (0, &self.params[i]),
                         (1, &c.pops[1 - cc][0]),
                         (2, &c.pops[1 - cc][1]),
                         (3, &c.pops[cc][0]),
@@ -1162,8 +1379,12 @@ impl Link3 {
                         (12, &self.rlist),
                         (13, &c.blk_buf),
                         (14, &p.blk_buf),
-                    ],
-                )
+                    ];
+                if p.ep {
+                    e.push((15, &p.side));
+                    e.push((16, &self.rmom));
+                }
+                group(&self.restrict, e)
             })
             .collect();
     }
@@ -1184,7 +1405,7 @@ impl Link3 {
                 time(p, &|pass| {
                     let (dx, dy) = disp(self.nn);
                     pass.set_pipeline(&self.pre);
-                    pass.set_bind_group(0, &self.pre_bind[p.cur], &[]);
+                    pass.set_bind_group(0, &self.pre_bind[p.cur * 2], &[]);
                     pass.dispatch_workgroups(dx, dy, 1);
                 }),
             ),
@@ -1212,7 +1433,7 @@ impl Link3 {
                 self.nr as usize,
                 time(p, &|pass| {
                     pass.set_pipeline(&self.restrict);
-                    pass.set_bind_group(0, &self.restrict_bind[p.cur * 2 + c.cur], &[]);
+                    pass.set_bind_group(0, &self.restrict_bind[(p.cur * 2 + c.cur) * 2], &[]);
                     pass.dispatch_workgroups(rx, ry, 1);
                 }),
             ),
@@ -1220,11 +1441,11 @@ impl Link3 {
     }
 
     /// Tirage (et remplissage du premier demi-pas de la grille fine, état `ccur`).
-    fn gather(&self, pass: &mut wgpu::ComputePass, pcur: usize, ccur: usize) {
+    fn gather(&self, pass: &mut wgpu::ComputePass, pcur: usize, ccur: usize, ep: bool) {
         if self.nn > 0 {
             let (dx, dy) = disp(self.nn);
             pass.set_pipeline(&self.pre);
-            pass.set_bind_group(0, &self.pre_bind[pcur], &[]);
+            pass.set_bind_group(0, &self.pre_bind[pcur * 2 + ep as usize], &[]);
             pass.dispatch_workgroups(dx, dy, 1);
         }
         let n = 1 - self.gnew.get();
@@ -1233,6 +1454,17 @@ impl Link3 {
         pass.set_pipeline(&self.gather);
         pass.set_bind_group(0, &self.gather_bind[ccur * 2 + n], &[]);
         pass.dispatch_workgroups(dx, dy, 1);
+    }
+
+    /// En place : moments des nœuds parents des pochoirs, sur l'état de la
+    /// grille parente d'avant son pas (`pcur` : état avant le pas).
+    fn pre_before(&self, pass: &mut wgpu::ComputePass, pcur: usize) {
+        if self.nn > 0 {
+            let (dx, dy) = disp(self.nn);
+            pass.set_pipeline(&self.pre);
+            pass.set_bind_group(0, &self.pre_bind[pcur * 2], &[]);
+            pass.dispatch_workgroups(dx, dy, 1);
+        }
     }
 
     /// Remplissage des fantômes à α = a / 2 entre les deux derniers tirages.
@@ -1287,6 +1519,11 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
         if let Some(w) = &lev.wall_pass {
             w.encode(pass, slot);
         }
+        if lev.ep {
+            for &c in &children[k] {
+                links[c - 1].pre_before(pass, lev.cur);
+            }
+        }
         lev.encode_step(pass, slot);
         if lev.sa {
             pass.set_pipeline(&lev.sa_pipe);
@@ -1298,18 +1535,24 @@ fn encode(levels: &mut [&mut Gpu3D], links: &[Link3], children: &[Vec<usize>], p
     for &c in &children[k] {
         let link = &links[c - 1];
         // Tirage, avec le remplissage du premier demi-pas (α = 0).
-        link.gather(pass, levels[k].cur, levels[c].cur);
+        link.gather(pass, levels[k].cur, levels[c].cur, levels[k].ep);
+        let (rx, ry) = disp(link.nr);
         for a in 0..2 {
             if a == 1 {
                 link.fill_at(pass, levels[c].cur, a);
             }
             encode(levels, links, children, pass, c, slot);
+            // Recopie : en place, les mailles fluides après le premier pas fin
+            // (leurs populations avant collision au temps t + 1 sont alors en
+            // mémoire, le second pas les écrase), les autres après le second ;
+            // à deux jeux, tout après le second.
+            if a == 0 && !levels[k].ep {
+                continue;
+            }
+            pass.set_pipeline(&link.restrict);
+            pass.set_bind_group(0, &link.restrict_bind[(levels[k].cur * 2 + levels[c].cur) * 2 + a], &[]);
+            pass.dispatch_workgroups(rx, ry, 1);
         }
-        let nr = link.nr;
-        let (rx, ry) = disp(nr);
-        pass.set_pipeline(&link.restrict);
-        pass.set_bind_group(0, &link.restrict_bind[levels[k].cur * 2 + levels[c].cur], &[]);
-        pass.dispatch_workgroups(rx, ry, 1);
     }
 }
 
@@ -1338,8 +1581,12 @@ pub(crate) fn run(top: &mut Gpu3D, r: &mut Refinement, n: usize, ramp: &crate::c
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
             for (k, link) in r.links.iter().enumerate() {
+                let p = &all[r.parent[k]];
                 for _ in 0..2 {
-                    link.gather(&mut pass, all[r.parent[k]].cur, all[k + 1].cur);
+                    if p.ep {
+                        link.pre_before(&mut pass, p.cur);
+                    }
+                    link.gather(&mut pass, p.cur, all[k + 1].cur, p.ep);
                 }
             }
         }

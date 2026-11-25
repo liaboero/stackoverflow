@@ -68,6 +68,15 @@ pub(crate) fn pop16() -> bool {
     POP16.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Propagation en place (Esoteric Pull, voir `pull_ep`) : un seul jeu de
+/// populations au lieu de deux ; par défaut, SOUFFLERIE_EP=0 : deux jeux.
+/// Demande des populations
+/// une par case (simple précision, ou demi-précision avec 16 bits par case),
+/// les mots de deux populations étant écrits par deux mailles différentes.
+pub(crate) fn esoteric() -> bool {
+    std::env::var("SOUFFLERIE_EP").map_or(true, |v| v != "0")
+}
+
 /// Demi-mot de chaque direction dans le rangement en mots de 32 bits (deux
 /// populations par mot) : directions appariées tirées de mailles voisines en
 /// x (même rangée, fils voisins), puis les autres. SOUFFLERIE_PAIRES=0 :
@@ -1043,7 +1052,7 @@ pub(crate) fn step_wg() -> u32 {
     std::env::var("SOUFFLERIE_WG").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
 }
 
-fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool) -> String {
+fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool, ep: bool) -> String {
     // Paroi volumique (surfels) : la propagation des mailles réceptrices
     // passe par les surfels (`surfel3d`), sans liens de Bouzidi.
     let bouzidi = walls && !surf;
@@ -1315,12 +1324,14 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool) -> String {
     } else {
         (0..19).map(|i| format!("  putPop({i}u, idx, o[{i}]);\n")).collect()
     };
+    // Propagation en place (`pull_ep`).
+    let (pull, out) = if ep { (pull_ep(walls, surf), out_ep(p16, walls)) } else { (pull, out) };
     let feq_in: String = (1..19)
         .map(|i| format!("if (i == {i}u) {{ cx = {}; w = {}; }}\n  ", f(C3[i][0] as f64), f(w3(i))))
         .collect();
     let fv: String = (0..19).map(|i| format!("fv[{i}] = g[{i}] + {}; ", f(w3(i)))).collect();
     let pt = if p16 { "u16" } else { "u32" };
-    format!(
+    let code = format!(
         "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> srcA: array<{pt}>;
@@ -1670,7 +1681,261 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         pxy = sum_expr(|i| dotc(i, 0, 1)),
         pxz = sum_expr(|i| dotc(i, 0, 2)),
         pyz = sum_expr(|i| dotc(i, 1, 2)),
+    );
+    if ep {
+        ep_bindings(code, pt)
+    } else {
+        code
+    }
+}
+
+/// Liaisons de la propagation en place : un seul jeu de populations, lu et
+/// écrit (A, B), parité du pas (`PAR`), sortantes gardées (`side`).
+fn ep_bindings(code: String, pt: &str) -> String {
+    code.replace(
+        &format!(
+            "@group(0) @binding(1) var<storage, read> srcA: array<{pt}>;
+@group(0) @binding(2) var<storage, read> srcB: array<{pt}>;
+@group(0) @binding(3) var<storage, read_write> dstA: array<{pt}>;
+@group(0) @binding(4) var<storage, read_write> dstB: array<{pt}>;"
+        ),
+        &format!(
+            "@group(0) @binding(1) var<storage, read_write> srcA: array<{pt}>;
+@group(0) @binding(2) var<storage, read_write> srcB: array<{pt}>;
+// Parité du pas (x = 1 : impair).
+@group(0) @binding(3) var<uniform> PAR: vec4<u32>;
+// Sortantes du pas précédent que la maille relit (voir `pull_ep`).
+@group(0) @binding(4) var<storage, read_write> side: array<f32>;"
+        ),
     )
+    .replace("dstA[", "srcA[")
+    .replace("dstB[", "srcB[")
+}
+
+/// Directions gardées aux bords de la veine : sortie (c_x = −1), sol
+/// (c_z = −1), plafond (c_z = +1).
+pub(crate) const EP_OUT: [usize; 5] = [2, 8, 10, 14, 16];
+pub(crate) const EP_GROUND: [usize; 5] = [6, 10, 12, 15, 17];
+pub(crate) const EP_TOP: [usize; 5] = [5, 9, 11, 16, 18];
+
+/// Propagation en place, Esoteric Pull (Lehmann 2022, comme FluidX3D) : un
+/// seul jeu de populations. Directions par paires opposées (a = 2p + 1
+/// positive, a + 1) ; au pas de parité P, la maille n lit sa population
+/// positive a dans sa propre case, plan P ? a : a + 1, et la négative a + 1
+/// dans la case de n + c_a, plan P ? a + 1 : a ; elle écrit ses sortantes
+/// dans ces mêmes cases (positive a en n + c_a, plan P ? a + 1 : a ; négative
+/// en n, plan P ? a : a + 1). Chaque case n'est lue et écrite que par une
+/// maille par pas : pas de concurrence. Mêmes valeurs qu'avec deux jeux, au
+/// bit près. Les lectures hors de cet ensemble, les sortantes de la maille
+/// au pas précédent (Bouzidi q ≥ 0,5 et rebond, sortie à gradient nul, sol
+/// mobile, plafond glissant, rebond des surfels), sont gardées à part
+/// (`side`) par la maille elle-même. Le rebond implicite d'Esoteric Pull
+/// (maille solide jamais calculée) rendrait la population d'il y a deux
+/// pas : il n'est pas utilisé, chaque lien de paroi est reconstruit.
+fn pull_ep(walls: bool, surf: bool) -> String {
+    let bouzidi = walls && !surf;
+    let mut s = String::from(
+        "  let OD = PAR.x == 1u;
+  let OUTO = 18u * WALLN_C;
+  let GRO = OUTO + 5u * P.ny * P.nz;
+  let TOPO = GRO + 5u * P.nx * P.ny;
+  let xa1 = select(u32(x) + 1u, 0u, u32(x) + 1u == P.nx);
+",
+    );
+    for p in 0..9 {
+        let [cx, cy, cz] = C3[2 * p + 1];
+        let yv = ["ym", "yc", "yp"][(1 + cy) as usize];
+        let zv = ["zm", "zc", "zp"][(1 + cz) as usize];
+        let xs = if cx == 1 { "xa1" } else { "u32(x)" };
+        let _ = writeln!(s, "  let nb{p} = nbr({xs}, {yv}, {zv}, r_{yv}_{zv});");
+    }
+    if walls {
+        s += "  var raw: array<f32, 19>;\n";
+    }
+    let pos = |list: &[usize], d: usize| list.iter().position(|&k| k == d).unwrap();
+    for i in 1..19 {
+        let [cx, _, cz] = C3[i];
+        let j = opp3(i);
+        let plain = if i % 2 == 1 {
+            format!("pop(select({j}u, {i}u, OD), idx)")
+        } else {
+            format!("pop(select({}u, {i}u, OD), nb{})", i - 1, (i - 2) / 2)
+        };
+        let mut chain = String::new();
+        if cz > 0 {
+            let _ = write!(
+                chain,
+                " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
+      v = side[GRO + (u32(x) + P.nx * u32(y)) * 5u + {}u] + {} * P.uIn;
+    }}",
+                pos(&EP_GROUND, j),
+                f(6.0 * w3(i) * C3[i][0] as f64)
+            );
+        } else if cz < 0 {
+            let m = C3.iter().position(|d| d[0] == C3[i][0] && d[1] == C3[i][1] && d[2] == -cz).unwrap();
+            let _ = write!(
+                chain,
+                " else if ((P.rows & 2u) != 0u && z + 1 >= i32(P.nz)) {{
+      v = side[TOPO + (u32(x) + P.nx * u32(y)) * 5u + {}u];
+    }}",
+                pos(&EP_TOP, m)
+            );
+        }
+        if cx != 0 {
+            let _ = write!(
+                chain,
+                " else if ((P.rows & 8u) != 0u && (x - {cx} < 0 || x - {cx} >= i32(P.nx))) {{
+      v = rv;
+    }}"
+            );
+        }
+        if cx == 1 {
+            let _ = write!(chain, " else if (x - 1 < 0) {{\n      v = feqIn({i}u);\n    }}");
+        }
+        if cx == -1 {
+            let _ = write!(
+                chain,
+                " else if (x + 1 >= i32(P.nx)) {{
+      v = side[OUTO + (u32(y) + P.ny * u32(z)) * 5u + {}u];
+    }}",
+                pos(&EP_OUT, i)
+            );
+        }
+        let keep = if walls { format!("    raw[{i}] = rv;\n") } else { String::new() };
+        let _ = write!(
+            s,
+            "  {{
+    let rv = {plain};
+{keep}    var v: f32;
+    if (false) {{
+    }}{chain} else {{
+      v = rv;
+    }}
+    g[{i}] = v;
+  }}
+"
+        );
+    }
+    // Liens de paroi : mêmes opérations que la propagation à deux jeux.
+    for i in (1..19).filter(|_| walls) {
+        let [cx, cy, cz] = C3[i];
+        let j = opp3(i);
+        if bouzidi {
+            let _ = write!(
+                s,
+                "  {{
+    let q = qa[{im1}];
+    if (q > 0.0) {{
+      var v: f32;
+      let fj = side[wk * 18u + {jm1}u];
+      let qo = qa[{jm1}];
+      var uwl = uw;
+      if (P.sa != 0u) {{
+        let nf = oct_decode(ca[{im1}]);
+        uwl = uw - dot(uw, nf) * nf + vn * nf;
+      }}
+      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
+      if (q < 0.5 && qo == 0.0) {{
+        v = 2.0 * q * fj + (1.0 - 2.0 * q) * raw[{j}] + corr;
+      }} else if (q < 0.5) {{
+        v = fj + corr;
+      }} else {{
+        v = (fj + (2.0 * q - 1.0) * side[wk * 18u + {im1}u] + corr) / (2.0 * q);
+      }}
+      let mom = fj + v + {w2};
+      fsum += vec3<f32>({mcx}, {mcy}, {mcz}) * mom - uwl * (fj - v);
+      g[{i}] = v;
+    }}
+  }}
+",
+                im1 = i - 1,
+                jm1 = j - 1,
+                w2 = f(2.0 * w3(i)),
+                w6 = f(6.0 * w3(i)),
+                ccx = f(cx as f64),
+                ccy = f(cy as f64),
+                ccz = f(cz as f64),
+                mcx = f(-cx as f64),
+                mcy = f(-cy as f64),
+                mcz = f(-cz as f64),
+            );
+        } else {
+            let _ = write!(
+                s,
+                "  {{
+    var v = g[{i}];
+    let a = qa[{im1}];
+    if (a < 0.0) {{
+      v = side[wk * 18u + {jm1}u];
+    }} else {{
+      var s = 0.0;
+      let rb = 18u * WALLN_C;
+      let re = 36u * WALLN_C + 1u;
+      let e1 = bitcast<u32>(qbuf[rb + wk * 18u + {i}u]);
+      for (var e = bitcast<u32>(qbuf[rb + wk * 18u + {im1}u]); e < e1; e++) {{
+        let k = bitcast<u32>(qbuf[re + 2u * e]);
+        s += qbuf[re + 2u * e + 1u] * force[k >> 2u][k & 3u];
+      }}
+      v = select(0.0, a * v, a > 0.0) + s;
+    }}
+    g[{i}] = v;
+  }}
+",
+                im1 = i - 1,
+                jm1 = j - 1,
+            );
+        }
+    }
+    s
+}
+
+/// Écriture des sortantes en place (voir `pull_ep`), puis de celles que la
+/// maille relira au pas suivant.
+fn out_ep(p16: bool, walls: bool) -> String {
+    let put = |k: usize, plane: String, cell: &str| {
+        if p16 {
+            format!("  putH({plane}, {cell}, o[{k}]);\n")
+        } else {
+            format!("  putPop({plane}, {cell}, o[{k}]);\n")
+        }
+    };
+    let mut s = put(0, "0u".into(), "idx");
+    for k in 1..19 {
+        let j = opp3(k);
+        if k % 2 == 1 {
+            s += &put(k, format!("select({k}u, {j}u, OD)"), &format!("nb{}", (k - 1) / 2));
+        } else {
+            s += &put(k, format!("select({k}u, {j}u, OD)"), "idx");
+        }
+    }
+    let rnd = |k: usize| {
+        if p16 {
+            format!("unpack2x16float(pack2x16float(vec2<f32>(o[{k}], 0.0)) & 0xffffu).x")
+        } else {
+            format!("o[{k}]")
+        }
+    };
+    if walls {
+        s += "  if (hasWall) {\n";
+        for k in 1..19 {
+            s += &format!("    side[wk * 18u + {}u] = {};\n", k - 1, rnd(k));
+        }
+        s += "  }\n";
+    }
+    s += "  if (x + 1 == i32(P.nx)) {\n";
+    for (n, &k) in EP_OUT.iter().enumerate() {
+        s += &format!("    side[OUTO + (u32(y) + P.ny * u32(z)) * 5u + {n}u] = {};\n", rnd(k));
+    }
+    s += "  }\n  if ((P.rows & 2u) != 0u) {\n    if (z == 0) {\n";
+    for (n, &k) in EP_GROUND.iter().enumerate() {
+        s += &format!("      side[GRO + (u32(x) + P.nx * u32(y)) * 5u + {n}u] = {};\n", rnd(k));
+    }
+    s += "    }\n    if (z + 1 == i32(P.nz)) {\n";
+    for (n, &k) in EP_TOP.iter().enumerate() {
+        s += &format!("      side[TOPO + (u32(x) + P.nx * u32(y)) * 5u + {n}u] = {};\n", rnd(k));
+    }
+    s += "    }\n  }\n";
+    s
 }
 
 /// Paroi volumique : contrainte tangentielle relevée au-dessus des surfels
@@ -1687,7 +1952,42 @@ pub fn surfels_o2() -> bool {
 /// corps, et Γᵒᵘᵗ/P (populations décalées de leur poids) pour la propagation
 /// des mailles réceptrices. Tampon `force` : effort du surfel s en s, puis
 /// Γᵒᵘᵗ/P de ses paires en 4 n + 12 s + p (cases flottantes).
-fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
+fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool, ep: bool) -> String {
+    let code = wgsl_surfel_base(fp16, p16, n, o2);
+    if !ep {
+        return code;
+    }
+    // En place : sortante de la maille c au dernier pas (parité 1 − PAR.x),
+    // positive rangée chez la voisine c + c_i (grille boîte, bords repliés).
+    let list = |f: &dyn Fn(usize) -> String| (0..19).map(f).collect::<Vec<_>>().join(", ");
+    format!(
+        "{}
+@group(0) @binding(12) var<uniform> PAR: vec4<u32>;
+const EP_CX = array<i32, 19>({});
+const EP_CY = array<i32, 19>({});
+const EP_CZ = array<i32, 19>({});
+const EP_OP = array<u32, 19>({});
+fn pop(i: u32, c: u32) -> f32 {{
+  let pl = select(i, EP_OP[i], PAR.x == 0u);
+  if ((i & 1u) == 0u) {{ return popRaw(pl, c); }}
+  let nx = i32(P.nx);
+  let ny = i32(P.ny);
+  let nz = i32(P.nz);
+  let x = (i32(c % P.nx) + EP_CX[i] + nx) % nx;
+  let y = (i32((c / P.nx) % P.ny) + EP_CY[i] + ny) % ny;
+  let z = (i32(c / (P.nx * P.ny)) + EP_CZ[i] + nz) % nz;
+  return popRaw(pl, u32(x + nx * (y + ny * z)));
+}}
+",
+        code.replacen("fn pop(i: u32, c: u32) -> f32 {", "fn popRaw(i: u32, c: u32) -> f32 {", 1),
+        list(&|i| C3[i][0].to_string()),
+        list(&|i| C3[i][1].to_string()),
+        list(&|i| C3[i][2].to_string()),
+        list(&|i| format!("{}u", opp3(i))),
+    )
+}
+
+fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
     let half = if fp16 { 5 } else { 10 };
     let load = if p16 {
         "fn pop(i: u32, c: u32) -> f32 {
@@ -1888,7 +2188,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     )
 }
 
-fn wgsl_init(fp16: bool, p16: bool) -> String {
+fn wgsl_init(fp16: bool, p16: bool, ep: bool, walln: u32) -> String {
+    if ep {
+        return wgsl_init_ep(p16, walln);
+    }
     let words = if fp16 { 10 } else { 19 };
     let half = if fp16 { 5 } else { 10 };
     let eq: String = (0..19)
@@ -1953,6 +2256,81 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   {put}
 }}
 "
+    )
+}
+
+/// État initial uniforme, propagation en place : comme rangé par un pas de
+/// parité 1 (population k de chaque maille dans le plan opposé, voir
+/// `pull_ep`), et sortantes gardées des mailles pariétales et des faces.
+fn wgsl_init_ep(p16: bool, walln: u32) -> String {
+    let eq: String = (0..19)
+        .map(|i| {
+            let c = f(C3[i][0] as f64);
+            format!(
+                "let e{i} = {} * (3.0 * ({c} * u0) + 4.5 * ({c} * u0) * ({c} * u0) - 1.5 * u0 * u0);
+  ",
+                f(w3(i))
+            )
+        })
+        .collect();
+    let pt = if p16 { "u16" } else { "u32" };
+    let enc = |v: String| if p16 { format!("u16(pack2x16float(vec2<f32>({v}, 0.0)) & 0xffffu)") } else { format!("bitcast<u32>({v})") };
+    let rnd = |v: String| if p16 { format!("unpack2x16float(pack2x16float(vec2<f32>({v}, 0.0)) & 0xffffu).x") } else { v };
+    let mut put = String::new();
+    for k in 0..19 {
+        let plane = if k == 0 { 0 } else { opp3(k) };
+        let (b, q) = if plane < 10 { ("A", plane) } else { ("B", plane - 10) };
+        put += &format!("  {b}[{q}u * P.N + idx] = {};
+", enc(format!("e{k}")));
+    }
+    let wside: String = (1..19).map(|k| format!("    side[wk * 18u + {}u] = {};
+", k - 1, rnd(format!("e{k}")))).collect();
+    let face = |list: &[usize], base: &str, at: &str| -> String {
+        list.iter().enumerate().map(|(n, &k)| format!("      side[{base} + ({at}) * 5u + {n}u] = {};
+", rnd(format!("e{k}")))).collect()
+    };
+    format!(
+        "{en}{PARAMS_WGSL}
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> A: array<{pt}>;
+@group(0) @binding(2) var<storage, read_write> B: array<{pt}>;
+@group(0) @binding(3) var<storage, read> wall: array<u32>;
+@group(0) @binding(4) var<storage, read_write> side: array<f32>;
+@group(0) @binding(5) var<storage, read> blk: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{
+  let idx = gid.x + gid.y * nwg.x * 64u;
+  if (idx >= P.N) {{ return; }}
+  let u0 = P.uIn;
+  {eq}
+{put}
+  let w = wall[idx];
+  if (w != 0u && w < 0xfffffffdu) {{
+    let wk = w - 1u;
+{wside}  }}
+  // Faces de la veine (grille boîte, pas imbriquée).
+  if ((P.rows & 1u) == 0u && P.bnx == 0u) {{
+    let x = idx % P.nx;
+    let y = (idx / P.nx) % P.ny;
+    let z = idx / (P.nx * P.ny);
+    let OUTO = {walln}u * 18u;
+    let GRO = OUTO + 5u * P.ny * P.nz;
+    let TOPO = GRO + 5u * P.nx * P.ny;
+    if (x + 1u == P.nx) {{
+{fo}    }}
+    if ((P.rows & 2u) != 0u) {{
+      if (z == 0u) {{
+{fg}      }}
+      if (z + 1u == P.nz) {{
+{ft}      }}
+    }}
+  }}
+}}
+",
+        en = pop16_enable(p16),
+        fo = face(&EP_OUT, "OUTO", "y + P.ny * z"),
+        fg = face(&EP_GROUND, "GRO", "x + P.nx * y"),
+        ft = face(&EP_TOP, "TOPO", "x + P.nx * y"),
     )
 }
 
@@ -2556,7 +2934,15 @@ pub struct Force3 {
 
 /// Octets par maille sur le GPU (populations ping-pong, table pariétale, champ).
 pub fn bytes_per_cell(fp16: bool) -> usize {
-    (if fp16 { 2 * 10 * 4 } else { 2 * 19 * 4 }) + 4 + 16
+    // Un jeu de populations en place (`esoteric`), deux sinon.
+    let sets = if esoteric() { 1 } else { 2 };
+    sets * (if fp16 { 10 * 4 } else { 19 * 4 }) + 4 + 16
+}
+
+/// Mailles au plus, toutes grilles : 4 Go de mailles (40 M en demi-précision
+/// à deux jeux, ≈ 66 M en place).
+pub fn max_cells(fp16: bool) -> usize {
+    4_000_000_000 / bytes_per_cell(fp16)
 }
 
 /// Modèle de turbulence RANS (avec loi de paroi), ou aucun.
@@ -2614,6 +3000,11 @@ pub struct Gpu3D {
     sponge_start: u32,
     cs: f64,
     pub(crate) pops: [[wgpu::Buffer; 2]; 2],
+    /// Propagation en place (`pull_ep`) : `pops[1]` est `pops[0]` ; parité
+    /// du pas (uniformes 0 et 1) et sortantes gardées.
+    pub(crate) ep: bool,
+    pub(crate) _par: [wgpu::Buffer; 2],
+    pub(crate) side: wgpu::Buffer,
     pub(crate) wall: wgpu::Buffer,
     /// Distance signée à la maquette (affichage) et sa grille (origine, pas ; taille).
     sdf: wgpu::Buffer,
@@ -2829,6 +3220,7 @@ fn specialize(code: &str, c: [u32; 7]) -> String {
 
 /// Pipelines de la collision (cœur, et mailles pariétales s'il y en a) pour
 /// les constantes `c` (voir `specialize`).
+#[allow(clippy::too_many_arguments)]
 fn step_pipelines(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -2836,6 +3228,7 @@ fn step_pipelines(
     p16: bool,
     walls: bool,
     surf: bool,
+    ep: bool,
     c: [u32; 7],
 ) -> (wgpu::ComputePipeline, Option<wgpu::ComputePipeline>) {
     let mk = |label: &str, code: String| {
@@ -2849,8 +3242,8 @@ fn step_pipelines(
             cache: None,
         })
     };
-    let bulk = mk("d3q19", wgsl_step(fp16, p16, false, surf).replace("WGu", &format!("{}u", step_wg())));
-    let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, p16, true, surf)));
+    let bulk = mk("d3q19", wgsl_step(fp16, p16, false, surf, ep).replace("WGu", &format!("{}u", step_wg())));
+    let wall = walls.then(|| mk("d3q19_paroi", wgsl_step(fp16, p16, true, surf, ep)));
     (bulk, wall)
 }
 
@@ -2871,6 +3264,7 @@ impl Gpu3D {
             self.p16,
             self.step_wall_pipe.is_some(),
             self.surf.is_some(),
+            self.ep,
             [p.sa, k[0], k[1], k[2], p.bnx, self.wall_count as u32, self.n_active],
         );
         self.step_pipe = a;
@@ -4361,10 +4755,11 @@ impl Gpu3D {
                 crate::progress::grid(k, n_grids);
                 let mut child = Self::build(device.clone(), queue.clone(), name.clone(), &cb, nu_k, u_in, fp16, sa, true, &spec_k)?;
                 child.les = top.les;
-                // Mémoire du GPU : environ 100 octets par maille en demi-précision
-                // (200 en simple) ; au-delà de 40 M mailles en tout, on s'arrête.
+                // Mémoire du GPU : `bytes_per_cell` par maille (60 octets en
+                // demi-précision en place, 100 à deux jeux) ; au-delà de
+                // `max_cells` en tout, on s'arrête.
                 let total: usize = std::iter::once(top.n).chain(levels.iter().map(|g| g.n)).chain(std::iter::once(child.n)).sum();
-                if total > 40_000_000 / if fp16 { 1 } else { 2 } {
+                if total > max_cells(fp16) {
                     return Err(format!(
                         "couche pariétale {} (×{}) : {:.0} M mailles en tout, au-delà de la mémoire du GPU ; moins de couches ou plus minces",
                         bi + 1,
@@ -4570,7 +4965,9 @@ impl Gpu3D {
         // Populations une par case de 16 bits sur les grilles boîtes ; les
         // couches creuses gardent deux populations par mot (12 % plus rapide
         // pour elles, voir `POP16`).
-        let p16 = fp16 && pop16() && sparse.is_none();
+        // Propagation en place : populations une par case, couches comprises.
+        let ep = esoteric() && (!fp16 || pop16());
+        let p16 = fp16 && pop16() && (sparse.is_none() || ep);
         let biggest = (words_a * ns * 4).max(16 * ns) as u64;
         if biggest > max_bind {
             return Err(format!(
@@ -4580,10 +4977,25 @@ impl Gpu3D {
                 max_bind >> 20
             ));
         }
-        let pops = [
-            [mk("a0", (words_a * ns * 4) as u64, st), mk("b0", (words_b * ns * 4) as u64, st)],
-            [mk("a1", (words_a * ns * 4) as u64, st), mk("b1", (words_b * ns * 4) as u64, st)],
-        ];
+        let pops0 = [mk("a0", (words_a * ns * 4) as u64, st), mk("b0", (words_b * ns * 4) as u64, st)];
+        // En place : le second jeu est le premier.
+        let pops1 = if ep {
+            pops0.clone()
+        } else {
+            [mk("a1", (words_a * ns * 4) as u64, st), mk("b1", (words_b * ns * 4) as u64, st)]
+        };
+        let pops = [pops0, pops1];
+        // Sortantes gardées (en place) : 18 par maille pariétale, puis les
+        // faces de sortie, du sol et du plafond de la veine.
+        let side_len = 18 * wall_count + if nested { 0 } else { 5 * (ny * nz + 2 * nx * ny) };
+        let side = mk("ep_side3d", if ep { 4 * side_len as u64 } else { 16 }, st);
+        let par = [0u32, 1].map(|k| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ep_par3d"),
+                contents: bytemuck::cast_slice(&[k, 0, 0, 0]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        });
         let macro_buf = mk("macro3d", 16 * ns as u64, st);
         // Table des blocs pour les shaders (vide : grille boîte).
         let blk_data: Vec<u32> = match sparse.as_ref() {
@@ -4759,9 +5171,9 @@ impl Gpu3D {
             label: Some("d3q19"),
             entries: &[
                 uniform(0, true, psize),
-                storage(1, true),
-                storage(2, true),
-                storage(3, false),
+                storage(1, !ep),
+                storage(2, !ep),
+                if ep { uniform(3, false, 16) } else { storage(3, false) },
                 storage(4, false),
                 storage(5, true),
                 storage(6, true),
@@ -4809,7 +5221,11 @@ impl Gpu3D {
         });
         let init_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("d3q19_init"),
-            entries: &[uniform(0, true, psize), storage(1, false), storage(2, false)],
+            entries: &if ep {
+                vec![uniform(0, true, psize), storage(1, false), storage(2, false), storage(3, true), storage(4, false), storage(5, true)]
+            } else {
+                vec![uniform(0, true, psize), storage(1, false), storage(2, false)]
+            },
         });
         // Passes du calcul : sans contrôles d'exécution (`compute_module`) ;
         // affichage (coupe, rendu) : contrôles gardés.
@@ -4869,9 +5285,10 @@ impl Gpu3D {
             p16,
             wall_count > 0,
             surf.is_some(),
+            ep,
             [sa as u32 + keps as u32 + vles as u32, spec[0], spec[1], spec[2], sparse_bnx, wall_count as u32, n_active],
         );
-        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16, p16), true);
+        let init_pipe = pipe("d3q19_init", &init_layout, wgsl_init(fp16, p16, ep, wall_count as u32), true);
         // ν̃ (ou k, ε) par briques sur les grilles boîtes à grands plans.
         let bricks = sparse.is_none() && nx * ny > SA_PLAN;
         let sa_pipe = if keps {
@@ -4937,8 +5354,8 @@ impl Gpu3D {
                         buf_entry(0, &params, pb),
                         buf_entry(1, &pops[s][0], None),
                         buf_entry(2, &pops[s][1], None),
-                        buf_entry(3, &pops[1 - s][0], None),
-                        buf_entry(4, &pops[1 - s][1], None),
+                        if ep { buf_entry(3, &par[s], None) } else { buf_entry(3, &pops[1 - s][0], None) },
+                        if ep { buf_entry(4, &side, None) } else { buf_entry(4, &pops[1 - s][1], None) },
                         buf_entry(5, &wall_buf, None),
                         buf_entry(6, &qbuf, None),
                         buf_entry(7, &force, None),
@@ -5026,9 +5443,10 @@ impl Gpu3D {
                     storage(9, true),
                     storage(10, true),
                     storage(11, true),
+                    uniform(12, false, 16),
                 ],
             });
-            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32, surfels_o2()), true);
+            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32, surfels_o2(), ep), true);
             let bind = (0..2)
                 .map(|s| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5047,6 +5465,7 @@ impl Gpu3D {
                             buf_entry(9, &macro_buf, None),
                             buf_entry(10, &pst_buf, None),
                             buf_entry(11, &prb_buf, None),
+                            buf_entry(12, &par[s], None),
                         ],
                     })
                 })
@@ -5092,16 +5511,16 @@ impl Gpu3D {
             });
             WallPass { pipe: pipe_w, bind: b, disp: wall_disp }
         });
-        let init_bind = (0..2)
+        let init_bind = (0..if ep { 1 } else { 2 })
             .map(|s| {
+                let mut e = vec![buf_entry(0, &params, pb), buf_entry(1, &pops[s][0], None), buf_entry(2, &pops[s][1], None)];
+                if ep {
+                    e.extend([buf_entry(3, &wall_buf, None), buf_entry(4, &side, None), buf_entry(5, &blk_buf, None)]);
+                }
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("d3q19_init"),
                     layout: &init_layout,
-                    entries: &[
-                        buf_entry(0, &params, pb),
-                        buf_entry(1, &pops[s][0], None),
-                        buf_entry(2, &pops[s][1], None),
-                    ],
+                    entries: &e,
                 })
             })
             .collect();
@@ -5133,6 +5552,9 @@ impl Gpu3D {
             sponge_start: if nested { nx as u32 } else { (nx as f64 * 0.85).round() as u32 },
             cs: 0.15,
             pops,
+            ep,
+            _par: par,
+            side,
             wall: wall_buf,
             sdf,
             sdf_geom,
@@ -5433,6 +5855,9 @@ impl Gpu3D {
         }
         let n = self.n;
         let mut e = vec![0f32; 19 * n];
+        if self.ep && self.cur != 0 {
+            return Err("set_state : propagation en place, à t = 0 seulement".into());
+        }
         for (c, &[ux, uy, uz, rho]) in m.iter().enumerate() {
             let (ux, uy, uz, rho) = (ux as f64, uy as f64, uz as f64, rho as f64);
             let usq = 1.5 * (ux * ux + uy * uy + uz * uz);
@@ -5452,6 +5877,55 @@ impl Gpu3D {
                 let h3 = h(cy, cx) * a[0] + h(cx, cy) * a[1] + h(cz, cx) * a[2] + h(cx, cz) * a[3] + h(cz, cy) * a[4] + h(cy, cz) * a[5];
                 e[i * n + c] = (w * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - usq) + 13.5 * w * h3 - w) as f32;
             }
+        }
+        if self.ep {
+            // En place : comme rangé par un pas de parité 1 (voir `pull_ep`),
+            // positive k chez la voisine c + c_k, plan opposé ; et sortantes
+            // gardées (mailles pariétales, faces de la veine).
+            let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+            let mut slot = vec![0f32; 19 * n];
+            for c in 0..n {
+                let (x, y, z) = (c % nx, (c / nx) % ny, c / (nx * ny));
+                slot[c] = e[c];
+                for k in 1..19 {
+                    let t = if k % 2 == 1 {
+                        let [cx, cy, cz] = C3[k];
+                        let w = |v: usize, d: i32, m: usize| ((v as i32 + d + m as i32) % m as i32) as usize;
+                        w(x, cx, nx) + nx * (w(y, cy, ny) + ny * w(z, cz, nz))
+                    } else {
+                        c
+                    };
+                    slot[opp3(k) * n + t] = e[k * n + c];
+                }
+            }
+            let mut side = vec![0f32; 18 * self.wall_count + if self.nested { 0 } else { 5 * (ny * nz + 2 * nx * ny) }];
+            for (wk, &c) in self.wall_cells.iter().enumerate().take(self.wall_count) {
+                for k in 1..19 {
+                    side[18 * wk + k - 1] = e[k * n + c as usize];
+                }
+            }
+            if !self.nested {
+                let (o, g) = (18 * self.wall_count, 18 * self.wall_count + 5 * ny * nz);
+                let t = g + 5 * nx * ny;
+                for c in 0..n {
+                    let (x, y, z) = (c % nx, (c / nx) % ny, c / (nx * ny));
+                    for q in 0..5 {
+                        if x + 1 == nx {
+                            side[o + (y + ny * z) * 5 + q] = e[EP_OUT[q] * n + c];
+                        }
+                        if self.ground && z == 0 {
+                            side[g + (x + nx * y) * 5 + q] = e[EP_GROUND[q] * n + c];
+                        }
+                        if self.ground && z + 1 == nz {
+                            side[t + (x + nx * y) * 5 + q] = e[EP_TOP[q] * n + c];
+                        }
+                    }
+                }
+            }
+            if !side.is_empty() {
+                self.queue.write_buffer(&self.side, 0, bytemuck::cast_slice(&side));
+            }
+            e = slot;
         }
         let a: Vec<u32> = e[..10 * n].iter().map(|v| v.to_bits()).collect();
         let b: Vec<u32> = e[10 * n..].iter().map(|v| v.to_bits()).collect();
@@ -7099,7 +7573,7 @@ impl Gpu3D {
 
     /// Le WGSL engendré (diagnostic).
     pub fn shader_source(fp16: bool) -> String {
-        specialize(&wgsl_step(fp16, false, false, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
+        specialize(&wgsl_step(fp16, false, false, false, false).replace("WGu", "64u"), [1, 0, 0, 0, 0, 0, 0])
     }
 }
 
