@@ -73,6 +73,12 @@ pub(crate) fn pop16() -> bool {
 /// Demande des populations
 /// une par case (simple précision, ou demi-précision avec 16 bits par case),
 /// les mots de deux populations étant écrits par deux mailles différentes.
+/// Couche de la loi de paroi (SOUFFLERIE_COUCHE_LOI=1) : ν̃ = κ u_τ y aux
+/// nœuds non pariétaux à moins de la hauteur de raccord (voir `SA3_WGSL`).
+pub fn couche_loi() -> bool {
+    std::env::var("SOUFFLERIE_COUCHE_LOI").map_or(true, |v| v != "0")
+}
+
 pub(crate) fn esoteric() -> bool {
     std::env::var("SOUFFLERIE_EP").map_or(true, |v| v != "0")
 }
@@ -367,6 +373,26 @@ const CW2 = 0.3;
 const CW3_6 = 64.0;
 const CV1_3 = 357.911;
 const NU_TILDE_MAX = 0.15;
+// Couche de la loi de paroi (`couche_loi`) : sous h, ν̃ = κ u_τ y.
+const COUCHE_LOI = false;
+fn spalding_ut(ut: f32, y: f32) -> f32 {
+  if (!(ut > 1e-12)) { return 0.0; }
+  let e_kb = 0.12873490;
+  let rey = y * ut / P.nu;
+  var up = sqrt(rey);
+  if (rey >= 30.0) { up = log(rey) / KAPPA; }
+  for (var k = 0; k < 20; k++) {
+    let ku = KAPPA * up;
+    let e = exp(ku);
+    let yy = up + e_kb * (e - 1.0 - ku - ku * ku / 2.0 - ku * ku * ku / 6.0);
+    let dy = 1.0 + e_kb * KAPPA * (e - 1.0 - ku - ku * ku / 2.0);
+    let h = up * yy - rey;
+    let next = up - h / (yy + up * dy);
+    up = select(0.5 * up, next, next > 0.0);
+    if (abs(h) < 1e-6 * rey) { break; }
+  }
+  return ut / up;
+}
 
 @group(0) @binding(9) var<storage, read> blk: array<u32>;
 @group(0) @binding(10) var<storage, read> plain: array<u32>;
@@ -483,6 +509,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let cw1 = CB1 / (KAPPA * KAPPA) + (1.0 + CB2) / SIGMA;
     let nv = (v + prod + diff - adv) / (1.0 + cw1 * fw * v / (d * d));
     out = clamp(nv, 0.0, NU_TILDE_MAX);
+    // Couche de la loi de paroi : la loi (glissement, viscosité ν_w du
+    // premier nœud) suppose sous la hauteur de raccord h la longueur de
+    // mélange, ν_t = κ u_τ y. Les nœuds non pariétaux à moins de h de la
+    // paroi la reçoivent aussi, u_τ de la loi de Spalding à leur propre
+    // distance (vitesse tangentielle, normale ∇d) ; sinon le ν̃ transporté
+    // (couche cisaillée advectée en aval d'un décollement) y brasse la
+    // quantité de mouvement jusqu'à la paroi.
+    if (COUCHE_LOI && dist[idx] < WM_H) {
+      let gn = vec3<f32>(dist[ixp] - dist[ixm], dist[iyp] - dist[iym], dist[izp] - dist[izm]);
+      let ln = length(gn);
+      if (ln > 1e-6) {
+        let n = gn / ln;
+        let dd = max(dist[idx], 0.5);
+        let ut = length(u - dot(u, n) * n);
+        out = min(NU_TILDE_MAX, KAPPA * spalding_ut(ut, dd) * dd);
+      }
+    }
     if ((P.essai & 2048u) != 0u) { out = min(out, P.essaiNu); }
   }
   nutOut[idx] = out;
@@ -5296,7 +5339,9 @@ impl Gpu3D {
             let ke = if vles { ke.replace("const VLES = false;", "const VLES = true;") } else { ke };
             pipe("ke3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(ke, bricks)), true)
         } else {
-            pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS), bricks)), true)
+            let sa = SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS);
+            let sa = if couche_loi() { sa.replace("const COUCHE_LOI = false;", "const COUCHE_LOI = true;") } else { sa };
+            pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(sa, bricks)), true)
         };
         // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
         let wcell = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -6406,6 +6451,16 @@ impl Gpu3D {
     /// Idem pour plusieurs marges sur un même champ : efforts et volume de
     /// la boîte (mailles de la veine).
     pub fn box_forces_vol(&mut self, margins: &[f64]) -> Vec<Option<([f64; 3], f64)>> {
+        // Nœuds de la grille du bilan recopiés depuis une grille plus fine
+        // (couche de paroi, sillage) : la recopie remplace l'état sans
+        // conserver la quantité de mouvement ; une face qui en traverse rend
+        // un bilan faux (`--raff-auto`, couche plus épaisse que la marge).
+        let copied: std::collections::HashSet<u32> = match self.refine.as_ref() {
+            // SOUFFLERIE_BILAN_RECOPIE=1 (diagnostic) : faces gardées où qu'elles passent.
+            Some(_) if std::env::var("SOUFFLERIE_BILAN_RECOPIE").is_ok_and(|v| v == "1") => Default::default(),
+            Some(r) => r.links.iter().zip(&r.parent).filter(|(_, &p)| p == r.full).flat_map(|(l, _)| l.restrict_list().iter().copied()).collect(),
+            None => Default::default(),
+        };
         let (g, org, s) = match self.refine.as_mut() {
             Some(r) => {
                 let k = r.full;
@@ -6418,7 +6473,9 @@ impl Gpu3D {
         let d = [g.nx, g.ny, g.nz];
         let gl = g.l as f64;
         let _ = org;
-        margins.iter().map(|&margin| {
+        // Ok, ou Err(true) : une face traverse des nœuds recopiés ; Err(false) :
+        // la boîte sort de la grille.
+        let one = |margin: f64| -> Result<([f64; 3], f64), bool> {
         let mg = margin * gl;
         let mut lo = [0usize; 3];
         let mut hi = [0usize; 3];
@@ -6426,12 +6483,28 @@ impl Gpu3D {
             let l = (mesh.lo[a] - mg).floor();
             let h = (mesh.hi[a] + mg).ceil();
             if l < 3.0 || h > (d[a] - 4) as f64 {
-                return None;
+                return Err(false);
             }
             lo[a] = l as usize;
             hi[a] = h as usize;
         }
         let at = |x: usize, y: usize, z: usize| mac[x + d[0] * (y + d[1] * z)];
+        if !copied.is_empty() {
+            for (ax, pos) in [(0, lo[0]), (0, hi[0]), (1, lo[1]), (1, hi[1]), (2, lo[2]), (2, hi[2])] {
+                let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
+                for i in lo[a1]..=hi[a1] {
+                    for j in lo[a2]..=hi[a2] {
+                        let mut p3 = [0usize; 3];
+                        p3[ax] = pos;
+                        p3[a1] = i;
+                        p3[a2] = j;
+                        if copied.contains(&((p3[0] + d[0] * (p3[1] + d[1] * p3[2])) as u32)) {
+                            return Err(true);
+                        }
+                    }
+                }
+            }
+        }
         let mut flux = [0.0f64; 3];
         for (ax, sgn, pos) in [(0, -1.0, lo[0]), (0, 1.0, hi[0]), (1, -1.0, lo[1]), (1, 1.0, hi[1]), (2, -1.0, lo[2]), (2, 1.0, hi[2])] {
             let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
@@ -6453,8 +6526,27 @@ impl Gpu3D {
             }
         }
         let vol: f64 = (0..3).map(|a| (hi[a] - lo[a]) as f64 / s).product();
-        Some((flux.map(|f| -f / (s * s)), vol))
-        }).collect()
+        Ok((flux.map(|f| -f / (s * s)), vol))
+        };
+        // Marge poussée vers l'extérieur (pas de 0,025 L) tant qu'une face
+        // traverse des nœuds recopiés ; marges croissantes et distinctes.
+        let mut prev = f64::NEG_INFINITY;
+        margins
+            .iter()
+            .map(|&m| {
+                let mut mm = m.max(prev + 0.025);
+                loop {
+                    match one(mm) {
+                        Ok(r) => {
+                            prev = mm;
+                            return Some(r);
+                        }
+                        Err(true) if mm < m + 0.5 => mm += 0.025,
+                        Err(_) => return None,
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Mailles pariétales de la grille la plus fine (diagnostic) : position

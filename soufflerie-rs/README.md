@@ -1412,6 +1412,19 @@ entière la plus fine est une boîte serrée dont les faces passent dans la
 couche de la paroi, en partie recopiée de la grille fine (même recopie
 non conservative que dans le sillage). Le bilan y reste inexploitable.
 
+**Corrigé (novembre 2026).** `Gpu3D::box_forces_vol` repousse vers
+l'extérieur (pas de 0,025 L, au plus +0,5 L) toute marge dont une face
+traverse des nœuds recopiés depuis une grille plus fine ; les marges
+restent croissantes et distinctes, le volume rendu est celui de la boîte
+utilisée. `SOUFFLERIE_BILAN_RECOPIE=1` (diagnostic) rend l'ancien bilan.
+Aile AR 4 avec couche ×4 (`banc3d ar4b`, t* = 20, moyenne 8), Cz / Cx par
+marge 0,05 / 0,1 / 0,15 / 0,2 / 0,3 L : avant 0,2909 / 0,0199 ·
+0,2907 / 0,0225 · 0,2881 / 0,0251 · 0,2880 / 0,0250 · 0,2880 / 0,0250 ;
+après 0,2881 / 0,0252 · 0,2881 / 0,0251 · 0,2881 / 0,0250 · 0,2880 /
+0,0250 · 0,2880 / 0,0250. Les bilans des cas à couches publiés plus haut
+(marges 0,1 et 0,15 extrapolées à volume nul) sous-estiment donc Cx,
+jusqu'à 20 %.
+
 ### Normales lisses et relevés multiples sur la surface
 
 Le maillage d'une maquette ne décrit qu'une surface plane par facettes ;
@@ -3345,6 +3358,46 @@ pas traversés ; les compter montait C_K de 0,124 à 0,169). Les pieds
 - *Marche* : sans effet (x_r 5,77 / 6,64 contre 5,76 / 6,79 à n = 32) :
   l'arête à 90° était déjà traitée.
 
+### Couche de la loi de paroi (défaut depuis novembre 2026)
+
+La loi de paroi (glissement de Bouzidi, viscosité ν_w = κ u_τ h du premier
+nœud) suppose sous la hauteur de raccord h = 2 mailles la longueur de
+mélange, ν_t = κ u_τ y. Seul le premier nœud la recevait : les nœuds non
+pariétaux à moins de h de la paroi gardaient le ν̃ transporté. En aval
+d'un décollement, celui de la couche cisaillée advectée y brassait la
+quantité de mouvement jusqu'à la paroi : sur la marche, le frottement
+réellement transmis (échange) valait 10 à 50 fois celui de la loi.
+Désormais ces nœuds reçoivent ν̃ = κ u_τ y, u_τ de la loi de Spalding à
+leur propre distance (vitesse tangentielle, normale ∇d), dans la passe de
+ν̃ (`SA3_WGSL`) ; aucun réglage, c'est l'hypothèse même de la loi.
+`SOUFFLERIE_COUCHE_LOI=0` rend l'ancien calcul. Spalart–Allmaras
+seulement (k-ε : à faire).
+
+| Cas | Avant | Après | Référence |
+| --- | --- | --- | --- |
+| Aile infinie 128 mailles, 4° : Cz / Cx (bilan) | 0,4635 / 0,0149 | 0,4594 / 0,0147 | Ladson 0,43–0,44 / 0,008 |
+| idem 16° | 1,738 / 0,0536 | 1,692 / 0,0458 | Ladson 1,57 ; TMR SA 1,62 / 0,025 |
+| Plaque plane (`plaque3d 64`), Cf extrados (échange / loi) | 0,00435 / 0,00406 | 0,00418 / 0,00403 | théorie 0,00389 |
+| Marche n = 16 : x_r/h (premier nœud / frottement) | 5,06 / 6,94 | 5,86 / 7,55 | 6,26 |
+| Marche : Cf 10–14 h / 16–20 h | 0,0056 / 0,0074 | 0,0044 / 0,0058 | ≈ 0,002 |
+| Marche : couche amont H / δ₉₉ | 1,72 / 2,53 h | 1,62 / 2,28 h | ≈ 1,3 / 1,5 h |
+
+Tout va dans le sens de la mesure, sans la rejoindre : à 16°, l'aile reste
+attachée, et le frottement en aval du recollement reste 2 à 3 fois trop
+fort (la loi seule en donnerait 10 fois moins : l'écart tient maintenant
+au nœud pariétal, voir « Pourquoi la soufflerie ne décolle pas »).
+
+**Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
+niveau de plus que demandait le critère β (« Raffinement de paroi par
+zones ») : 128 mailles par corde de base, couches ×16 et ×32 sur une
+demi-corde d'envergure, 53 M mailles (33,8 M pour le ×32), 1 260 M mises à
+jour par pas de la veine. Le calcul diverge (54 min), comme le ×16 à 17° :
+les couches très fines à forte incidence ne sont pas stables ; à
+instruire avant tout nouvel essai de résolution. Même divergence à deux
+jeux attendue : la propagation en place donne le même résultat sur ce
+raccord qui coupe la paroi (64 mailles, couche ×16, 4° : Cz 0,4097 /
+0,4108).
+
 ## Modèle k-ε RNG (3D)
 
 Second modèle RANS, à côté de Spalart–Allmaras (défaut) : k-ε RNG de Yakhot
@@ -4366,3 +4419,11 @@ passe à part, après le pas parent). Mémoire : populations 40 au lieu de
 72 octets par maille pariétale et 48 par nœud recopié : environ 60 octets
 par maille en tout au lieu de 100, d'où ≈ 66 M mailles au plus au lieu de
 40 M sur 4 Go.
+
+### Couche de la loi de paroi et bilan sur boîte
+
+Couche de la loi de paroi : un Newton (loi de Spalding) de plus par maille
+à moins de 2 mailles de la paroi, dans la passe de ν̃ ; passe de ν̃ d'Ahmed
+0,82–0,87 ms avec ou sans (dans le bruit). Mémoire : aucune. Bilan sur
+boîte : ensemble des nœuds recopiés de la grille du bilan, sur le
+processeur, à chaque relevé (4 octets par nœud recopié).
