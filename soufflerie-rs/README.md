@@ -3776,6 +3776,12 @@ un autre langage n'y gagneraient, seule une baisse des octets le peut
 et la collision pariétale (≈ 9 %) sont loin de la limite : c'est là
 qu'est la marge.
 
+Pondérées par leur fréquence (une grille ×2ᵏ fait 2ᵏ pas par pas de la
+veine, son raccord tire 2ᵏ⁻¹ fois), les parts du pas d'`ar4c3` (≈ 290 ms)
+sont plutôt : collision du cœur de la couche ×16 ≈ 40 %, transport de ν̃
+≈ 15 %, collision pariétale ×16 ≈ 11 %, raccord ×8 → ×16 ≈ 17 %, le reste
+au-dessous de 5 % chacun.
+
 ## Aéroacoustique : cylindre 2D, rayonnement direct et Ffowcs Williams–Hawkings
 
 Premier cas de validation acoustique. Avant cette série, le code n'avait ni
@@ -4269,3 +4275,18 @@ une vingtaine d'appels par grille (lecture d'une variable locale au fil,
 puis, dans l'interface, un verrou et une demande de rafraîchissement).
 Sans récepteur installé (ligne de commande, bancs), l'appel ne fait rien.
 Mémoire : aucune.
+
+### Raccords : moments en alternance, voisins solides précalculés, rangs sur un octet
+
+Trois changements du tirage des raccords, champ identique au bit
+(`banc3d ar4c3 --champs`, 3,07 M valeurs) : moments interpolés des
+fantômes dans deux tampons en alternance au lieu de recopier les anciens
+à chaque tirage (−48 octets écrits par fantôme) ; voisins solides de
+chaque nœud parent des pochoirs précalculés en un masque de 19 bits (au
+lieu de 19 lectures du type de maille) ; rangs des nœuds dans le groupe de
+l'interpolation sur un octet au lieu de quatre (groupes limités à 255
+nœuds au lieu de 256). Raccord ×8 → ×16 d'`ar4c3`, deux passages
+alternés : moments des nœuds 1,73 → 1,57 ms, interpolation 3,28 → 2,84 ms ;
+pas complet 51,1 → 50,0 s pour t* = 1 (−2 %). Mémoire : identique
+(tampons des moments 2 × 48 au lieu de 96 octets par fantôme ; masque :
++4 octets par nœud parent ; rangs : −3 octets par entrée).
