@@ -1184,6 +1184,20 @@ rien de l'effet propre du bord d'attaque. La mémoire n'est plus le
 verrou ; le raccord l'est (conservatif, ou boîtes qui ne coupent pas la
 maquette). `--ba` reste un essai.
 
+**Refait (novembre 2026)**, après la correction du raccord qui coupe la
+paroi (le tirage refait le pas pariétal de la grille parente), la
+propagation en place et la couche de la loi de paroi ; même cas, surface :
+
+| | `--raff 3` | `--raff 3 --ba 1` | Mesure |
+| --- | --- | --- | --- |
+| Cz | 0,512 | 0,536 | 0,499 |
+| Cx (pression + frottement) | 0,0277 (0,0216 + 0,0061) | 0,0294 (0,0229 + 0,0065) | 0,021 |
+| Cm (0,25 L) | −0,922 | −0,984 | |
+| Durée | 6,4 min | 12,3 min | |
+
+Les boîtes ×16 du bord d'attaque ne retirent plus de portance (+5 % au
+lieu de −23 %) : le raccord tient.
+
 ### Couche pariétale fine (`--bande D`)
 
 Plutôt que des boîtes, une grille deux fois plus fine sur une couche
@@ -3355,6 +3369,32 @@ pas traversés ; les compter montait C_K de 0,124 à 0,169). Les pieds
   décharge trop. La zone rétrécit avec la maille (h = 2 mailles) : il faut
   L = 136 pour juger. **Option non activée par défaut** tant que 25° n'y
   est pas validé.
+
+**Jugée à L = 136 (novembre 2026), activée par défaut.** Propagation en
+place (43 M mailles, 3,8 Go au lieu de 5,7), couche de la loi de paroi,
+16 t* dont 8 de moyenne ; « profils » : écart |ΔU|/U moyen aux points de
+Lienhart, au-dessus de la lunette / partout :
+
+| Cas | Cx surface | C_K | C_S | C_B | Profils lunette / tous | Bulle de culot |
+| --- | --- | --- | --- | --- | --- | --- |
+| 25°, sans l'option | 0,373 | 0,032 | 0,128 | 0,161 | 0,080 / 0,061 | 146 mm |
+| 25°, avec | 0,423 | 0,040 | 0,165 | 0,167 | **0,033** / **0,050** | 150 mm |
+| 25°, mesure | 0,285 | 0,016 | 0,140 | 0,089 | | |
+| 35°, sans l'option | 0,571 | 0,032 | 0,406 | 0,077 | 0,504 / 0,334 (lunette collée) | 0 |
+| 35°, avec | **0,447** | 0,043 | **0,194** | 0,161 | **0,076** / **0,083** | 242 mm |
+| 35°, mesure | 0,26 | | | | | décollée dès l'arête |
+
+L'écoulement est juste aux deux angles avec l'option (profils 2,4 et 6,6
+fois mieux suivis au-dessus de la lunette, bulle de culot à 35°), au prix
+de Cx à 25° (+13 %, surtout la lunette et les pieds, cylindres à facettes
+de 21° pris pour des arêtes : 0,035 → 0,060). Sur l'aile infinie, le
+bord de fuite (163° entre les normales) était pris aussi : Cz −17 % à 4°
+(0,459 → 0,386). L'écoulement ne franchit pas une arête dont la face aval
+regarde vers l'arrière : seules comptent désormais les arêtes de moins de
+90° (les plus vives le sont déjà par le critère par maille) ; l'aile
+retrouve alors son résultat au bit près. Défaut : option active,
+`SOUFFLERIE_ARETE_CONVEXE=0` la coupe. Reste : C_B (0,16 contre 0,09) et
+les pieds.
 - *Marche* : sans effet (x_r 5,77 / 6,64 contre 5,76 / 6,79 à n = 32) :
   l'arête à 90° était déjà traitée.
 

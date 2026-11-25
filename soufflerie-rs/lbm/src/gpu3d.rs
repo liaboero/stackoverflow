@@ -3858,7 +3858,7 @@ fn arete_env() -> (f32, bool) {
 }
 
 /// Arêtes saillantes de la maquette (coordonnées de cette grille) qui
-/// coupent la loi de paroi, si `SOUFFLERIE_ARETE_CONVEXE` donne l'angle
+/// coupent la loi de paroi (défaut ; `SOUFFLERIE_ARETE_CONVEXE` donne l'angle
 /// minimal entre les faces (degrés ; « 1 » : 20°). La loi de paroi suppose une
 /// paroi plane sous le nœud et sous le point relevé à h = `WM_H` le long de la
 /// normale. À moins de h d'une arête saillante, ce n'est plus vrai : le relevé
@@ -3869,7 +3869,11 @@ fn arete_env() -> (f32, bool) {
 /// de la géométrie des facettes d'une surface lisse (quelques degrés) ; seules
 /// comptent les arêtes que l'écoulement amont franchit.
 fn aretes_convexes(body: &Body3D) -> Option<crate::geom3d::FeatureSet> {
-    let v = std::env::var("SOUFFLERIE_ARETE_CONVEXE").ok()?;
+    // Par défaut (20°) ; SOUFFLERIE_ARETE_CONVEXE=0 : coupé.
+    let v = std::env::var("SOUFFLERIE_ARETE_CONVEXE").unwrap_or_else(|_| "1".into());
+    if v == "0" {
+        return None;
+    }
     let deg: f64 = v.parse().ok().filter(|&d: &f64| d > 1.0).unwrap_or(20.0);
     let mesh = body.mesh.as_ref()?;
     let m = crate::geom3d::Indexed::from_tris(&mesh.tris);
@@ -3882,7 +3886,13 @@ fn aretes_convexes(body: &Body3D) -> Option<crate::geom3d::FeatureSet> {
         let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         d[0].abs() < std::f64::consts::FRAC_1_SQRT_2 * l
     };
-    let edges: Vec<_> = crate::geom3d::feature_edges(&m, deg).into_iter().filter(|e| e.convex && e.angle_deg < 179.0 && traversee(e)).collect();
+    // Arêtes que l'écoulement peut franchir d'une face à l'autre : moins de
+    // 90° entre les normales (lunette d'Ahmed 25°, 35°). Au-delà, la face
+    // aval regarde vers l'arrière et l'écoulement quitte le corps (bord de
+    // fuite d'une aile, 163° : l'y rendre adhérent retirait 17 % de
+    // portance) ; les arêtes de plus de 60° sont de toute façon vives pour
+    // le critère par maille.
+    let edges: Vec<_> = crate::geom3d::feature_edges(&m, deg).into_iter().filter(|e| e.convex && e.angle_deg < 90.0 && traversee(e)).collect();
     if std::env::var("SOUFFLERIE_ARETE_LISTE").is_ok() {
         for e in &edges {
             eprintln!("arête {:.1}° : {:.1?} → {:.1?}", e.angle_deg, e.a, e.b);
