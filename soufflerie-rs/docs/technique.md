@@ -3,10 +3,27 @@
 Algorithmes et implémentation de la soufflerie 3D : organisation du code,
 calcul sur GPU, stockage, mise en place, raffinement, interface, tests.
 
-Voir aussi : [présentation](presentation.md) (usage, validation en bref) et
-[méthode scientifique](methode_scientifique.md) (équations, validation
-chiffrée). Les sections du [README](../README.md) sont citées entre
-guillemets. État du code au commit `aa75c67` (novembre 2026).
+[Présentation](presentation.md) · [Méthode scientifique](methode_scientifique.md) · **Fonctionnement technique** · [README](../README.md)
+
+> [!NOTE]
+> Les équations et la validation chiffrée sont dans la
+> [méthode scientifique](methode_scientifique.md). Les sections du
+> [README](../README.md) sont citées entre guillemets. État du code au
+> commit `aa75c67` (novembre 2026).
+
+**Sommaire**
+
+1. [Organisation](#1-organisation)
+2. [Le solveur 3D sur GPU](#2-le-solveur-3d-sur-gpu)
+3. [Stockage](#3-stockage)
+4. [Mise en place](#4-mise-en-place)
+5. [Raffinement](#5-raffinement-refine3drs)
+6. [Efforts et relevés](#6-efforts-et-relevés)
+7. [Variantes et diagnostics](#7-variantes-et-diagnostics-dans-le-solveur)
+8. [Interface egui](#8-interface-egui)
+9. [Variables d'environnement](#9-variables-denvironnement)
+10. [Tests et bancs](#10-tests-et-bancs)
+11. [Compilation](#11-compilation)
 
 ## 1. Organisation
 
@@ -27,6 +44,35 @@ soufflerie-rs/
 
 Profil `release` : `opt-level = 3`, `codegen-units = 1`, LTO léger. Les
 tests tournent aussi optimisés (`profile.test`, `opt-level = 3`).
+
+Dépendances entre les principaux modules de la soufflerie 3D :
+
+```mermaid
+flowchart LR
+  subgraph app["crate app (binaire soufflerie)"]
+    main["main.rs<br/>ligne de commande"]
+    tab["tab3d.rs<br/>onglet 3D"]
+    calc["tab3d_calc.rs<br/>fil de calcul"]
+  end
+  subgraph lbm["crate lbm"]
+    plan["raff_auto · raff_paroi<br/>plans de raffinement"]
+    gpu["gpu3d.rs<br/>Gpu3D, WGSL, passes, efforts"]
+    ref["refine3d.rs<br/>Link3, Refinement"]
+    body["bodies3d · stl · sgeo · geom3d<br/>maquettes, voxelisation"]
+    wall["surfel3d · tble · ibl3d<br/>options de paroi"]
+    prog["progress.rs"]
+  end
+  main --> plan
+  main --> gpu
+  tab --> calc
+  calc --> gpu
+  calc -. "récepteur" .-> prog
+  plan --> gpu
+  gpu --> ref
+  gpu --> body
+  gpu --> wall
+  gpu -. "étapes" .-> prog
+```
 
 ### 1.1 Crate `lbm`
 
@@ -106,6 +152,19 @@ puis, pour chaque grille fille, les **raccords** : tirage (moments des nœuds
 parents, interpolation, remplissage des fantômes), deux pas de la grille
 fille (récursivement), remplissage du second demi-pas, recopie vers la
 parente (§ 5).
+
+```mermaid
+flowchart TD
+  subgraph G["un pas de la grille k"]
+    direction LR
+    W["loi de paroi<br/>wall3d"] --> S["surfels<br/>(option)"] --> C["collision<br/>cœur"] --> CP["collision<br/>pariétale"] --> N["transport<br/>ν̃ ou k-ε"]
+  end
+  subgraph R["puis, pour chaque grille fille (chaque pas fin refait ce schéma)"]
+    direction LR
+    T["tirage : moments<br/>des nœuds parents,<br/>fantômes à t"] --> P1["pas fin 1"] --> R2["fantômes<br/>à t + ½"] --> P2["pas fin 2"] --> RC["recopie<br/>fine → parente"]
+  end
+  G --> R
+```
 
 La loi de paroi a sa propre passe parce que, fusionnée à la collision, elle
 lisait des vitesses voisines que la même passe réécrivait : les calculs
@@ -194,6 +253,8 @@ mailles en demi-précision, 20 M en simple (le corps d'Ahmed à L = 136 fait
 
 ### 3.3 Grilles creuses par blocs
 
+![Couche creuse : seuls les blocs de 8³ mailles qui touchent la couche d'épaisseur D sont gardés](img/blocs_creux.svg)
+
 Les couches pariétales sont rangées par blocs de 8³ mailles (`SparseMap`,
 `SB = 8`) : seuls les blocs qui contiennent une maille active ou une
 fantôme à remplir sont gardés. Le rang d'une maille est `slot · 512 +
@@ -214,6 +275,19 @@ paroi par zones »).
 `Gpu3D::with_plan(body, nu, u, fp16, turbulence, plan)` construit la veine
 puis chaque grille du plan (`RefinePlan` : boîtes, couches `LayerSpec`,
 grilles des bords, zones).
+
+```mermaid
+flowchart LR
+  A["maquette<br/>STL, .sgeo, forme"] --> B["nettoyage,<br/>arêtes vives,<br/>lissage (option)"]
+  B --> V["veine :<br/>voxelisation, liens q,<br/>normales, distances"]
+  V --> L["grille ou couche suivante :<br/>blocs, types, liens,<br/>fantômes"]
+  L --> U["tampons du GPU,<br/>compilation des shaders"]
+  U --> I["état initial,<br/>raccord à la parente"]
+  I -- "grille suivante" --> L
+  I --> R["prêt"]
+```
+
+*Chaque flèche est une étape signalée à `lbm::progress` (§ 4.3).*
 
 ### 4.1 Géométrie
 
@@ -277,6 +351,8 @@ au même niveau sont possibles (grilles des bords). Chaque grille ne compte,
 pour les efforts, que dans son domaine propre (`core`), sans double compte.
 
 ### 5.2 Raccord `Link3`
+
+![Raccord entre une grille et sa grille fine : fantômes remplis depuis la parente, recopie sous la zone raffinée](img/raffinement.svg)
 
 Un `Link3` relie une grille fine à sa parente :
 
@@ -347,6 +423,24 @@ boîtes reprises de `Gpu3D::with_refinement_edges`, test
 `estimation_des_grilles` ; couches estimées par la surface mouillée à
 ±25 %), état « Réglages modifiés » (Appliquer / Annuler), vue 3D et coupe,
 résultats, exports CSV et PNG, raccourcis.
+
+```mermaid
+sequenceDiagram
+  participant UI as Interface (tab3d.rs)
+  participant ET as État partagé
+  participant FC as Fil de calcul (tab3d_calc.rs)
+  participant GPU
+  UI->>ET: réglages, Lancer
+  FC->>ET: lit les réglages
+  FC->>GPU: mise en place (Gpu3D::with_plan)
+  FC-->>ET: étapes de lbm::progress
+  loop lots de 40 à 70 ms
+    FC->>GPU: pas de temps
+    FC->>GPU: relevés (efforts, boîtes, surface)
+    FC-->>ET: coefficients, t*, image (≈ 8 par seconde)
+  end
+  UI->>ET: lit le dernier état publié
+```
 
 **`tab3d_calc.rs`** : le fil de calcul. Il construit la veine (avec le
 récepteur de `lbm::progress`), avance par lots dont la durée est ajustée
@@ -432,8 +526,12 @@ références (`banc/ref`), `banc/ab.sh` compare deux jeux de shaders,
 Règle de travail : une optimisation doit rendre un champ identique au bit,
 ou des efforts moyens dans la dispersion de la version précédente. Le coût
 de chaque modification est consigné dans le README (« Coût de calcul des
-modifications »). La GTX 1070 étant partagée, vérifier `nvidia-smi` avant
-toute mesure.
+modifications »).
+
+> [!WARNING]
+> La GTX 1070 de développement est partagée : vérifier `nvidia-smi` avant
+> toute mesure ou tout calcul, et ne jamais arrêter les calculs des autres.
+> Les durées mesurées sur un GPU chargé varient de ±30 %.
 
 ## 11. Compilation
 
@@ -456,3 +554,7 @@ pour éviter de recompiler les dépendances.
 
 **Linux** : l'interface demande `libxkbcommon-x11` et un pilote Vulkan ou
 OpenGL.
+
+---
+
+[← Présentation](presentation.md) · [← Méthode scientifique](methode_scientifique.md) · **Fonctionnement technique**

@@ -1,17 +1,21 @@
 # Soufflerie numérique `soufflerie-rs` — présentation
 
-Documentation en trois parties :
+**Présentation** · [Méthode scientifique](methode_scientifique.md) · [Fonctionnement technique](technique.md) · [README](../README.md)
 
-- **Présentation** (ce document) : ce que fait l'outil, comment s'en servir,
-  ce qui est validé.
-- [Méthode scientifique](methode_scientifique.md) : équations, modèles,
-  résultats de validation chiffrés, forces et limites.
-- [Fonctionnement technique](technique.md) : organisation du code, GPU,
-  stockage, mise en place, raffinement, tests et compilation.
+| Document | Pour qui | Contenu |
+| --- | --- | --- |
+| **Présentation** (ce document) | utilisateur | ce que fait l'outil, comment s'en servir, ce qui est validé |
+| [Méthode scientifique](methode_scientifique.md) | numéricien, aérodynamicien | équations, modèles, validation chiffrée, forces et limites |
+| [Fonctionnement technique](technique.md) | développeur | code, GPU, stockage, mise en place, raffinement, tests, compilation |
 
-Le [README](../README.md) reste le journal détaillé des essais : chaque
-chiffre de cette documentation y est repris d'une section précise, que
-l'on cite entre guillemets (« Corps d'Ahmed », « Décrochage »…).
+> [!NOTE]
+> Le [README](../README.md) reste le journal détaillé des essais. Chaque
+> chiffre de cette documentation y est repris d'une section précise, citée
+> entre guillemets (« Corps d'Ahmed », « Décrochage »…).
+
+**Sommaire** — [1. Ce que fait l'outil](#1-ce-que-fait-loutil) ·
+[2. Interface 3D](#2-interface-3d) · [3. Ligne de commande](#3-ligne-de-commande) ·
+[4. Ce qui est validé](#4-ce-qui-est-validé) · [5. Matériel](#5-matériel)
 
 ## 1. Ce que fait l'outil
 
@@ -46,9 +50,21 @@ du navigateur.
 
 Lancement : `cargo run --release -- --tab 3d`, ou directement avec une
 maquette (`--stl fichier.stl`). L'onglet « Soufflerie 3D » suit le
-déroulement d'un essai : maquette → réglages → calcul → résultats.
+déroulement d'un essai :
+
+```mermaid
+flowchart LR
+  M["1 · Maquette<br/>STL, .sgeo ou forme simple<br/>mise en place, blocage"] --> R["2 · Réglages<br/>écoulement, paroi,<br/>maillage et durée"]
+  R --> E["Coût estimé<br/>mailles, mémoire,<br/>durée"]
+  E --> C["3 · Calcul<br/>mise en place puis pas de temps<br/>progression, temps restant"]
+  C --> S["4 · Résultats<br/>Cx, Cz, Cy, Cm<br/>envergure, exports"]
+  S -. "réglage modifié :<br/>Appliquer" .-> R
+```
 
 ![Soufflerie 3D : aile AR 4 à 4°, Re = 10⁶, préréglage Précis](../capture-3d.png)
+
+*Onglet « Soufflerie 3D » : réglages à gauche, vue au centre, résultats à
+droite, convergence en bas.*
 
 **Maquette.** « Ouvrir… » (Ctrl+O) ou glisser un `.stl` ou un `.sgeo` sur la
 fenêtre. Formes analytiques aussi : sphère, cube, cylindre, aile NACA 0012
@@ -104,6 +120,12 @@ de la maquette — et leur écart ; répartition de la portance en envergure ;
 comparaison à des valeurs saisies (mesure, VSPAERO) ; efforts en newtons à
 l'échelle physique ; exports CSV (Ctrl+E) et PNG (Ctrl+S). En bas, la
 convergence de Cx, Cz et Cm avec la fenêtre de moyenne.
+
+![Les trois mesures des efforts : échange aux liens de paroi, intégration sur la surface, bilan sur boîtes](img/efforts.svg)
+
+*Les trois mesures des efforts. Le bilan sur boîtes, qui ne dépend pas du
+traitement de la paroi, sert d'arbitre ; détails dans la
+[méthode](methode_scientifique.md#7-mesure-des-efforts).*
 
 Raccourcis : F1. Captures et essais sans souris par variables
 d'environnement (`SOUFFLERIE_CAPTURE`, `SOUFFLERIE_TOUCHES`, voir
@@ -193,18 +215,28 @@ recalage) :
 | Corps d'Ahmed 25° (L = 136) | Cx boîte 0,340 contre 0,285 (+19 %) | culot trop aspirant |
 | Corps d'Ahmed 35° | lunette collée, Cx 0,61 contre 0,26 ; une option corrige le régime (Cx 0,48 à L = 96), non validée | faux par défaut |
 
-**À retenir.**
+![Portance du NACA 0012 jusqu'au décrochage : la soufflerie suit Ladson et TMR jusqu'à 14°, puis plafonne sans décrocher](img/decrochage.svg)
 
-- La soufflerie 3D est fiable pour la portance en écoulement attaché, à
-  quelques pour cent à 10 % des références, et pour les tendances.
-- La traînée reste 1,3 à 3 fois trop forte selon les cas : une perte
-  numérique près de la paroi, qui décroît en affinant.
-- Les écoulements décollés sur paroi lisse (décrochage de bord de fuite,
-  lunette d'Ahmed à 35°) ne sont pas captés. Le décollement aux arêtes
-  vives à 90° l'est (marche).
-- Plusieurs options (surfels, TBLE, k-ε RNG, VLES, arêtes convexes) sont
-  disponibles mais désactivées par défaut : elles n'ont pas passé la
-  validation.
+*Le défaut principal en une figure : jusqu'à 14°, la portance suit la
+mesure de Ladson et le calcul de référence de la NASA (TMR) ; au-delà, elle
+plafonne au lieu de chuter à 18°.*
+
+> [!TIP]
+> **Fiable** : la portance en écoulement attaché, à quelques pour cent à
+> 10 % des références, et les tendances. Le décollement aux arêtes vives à
+> 90° est capté (marche).
+
+> [!WARNING]
+> **À utiliser avec prudence**
+> - La traînée reste 1,3 à 3 fois trop forte selon les cas : une perte
+>   numérique près de la paroi, qui décroît en affinant.
+> - Les écoulements décollés sur paroi lisse (décrochage de bord de fuite,
+>   lunette d'Ahmed à 35°) ne sont pas captés.
+
+> [!NOTE]
+> Plusieurs options (surfels, TBLE, k-ε RNG, VLES, arêtes convexes) sont
+> disponibles mais désactivées par défaut : elles n'ont pas passé la
+> validation.
 
 ## 5. Matériel
 
@@ -217,3 +249,7 @@ mises à jour de maille par seconde selon le cas.
 
 Installation, compilation sous Windows (chaîne GNU) et organisation du code :
 [technique](technique.md).
+
+---
+
+**Présentation** · [Méthode scientifique →](methode_scientifique.md) · [Fonctionnement technique →](technique.md)

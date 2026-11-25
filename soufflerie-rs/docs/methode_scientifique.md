@@ -3,10 +3,27 @@
 *Boltzmann sur réseau D3Q19 sur GPU, modèles de turbulence, lois de paroi
 et raffinement imbriqué : formulation, validation et limites.*
 
-Voir aussi : [présentation](presentation.md) (usage) et
-[fonctionnement technique](technique.md) (implémentation). Les chiffres
-viennent du [README](../README.md), dont les sections sont citées entre
-guillemets ; état du code au commit `aa75c67` (novembre 2026).
+[Présentation](presentation.md) · **Méthode scientifique** · [Fonctionnement technique](technique.md) · [README](../README.md)
+
+> [!NOTE]
+> Les chiffres viennent du [README](../README.md), dont les sections sont
+> citées entre guillemets ; état du code au commit `aa75c67` (novembre
+> 2026). L'implémentation est décrite dans le
+> [fonctionnement technique](technique.md).
+
+**Sommaire**
+
+1. [Équation de Boltzmann sur réseau](#1-équation-de-boltzmann-sur-réseau)
+2. [Modèles de turbulence](#2-modèles-de-turbulence)
+3. [Conditions de paroi](#3-conditions-de-paroi)
+4. [Raffinement local](#4-raffinement-local)
+5. [Veine et conditions aux limites](#5-veine-et-conditions-aux-limites)
+6. [Transition et décambrage visqueux](#6-transition-et-décambrage-visqueux)
+7. [Mesure des efforts](#7-mesure-des-efforts)
+8. [Mise en place de la géométrie](#8-mise-en-place-de-la-géométrie)
+9. [Validation](#9-validation)
+10. [Forces et limites](#10-forces-et-limites)
+11. [Références](#références)
 
 ## Résumé
 
@@ -25,6 +42,18 @@ mesures ; la traînée reste 1,3 à 3 fois trop forte, et le décollement sur
 paroi lisse n'est pas capté. Aucun facteur de recalage n'est employé : les
 constantes des modèles sont celles de leurs publications.
 
+Enchaînement des modèles au cours d'un pas de temps d'une grille :
+
+```mermaid
+flowchart LR
+  A["populations f_i<br/>pas n"] --> W["loi de paroi<br/>u_τ, glissement u_w, ν_w<br/>(§ 3.2)"]
+  W --> C["propagation + collision<br/>régularisée récursive<br/>τ = ½ + 3(ν + ν_t + ν_sgs)<br/>(§ 1.2, 1.3)"]
+  C --> B["liens coupés :<br/>Bouzidi en paroi mobile,<br/>échange de quantité de mouvement<br/>(§ 3.1, 7)"]
+  B --> T["transport de ν̃<br/>ou de k, ε<br/>(§ 2)"]
+  T --> R["grilles filles :<br/>2 sous-pas, raccords<br/>(§ 4)"]
+  R --> N["populations f_i<br/>pas n + 1"]
+```
+
 ## 1. Équation de Boltzmann sur réseau
 
 ### 1.1 Réseau et unités
@@ -42,6 +71,8 @@ $$\tau = \tfrac12 + \nu / c_s^2 = \tfrac12 + 3\nu .$$
 Aux Reynolds visés (10⁵ à 10⁷), $\tau - \tfrac12$ vaut 10⁻⁵ à 10⁻³ : le
 schéma n'est stable que par la collision régularisée, la viscosité de
 sous-maille et le modèle de turbulence.
+
+![Les 19 vitesses du réseau D3Q19 : repos, 6 faces, 12 arêtes, et leurs poids](img/d3q19.svg)
 
 Un pas comprend la propagation (« pull » : chaque maille tire les
 populations de ses voisines) et la collision, fusionnées :
@@ -238,6 +269,9 @@ $$f_{\bar\imath}(\mathbf x, t+1) =
 \end{cases}$$
 
 avec repli sur le rebond simple quand le voisin amont est lui-même coupé.
+
+![Rebond de Bouzidi : interpolation avant le rebond si q < ½, après si q ≥ ½](img/bouzidi.svg)
+
 Un lien qui coupe la surface entre deux mailles fluides reçoit aussi sa
 fraction : une aile, une dérive ou une plaque plus minces qu'une maille
 restent des parois (plaque de 0,08 maille : Cx 1,829 contre 1,831 pour une
@@ -291,6 +325,26 @@ dans une passe propre (`wall3d`) sur le champ du pas précédent :
    60° l'une de l'autre (bord de fuite, saumon plat, arête de marche), la
    loi ne s'applique pas : paroi adhérente, avec la viscosité du modèle et
    de la sous-maille. Tout seuil entre 30° et 80° classe les mêmes mailles.
+
+![Couche pariétale : profil linéaire entre la paroi et h = 2 mailles, glissement u_s à la paroi, relevé u_h à h](img/couche_parietale.svg)
+
+*La couche $[0, h]$ remplace la couche limite réelle, trop mince pour la
+maille : le premier nœud ne voit qu'un profil linéaire et un glissement de
+paroi qui transmettent la contrainte $\tau_p$ de la loi.*
+
+Traitement retenu pour chaque maille pariétale (défaut en trait plein,
+options en pointillé) :
+
+```mermaid
+flowchart TD
+  P["maille pariétale"] --> E{"liens vers des faces<br/>à plus de 60° ?"}
+  E -- "oui : arête vive" --> A["paroi adhérente<br/>Bouzidi, u_w = 0<br/>ν du modèle + sous-maille"]
+  E -- non --> X{"à moins de h d'une arête<br/>convexe franchie ?"}
+  X -. "oui, avec<br/>SOUFFLERIE_ARETE_CONVEXE" .-> A
+  X -- non --> S["loi de Spalding à h = 2<br/>glissement relaxé, ν_w = κ u_τ h"]
+  S -. "SOUFFLERIE_TBLE" .-> TB["τ_p de la TBLE<br/>au lieu de Spalding"]
+  P -. "SOUFFLERIE_SURFELS" .-> SU["paroi volumique<br/>par surfels (§ 3.4)"]
+```
 
 La hauteur de 2 mailles s'est imposée contre la première version (relevé
 au nœud) : le glissement $u_n - u_\tau^2 y_n/(\nu + \kappa u_\tau y_n)$ vaut
@@ -402,6 +456,13 @@ Ordre d'un pas : grille parente (loi de paroi, collision, $\tilde\nu$), puis
 pour chaque grille fille tirage, deux pas fins (récursivement), recopie.
 Les efforts viennent de la grille la plus fine qui entoure chaque
 élément de surface.
+
+![Grilles imbriquées autour d'un profil et raccord entre une grille et sa grille fine](img/raffinement.svg)
+
+*À gauche, les régions de chaque niveau ; à droite, le raccord : les
+fantômes (orange) de la grille fine sont remplis depuis la parente, et les
+nœuds parents sous la zone raffinée (aqua) reçoivent l'état de la grille
+fine.*
 
 Emprises par défaut des boîtes (`--raff 1..3`), en longueurs de
 référence (amont, aval, côtés) : 0,6 / 1,5 / 0,6 ; 0,35 / 0,7 / 0,4 ;
@@ -518,6 +579,8 @@ mailles, d'épaisseur de déplacement 4 fois celle d'une couche limite réelle
 
 Trois mesures indépendantes, affichées ensemble par `run3d` et l'interface :
 
+![Les trois mesures des efforts : échange aux liens de paroi, intégration sur la surface, bilan sur boîtes](img/efforts.svg)
+
 1. **Échange de quantité de mouvement** aux liens de paroi, accumulé sur le
    GPU, avec le terme de paroi mobile :
 
@@ -576,6 +639,8 @@ Traînée selon Re (50 t*, moyenne sur 20 ; Schiller–Naumann et Clift) :
 | 100 | 1,168 | 1,145 | 1,094 | +4,7 % |
 | 300 | 0,739 | 0,695 | 0,691 | +0,5 % |
 | 1000 | 0,580 | 0,533 | 0,466 | +14 % |
+
+![Traînée de la sphère selon Re : soufflerie à D = 12 et 16 mailles contre Schiller–Naumann et Clift](img/sphere_cx.svg)
 
 L'écart diminue en affinant. Aux faibles Re, il vient du confinement (veine
 de 6 D) ; au-delà de Re = 300, la couche limite n'a plus que 2 à 3 mailles à
@@ -654,6 +719,8 @@ Ladson : Cz max 1,61 à 1,63 à 17,1–17,2°, chute à 1,0–1,2 à 18°. TMR
 | 17° | 1,6466 | 1,641 ± 0,014 | 1,790 ± 0,020 | 1,61–1,63 | 1,67 |
 | 18° | — (Newton diverge > 17,7°) | 1,706 ± 0,031 | 1,714 ± 0,016 | 1,0–1,2 | 1,69 |
 | 19° | — | 1,693 ± 0,018 | 1,765 ± 0,009 | — | 1,60 |
+
+![Portance du NACA 0012 jusqu'au décrochage : soufflerie 3D à 64 et 128 mailles par corde, TMR et Ladson](img/decrochage.svg)
 
 La 2D suit TMR/SA à −1,5 à +0,5 % jusqu'à 17,7°. La soufflerie 3D ne
 décroche pas : Cz plafonne à 1,7–1,8, aucun point de décollement n'est
@@ -754,6 +821,10 @@ n'est pas jugé à L = 136.
 
 ## 10. Forces et limites
 
+> [!IMPORTANT]
+> Tous les écarts ci-dessous sont obtenus sans facteur de recalage ; les
+> options qui ne passent pas la validation restent désactivées par défaut.
+
 ### Forces
 
 - Portance en écoulement attaché à quelques pour cent à 10 % des mesures,
@@ -851,3 +922,7 @@ Références citées dans le code ou le README.
 - Spalart P.R., Rumsey C.L. (2007) — termes d'entretien.
 - Spalding D.B. (1961) — loi de paroi.
 - Yakhot V., Orszag S.A. (1986) ; Yakhot V. et al. (1992) — k-ε RNG.
+
+---
+
+[← Présentation](presentation.md) · **Méthode scientifique** · [Fonctionnement technique →](technique.md)
