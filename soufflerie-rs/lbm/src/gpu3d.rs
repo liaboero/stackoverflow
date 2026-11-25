@@ -3858,8 +3858,8 @@ fn arete_env() -> (f32, bool) {
 }
 
 /// Arêtes saillantes de la maquette (coordonnées de cette grille) qui
-/// coupent la loi de paroi (défaut ; `SOUFFLERIE_ARETE_CONVEXE` donne l'angle
-/// minimal entre les faces (degrés ; « 1 » : 20°). La loi de paroi suppose une
+/// coupent la loi de paroi. Par défaut ; `SOUFFLERIE_ARETE_CONVEXE` donne
+/// l'angle minimal entre les faces (degrés ; « 1 » : 20° ; « 0 » : coupé). La loi de paroi suppose une
 /// paroi plane sous le nœud et sous le point relevé à h = `WM_H` le long de la
 /// normale. À moins de h d'une arête saillante, ce n'est plus vrai : le relevé
 /// voit l'écoulement de l'autre face (le toit, au-dessus de la lunette), et
@@ -3868,6 +3868,9 @@ fn arete_env() -> (f32, bool) {
 /// faces) : adhérente, sans loi de paroi. L'angle sépare seulement les arêtes
 /// de la géométrie des facettes d'une surface lisse (quelques degrés) ; seules
 /// comptent les arêtes que l'écoulement amont franchit.
+/// Hauteur de raccord de la loi de paroi (mailles), comme `WM_H` des shaders.
+const WM_H_CELLS: f64 = 2.0;
+
 fn aretes_convexes(body: &Body3D) -> Option<crate::geom3d::FeatureSet> {
     // Par défaut (20°) ; SOUFFLERIE_ARETE_CONVEXE=0 : coupé.
     let v = std::env::var("SOUFFLERIE_ARETE_CONVEXE").unwrap_or_else(|_| "1".into());
@@ -3892,7 +3895,44 @@ fn aretes_convexes(body: &Body3D) -> Option<crate::geom3d::FeatureSet> {
     // fuite d'une aile, 163° : l'y rendre adhérent retirait 17 % de
     // portance) ; les arêtes de plus de 60° sont de toute façon vives pour
     // le critère par maille.
-    let edges: Vec<_> = crate::geom3d::feature_edges(&m, deg).into_iter().filter(|e| e.convex && e.angle_deg < 90.0 && traversee(e)).collect();
+    let cand: Vec<_> = crate::geom3d::feature_edges(&m, deg).into_iter().filter(|e| e.convex && e.angle_deg < 90.0 && traversee(e)).collect();
+    // Arête vive à l'échelle de la loi : le coude est concentré sur elle.
+    // Les arêtes parallèles à moins de h (`WM_H`) de part et d'autre ne
+    // doivent pas tourner autant qu'elle en tout ; sinon c'est une surface
+    // courbe à facettes (cylindre des pieds d'Ahmed, facettes de 21°), que
+    // la loi de paroi traite bien.
+    let all: Vec<_> = crate::geom3d::feature_edges(&m, 2.0).into_iter().filter(|e| e.convex).collect();
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let h = WM_H_CELLS;
+    let edges: Vec<_> = cand
+        .into_iter()
+        .filter(|e| {
+            let d = sub(e.b, e.a);
+            let ld = dot(d, d).sqrt().max(1e-12);
+            let u = d.map(|v| v / ld);
+            let mid = [0.5 * (e.a[0] + e.b[0]), 0.5 * (e.a[1] + e.b[1]), 0.5 * (e.a[2] + e.b[2])];
+            let around: f64 = all
+                .iter()
+                .filter(|o| {
+                    let od = sub(o.b, o.a);
+                    let lo = dot(od, od).sqrt().max(1e-12);
+                    if dot(od, u).abs() < 0.8 * lo {
+                        return false;
+                    }
+                    // Distance du milieu de l'autre arête à la droite de celle-ci,
+                    // et écart le long d'elle.
+                    let om = [0.5 * (o.a[0] + o.b[0]), 0.5 * (o.a[1] + o.b[1]), 0.5 * (o.a[2] + o.b[2])];
+                    let r = sub(om, mid);
+                    let along = dot(r, u);
+                    let perp = (dot(r, r) - along * along).max(0.0).sqrt();
+                    perp > 0.05 && perp <= h && along.abs() <= 0.5 * ld + h
+                })
+                .map(|o| o.angle_deg)
+                .sum();
+            e.angle_deg >= around
+        })
+        .collect();
     if std::env::var("SOUFFLERIE_ARETE_LISTE").is_ok() {
         for e in &edges {
             eprintln!("arête {:.1}° : {:.1?} → {:.1?}", e.angle_deg, e.a, e.b);

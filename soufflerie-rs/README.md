@@ -3393,8 +3393,23 @@ bord de fuite (163° entre les normales) était pris aussi : Cz −17 % à 4°
 regarde vers l'arrière : seules comptent désormais les arêtes de moins de
 90° (les plus vives le sont déjà par le critère par maille) ; l'aile
 retrouve alors son résultat au bit près. Défaut : option active,
-`SOUFFLERIE_ARETE_CONVEXE=0` la coupe. Reste : C_B (0,16 contre 0,09) et
-les pieds.
+`SOUFFLERIE_ARETE_CONVEXE=0` la coupe.
+
+*Arête vive à l'échelle de la loi.* Les pieds (cylindres de 30 mm à
+facettes de 21°) passaient aussi pour des arêtes. Une arête n'est retenue
+que si son coude est concentré sur elle : les arêtes parallèles à moins de
+h (`WM_H`) de part et d'autre tournent moins, en tout, qu'elle. Une
+surface courbe à facettes répartit son tournant sur plusieurs arêtes à
+moins de h, que la loi de paroi traite bien. Restent sur Ahmed les arêtes
+toit–lunette et lunette–culot (43 segments chacune) ; à L = 136 :
+
+| Cas | Cx surface | C_K | C_S | C_B | Pieds | Profils lunette / tous | Bulle de culot |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 25° | 0,387 | 0,029 | 0,157 | 0,149 | 0,036 | 0,038 / 0,059 | 169 mm |
+| 35° | 0,402 | 0,031 | 0,168 | 0,153 | 0,035 | 0,063 / 0,058 | 276 mm |
+
+Reste à 25° comme à 35° : le culot (C_B 0,15 contre 0,09 mesuré) et
+l'avant (C_K 0,03 contre 0,016).
 - *Marche* : sans effet (x_r 5,77 / 6,64 contre 5,76 / 6,79 à n = 32) :
   l'arête à 90° était déjà traitée.
 
