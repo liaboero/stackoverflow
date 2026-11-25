@@ -3749,6 +3749,27 @@ raccords) ; blocs des couches munis d'une marge (voisins sans table) ;
 listes de liens compactées pour les mailles pariétales (144 octets de
 fractions et de normales lus par maille, 5 liens en moyenne).
 
+**Efficacité par passe (novembre 2026).** Bande passante atteignable sur
+la GTX 1070 (exemple `bande_passante` : copie de 256 Mo par un shader) :
+200 Go/s en lecture et écriture, 205 Go/s en lecture seule, soit 78 % des
+256 Go/s annoncés ; c'est la référence. Profil `banc3d ar4c3 --profil 1`
+(GPU libre, 30 lancements) et `ahmed` :
+
+| passe | mailles | ms | octets par maille (estimés) | débit | part de 200 Go/s |
+| --- | --- | --- | --- | --- | --- |
+| collision, couche ×16 | 15,5 M | 7,25 | ≈ 96 (populations 2 × 38, vitesses 16, ν̃ 4) | 206 Go/s | ≈ 100 % |
+| collision, veine d'Ahmed | 4,48 M | 2,61 | ≈ 96 | 165 Go/s | 82 % |
+| transport de ν̃, couche ×16 | 15,5 M | 2,71 | ≈ 32 | 183 Go/s | 92 % |
+| collision pariétale, couche ×16 | 0,61 M | 1,96 | ≈ 250 (fractions et normales 144) | 78 Go/s | 39 % |
+| raccords (4), toutes passes | 2,2 M fantômes | 10,4 | — | 190 à 770 M/s | faible |
+
+Sur `ar4c3` (30,2 ms par pas, somme des passes), les collisions et le
+transport de ν̃ (≈ 60 % du temps) sont à la bande passante : ni CUDA ni
+un autre langage n'y gagneraient, seule une baisse des octets le peut
+(vitesses en demi-précision : −8 octets, ≈ −8 %). Les raccords (≈ 34 %)
+et la collision pariétale (≈ 9 %) sont loin de la limite : c'est là
+qu'est la marge.
+
 ## Aéroacoustique : cylindre 2D, rayonnement direct et Ffowcs Williams–Hawkings
 
 Premier cas de validation acoustique. Avant cette série, le code n'avait ni
