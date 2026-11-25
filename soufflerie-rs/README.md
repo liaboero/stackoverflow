@@ -5,6 +5,12 @@ soufflerie numérique 2D Lattice Boltzmann (D2Q9), aile finie et soufflerie
 3D (D3Q19 sur GPU), en Rust, pour ordinateur (Linux, Windows, macOS).
 Interface graphique et ligne de commande.
 
+**Documentation** : [présentation](docs/presentation.md) (usage, validations
+en bref), [méthode scientifique](docs/methode_scientifique.md) (équations,
+validation chiffrée, forces et limites), [fonctionnement
+technique](docs/technique.md) (code, GPU, stockage, raffinement, tests). Ce
+README reste le journal détaillé des essais.
+
 ![Interface : NACA 2412 à 6°, Re = 1000, fronts de traceurs](capture.png)
 
 ## Pourquoi une version native ?
