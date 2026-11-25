@@ -15,7 +15,7 @@ README (section du sujet, et « Coût de calcul des modifications »).
 | 5 | Surfels : perte à l'arrêt et au bord d'attaque, voxels du bord de fuite non découpés | à faire |
 | 6 | `--raff-auto` : bilan faux | à faire |
 | 7 | Bord d'attaque en tronçons (TR-1208) : la mémoire tient, le raccord non | à faire |
-| 8 | Branches de sauvegarde `claude/bord-de-fuite-dcd548` (diagnostics te3d, `--decalage-z`) et `claude/valid-decrochage-0f9767` (journaux) : exploiter ou clore | à faire |
+| 8 | Branches de sauvegarde `claude/bord-de-fuite-dcd548` (diagnostics te3d, `--decalage-z`) et `claude/valid-decrochage-0f9767` (journaux) : exploiter ou clore | fait : `te3d` et `run3d --decalage-z` repris ; essais de paroi 16384/32768/65536 écartés (bit 16384 réattribué depuis, question du bord de fuite close par son calage) ; journaux bruts du décrochage rangés dans `validation/decrochage/journaux` (résultats déjà dans le README). Les deux branches peuvent être supprimées |
 
 ## Vitesse
 

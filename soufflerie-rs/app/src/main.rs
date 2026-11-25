@@ -547,7 +547,7 @@ fn mesh_input(a: &Args, path: &str) -> (Vec<lbm::stl::Tri>, lbm::stl::MeshSetup)
         ref_area: num("sref", g.ref_area),
         margin: a.get("marge", 1.0f64),
         ground: num("sol", g.ground),
-        offset: [a.get("decalage", 0.0f64), 0.0, 0.0],
+        offset: [a.get("decalage", 0.0f64), 0.0, a.get("decalage-z", 0.0f64)],
         smooth: a.get("lisser", 0u8) > 0,
         mesh_edges: match a.get("aretes", "mailles".to_string()).as_str() {
             "maillage" => true,
