@@ -1,0 +1,12 @@
+{
+  "osc_weight": 0.8283528153747477,
+  "osc_min_steps": 11,
+  "trend_weight": 0.12139318117297401,
+  "front_weight": 0.9215591594231076,
+  "front_threshold": 22.810656113675932,
+  "front_prior_T": 30.67887863920098,
+  "lag_frac": 0.5536647806265852,
+  "horizon": 5,
+  "beam": 16,
+  "train_score": 73.68942859288582
+}
