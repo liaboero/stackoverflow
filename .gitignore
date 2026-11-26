@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 sailing/agent/train_stdout.txt
+sailing/agent/train_log.jsonl
+sailing/agent/params.json
+sailing/agent/results.json
