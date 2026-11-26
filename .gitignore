@@ -4,3 +4,5 @@ sailing/agent/train_stdout.txt
 sailing/agent/train_log.jsonl
 sailing/agent/params.json
 sailing/agent/results.json
+sailing/alphastar/*.pt
+sailing/alphastar/*_log.txt
