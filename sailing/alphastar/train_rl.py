@@ -60,8 +60,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--iters", type=int, default=40)
     ap.add_argument("--episodes", type=int, default=64)
-    ap.add_argument("--kl", type=float, default=0.05)
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--kl", type=float, default=0.5)
+    ap.add_argument("--lr", type=float, default=3e-5)
+    ap.add_argument("--value-warmup", type=int, default=4, help="iterations that only train the value head")
     a = ap.parse_args()
     torch.manual_seed(0)
     torch.set_num_threads(os.cpu_count())
@@ -86,7 +87,8 @@ def main():
             R = torch.from_numpy(np.concatenate([r[4] for r in res])) / 100.0
             scores = [r[5] for r in res]
             net.train()
-            for epoch in range(2):
+            warm = it < a.value_warmup   # the value head was not trained by imitation: learn it first
+            for epoch in range(4 if warm else 2):
                 perm = torch.randperm(len(A))
                 for i in range(0, len(A), 512):
                     idx = perm[i:i + 512]
@@ -99,7 +101,7 @@ def main():
                     with torch.no_grad():
                         ref_logits, _ = ref(G[idx], V[idx], S[idx])
                     kl = (logp.exp() * (logp - F.log_softmax(ref_logits, 1))).sum(1).mean()
-                    loss = pg + vloss + a.kl * kl
+                    loss = vloss if warm else pg + vloss + a.kl * kl
                     opt.zero_grad(); loss.backward()
                     torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
                     opt.step()
