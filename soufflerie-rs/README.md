@@ -3512,13 +3512,34 @@ n'est pas plus juste ; l'accord avec Ladson à 0,05 (16° : 1,551) vient
 d'une couche limite épaissie qui compense autre chose. La vitesse du
 réseau reste 0,1.
 
-Essai de correction écarté : moments impairs d'ordre 3 relaxés à paramètre
-magique fixe (TRT, τ⁻ = ½ + Λ/(τ⁺ − ½), partie hors équilibre mesurée au
-lieu de la régularisation récursive ; sur D3Q19 les paires xxy/yzz, xyy/xzz,
-xxz/yyz ne sont pas orthogonales, coefficients (4 m₁ + 2 m₂)/3). Juste à
-τ = 0,8 (onde de cisaillement : viscosité à 0,1 % près), mais à τ⁺ → ½ les
-moments impairs ne sont presque plus amortis : plaque instable ou bruitée
-pour Λ = 1/4, 1/12, 0,02 et 0,005 à toutes les vitesses.
+Réserve sur ce mécanisme : en cisaillement stationnaire à contrainte
+constante, le bilan exact des liens donne Π_neq = τ τ_p/(τ − ½) au nœud et
+Δu = −τ_p moy(1/ν) entre nœuds (trapèzes sur 1/ν), indépendant de U. Le
+terme en 1/U ne vient donc pas de ce cisaillement seul (convection,
+instationnarité ou moments d'ordre 3) ; un contre-terme de flux par
+différences finies n'aurait rien de juste à retirer et n'a pas été fait.
+
+Essai de correction : moments d'ordre 3 relaxés à paramètre magique fixe
+(TRT, τ⁻ = ½ + Λ/(τ⁺ − ½) borné à τ⁻_max ; a₃ = a₃ᵉ + (1 − 1/τ⁻)(m₃ − a₃ᵉ),
+m₃ mesurés ; sur D3Q19 les paires xxy/yzz, xyy/xzz, xxz/yyz ne sont pas
+orthogonales, coefficients (4 m₁ + 2 m₂)/3). À Λ fixe la solution
+stationnaire ne dépend pas de τ⁺ (similitude de Ginzburg). Gardé en essai
+(`SOUFFLERIE_LAMBDA` = Λ, `SOUFFLERIE_TMAX` = τ⁻_max, 1 par défaut ; code
+retiré sans Λ). Plaque 64, θ à x/L = 0,6 (théorie 0,097) :
+
+| Schéma | U = 0,05 | U = 0,1 |
+|---|---|---|
+| régularisé (défaut) | 0,253 | 0,207 |
+| Λ = 1/4, τ⁻ ≤ 1 | 0,284 | 0,166 |
+| Λ = 1/4, τ⁻ ≤ 2 | 0,375 | 0,385 |
+| Λ = 1/4, τ⁻ ≤ 5 | 0,937 | −1,89 (instable) |
+| Λ = 1/16, τ⁻ ≤ 2 | 0,087 (C_f 0,00388, théorie 0,00389) | −0,42 (instable) |
+
+Le résultat dépend surtout des moments d'ordre 3 près de la paroi : à
+τ⁻ ≤ 2, Λ = 1/4 rend θ indépendant de U mais 4 fois trop grand ; Λ = 1/16
+donne la plaque juste à U = 0,05 et diverge à 0,1. Sans borne (essai
+précédent), plaque instable pour Λ = 1/4, 1/12, 0,02 et 0,005. Pas de
+réglage à la fois stable et indépendant de U : régularisation gardée.
 
 **Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
 niveau de plus que demandait le critère β (« Raffinement de paroi par
@@ -4285,6 +4306,12 @@ Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
 totale varie de ±30 % d'un passage à l'autre ; les temps par passe
 (`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
 alternés par modèle, on garde le plus rapide.
+
+### Essai TRT des moments d'ordre 3 (`SOUFFLERIE_LAMBDA`)
+
+Sans la variable, le bloc est retiré du shader : collision identique au
+caractère près, coût nul. Avec elle : six sommes de 19 populations et une
+quinzaine d'opérations par maille dans la collision, non chronométré (essai).
 
 ### Optimisations du solveur GPU (seconde série)
 

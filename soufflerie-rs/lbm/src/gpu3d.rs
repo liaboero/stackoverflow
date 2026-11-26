@@ -1642,12 +1642,42 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let bxy = k * pxy;
   let bxz = k * pxz;
   let byz = k * pyz;
-  let axxy = rho * u.x * u.x * u.y + u.y * bxx + 2.0 * u.x * bxy;
-  let axyy = rho * u.x * u.y * u.y + u.x * byy + 2.0 * u.y * bxy;
-  let axxz = rho * u.x * u.x * u.z + u.z * bxx + 2.0 * u.x * bxz;
-  let axzz = rho * u.x * u.z * u.z + u.x * bzz + 2.0 * u.z * bxz;
-  let ayyz = rho * u.y * u.y * u.z + u.z * byy + 2.0 * u.y * byz;
-  let ayzz = rho * u.y * u.z * u.z + u.y * bzz + 2.0 * u.z * byz;
+  var axxy = rho * u.x * u.x * u.y + u.y * bxx + 2.0 * u.x * bxy;
+  var axyy = rho * u.x * u.y * u.y + u.x * byy + 2.0 * u.y * bxy;
+  var axxz = rho * u.x * u.x * u.z + u.z * bxx + 2.0 * u.x * bxz;
+  var axzz = rho * u.x * u.z * u.z + u.x * bzz + 2.0 * u.z * bxz;
+  var ayyz = rho * u.y * u.y * u.z + u.z * byy + 2.0 * u.y * byz;
+  var ayzz = rho * u.y * u.z * u.z + u.y * bzz + 2.0 * u.z * byz;
+/*TRT[*/
+  // TRT (essai, SOUFFLERIE_LAMBDA) : moments d'ordre 3 relaxés au temps
+  // τ⁻ = ½ + Λ/(τ⁺ − ½), borné à TRT_TMAX : a₃ = a₃ᵉ + (1 − 1/τ⁻)(m₃ − a₃ᵉ),
+  // m₃ mesurés (Hermite ; sur D3Q19 les paires xxy/yzz, xyy/xzz, xxz/yyz ne
+  // sont pas orthogonales : a = (4 m₁ + 2 m₂)/3). À Λ fixe, la solution
+  // stationnaire ne dépend pas de τ⁺ (similitude de Ginzburg).
+  {{
+    let tp = max(1.0 / om - 0.5, 1e-6);
+    let tm = min(0.5 + TRT_LAMBDA / tp, TRT_TMAX);
+    let km = 1.0 - 1.0 / tm;
+    let mxxy = ({rxxy}) - rho * u.y / 3.0;
+    let myzz = ({ryzz}) - rho * u.y / 3.0;
+    let mxyy = ({rxyy}) - rho * u.x / 3.0;
+    let mxzz = ({rxzz}) - rho * u.x / 3.0;
+    let mxxz = ({rxxz}) - rho * u.z / 3.0;
+    let myyz = ({ryyz}) - rho * u.z / 3.0;
+    let exxy = rho * u.x * u.x * u.y;
+    let exyy = rho * u.x * u.y * u.y;
+    let exxz = rho * u.x * u.x * u.z;
+    let exzz = rho * u.x * u.z * u.z;
+    let eyyz = rho * u.y * u.y * u.z;
+    let eyzz = rho * u.y * u.z * u.z;
+    axxy = exxy + km * ((4.0 * mxxy + 2.0 * myzz) / 3.0 - exxy);
+    ayzz = eyzz + km * ((4.0 * myzz + 2.0 * mxxy) / 3.0 - eyzz);
+    axyy = exyy + km * ((4.0 * mxyy + 2.0 * mxzz) / 3.0 - exyy);
+    axzz = exzz + km * ((4.0 * mxzz + 2.0 * mxyy) / 3.0 - exzz);
+    axxz = exxz + km * ((4.0 * mxxz + 2.0 * myyz) / 3.0 - exxz);
+    ayyz = eyyz + km * ((4.0 * myyz + 2.0 * mxxz) / 3.0 - eyyz);
+  }}
+/*]TRT*/
   // Bandes absorbantes : rappel vers l'écoulement amont près des bords
   // latéraux (périodiques), de l'entrée et dans la zone éponge de sortie.
   let sig = absorb(x, y, z);
@@ -1756,6 +1786,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         pxy = sum_expr(|i| dotc(i, 0, 1)),
         pxz = sum_expr(|i| dotc(i, 0, 2)),
         pyz = sum_expr(|i| dotc(i, 1, 2)),
+        rxxy = sum_expr(|i| C3[i][0] * C3[i][0] * C3[i][1]),
+        ryzz = sum_expr(|i| C3[i][1] * C3[i][2] * C3[i][2]),
+        rxyy = sum_expr(|i| C3[i][0] * C3[i][1] * C3[i][1]),
+        rxzz = sum_expr(|i| C3[i][0] * C3[i][2] * C3[i][2]),
+        rxxz = sum_expr(|i| C3[i][0] * C3[i][0] * C3[i][2]),
+        ryyz = sum_expr(|i| C3[i][1] * C3[i][1] * C3[i][2]),
     );
     if ep {
         ep_bindings(code, pt)
@@ -3270,8 +3306,34 @@ fn mach3_strip(code: &str, keep: bool) -> String {
 /// Code de la collision où les paramètres fixes d'une grille deviennent des
 /// constantes (SA, sous-maille, type de bords, diagnostics, stockage) : le
 /// compilateur retire leurs branches (collision 4 % plus rapide).
+/// TRT des moments d'ordre 3 (essai) : `SOUFFLERIE_LAMBDA` = Λ,
+/// `SOUFFLERIE_TMAX` borne τ⁻ (1 par défaut, stabilité). Sans Λ, code retiré.
+fn trt_params() -> Option<(f32, f32)> {
+    let l = std::env::var("SOUFFLERIE_LAMBDA").ok()?.parse().ok()?;
+    let t = std::env::var("SOUFFLERIE_TMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    Some((l, t))
+}
+
+fn trt_strip(code: &str) -> String {
+    match trt_params() {
+        Some((l, t)) => code.replace("TRT_LAMBDA", &format!("{l:?}")).replace("TRT_TMAX", &format!("{t:?}")),
+        None => {
+            let mut out = String::with_capacity(code.len());
+            let mut rest = code;
+            while let Some(a) = rest.find("/*TRT[*/") {
+                out.push_str(&rest[..a]);
+                let b = rest[a..].find("/*]TRT*/").expect("borne TRT") + a;
+                rest = &rest[b + 8..];
+            }
+            out.push_str(rest);
+            out
+        }
+    }
+}
+
 fn specialize(code: &str, c: [u32; 7]) -> String {
     let code = mach3_strip(code, c[3] & MACH3_BIT != 0);
+    let code = trt_strip(&code);
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
