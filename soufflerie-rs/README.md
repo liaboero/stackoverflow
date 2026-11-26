@@ -3541,8 +3541,7 @@ donne la plaque juste à U = 0,05 et diverge à 0,1. Sans borne (essai
 précédent), plaque instable pour Λ = 1/4, 1/12, 0,02 et 0,005. Pas de
 réglage à la fois stable et indépendant de U : régularisation gardée.
 
-**Source de l'écart : sous-résolution de la couche limite, et fp16 aux
-grilles fines.** À L = 64 et Re = 10⁶, la couche limite turbulente de la
+**Source de l'écart : sous-résolution de la couche limite.** À L = 64 et Re = 10⁶, la couche limite turbulente de la
 plaque tient dans une maille environ (θ théorique 0,097 maille) : le θ
 relevé est surtout une épaisseur numérique, fixée par le traitement des
 premiers nœuds. Diagnostics (`SOUFFLERIE_DIAG`, θ à x/L = 0,6, mailles de la
@@ -3567,13 +3566,31 @@ et les deux vitesses tendent vers la théorie (populations en f32) :
 | ×2 | 0,162 | 0,154 | 5 % |
 | ×4 | 0,126 | 0,113 | 11 % |
 
-En fp16, la grille ×4 s'écarte : 0,157 à U = 0,05 (U_e 1,081 au lieu de
-1,053) et 0,103 à U = 0,1. Le stockage fp16 n'a pas d'effet sans
-raffinement, mais en a sur les grilles fines, d'autant plus que U est petit
-(écarts à l'équilibre plus faibles). L'écart de portance avec U est donc une
-erreur de discrétisation de la couche limite sous-résolue, qui se corrige
-par le raffinement de paroi, pas par un changement de schéma ; et les
-calculs raffinés à fort enjeu doivent être vérifiés en f32.
+L'écart de portance avec U est donc une erreur de discrétisation de la
+couche limite sous-résolue, qui se corrige par le raffinement de paroi, pas
+par un changement de schéma.
+
+**fp16 et raffinement : écoulement instationnaire.** En fp16, la grille ×4
+s'écarte (0,157 à U = 0,05, U_e 1,081). Ce n'est pas une erreur de
+précision des grilles fines : le calcul n'est plus stationnaire. Relevés à
+t = 11, 12 et 13 longueurs (×4, U = 0,05) :
+
+| Précision | t = 11 | t = 12 | t = 13 |
+|---|---|---|---|
+| sans raffinement, fp16 | 0,259 | 0,253 | 0,262 |
+| ×4, tout f32 | 0,124 | 0,126 | 0,126 |
+| ×4, tout fp16 | 0,121 | 0,157 | 0,137 |
+| ×4, veine fp16, grilles fines f32 | 0,152 | 0,102 | 0,134 |
+| ×4, veine f32, grilles fines fp16 | 0,122 | 0,132 | 0,143 |
+
+U_e varie avec (1,056 à 1,074). Seul le calcul tout en f32 est stationnaire
+avec raffinement ; une précision par niveau (essayée, f32 sur une partie des
+grilles) ne suffit pas, d'où son retrait. Les calculs sont reproductibles au
+bit près : l'écart vient de l'arrondi des populations qui entretient une
+oscillation dès qu'une grille raffinée et sa voisine ne sont pas toutes deux
+en f32 (raccord des grilles, non localisé plus finement). Conséquences : les
+relevés instantanés des calculs raffinés en fp16 sont à ±15 % sur θ ;
+moyenner dans le temps ou passer en f32 (mémoire ×1,6).
 
 **Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
 niveau de plus que demandait le critère β (« Raffinement de paroi par
