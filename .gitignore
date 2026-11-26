@@ -6,3 +6,4 @@ sailing/agent/params.json
 sailing/agent/results.json
 sailing/alphastar/*.pt
 sailing/alphastar/*_log.txt
+sailing/alphastar/results_*.json

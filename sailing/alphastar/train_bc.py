@@ -49,9 +49,9 @@ def main():
         for i in range(0, len(perm), bs):
             idx = torch.from_numpy(perm[i:i + bs])
             logits, _ = net(G[idx].float(), V[idx], S[idx])
-            loss = F.cross_entropy(logits, A[idx], label_smoothing=0.05)
+            loss = F.cross_entropy(logits, A[idx])   # masked logits: no label smoothing (it would push mass onto forbidden moves)
             opt.zero_grad(); loss.backward(); opt.step()
-            tot += float(loss) * len(idx); n += len(idx)
+            tot += float(loss.detach()) * len(idx); n += len(idx)
         sched.step()
         net.eval()
         with torch.no_grad():

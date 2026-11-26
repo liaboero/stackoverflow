@@ -30,7 +30,7 @@ class PolicyNet(nn.Module):
         z = torch.cat([self.cnn(grid), self.mlp(vec)], 1)
         logits = self.head(z)
         if safe is not None:   # never choose a move that hits an island
-            logits = logits.masked_fill(~safe, -1e9)
+            logits = logits.masked_fill(~safe, -1e4)
         return logits, self.value(z).squeeze(1)
 
 
