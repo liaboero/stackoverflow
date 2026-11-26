@@ -1,0 +1,1 @@
+{"gen": 0, "best": 73.62249991725915, "params": {"osc_weight": 1.0, "osc_min_steps": 10, "trend_weight": 0.5, "front_weight": 1.0, "front_threshold": 25.0, "front_prior_T": 25.0, "lag_frac": 0.5}}

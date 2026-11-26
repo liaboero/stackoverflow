@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+sailing/agent/train_stdout.txt

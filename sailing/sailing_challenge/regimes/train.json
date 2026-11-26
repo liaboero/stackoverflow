@@ -1,0 +1,46 @@
+{
+  "name": "train",
+  "description": "Public training regime. Validation and test use the same mechanisms with hidden settings.",
+  "fixed_seeds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+  "islands": "four",
+  "wind": {
+    "base": {
+      "speed": 10.0,
+      "mean_from_deg": [-110.0, 110.0],
+      "spatial_range_deg": [30.0, 180.0],
+      "spatial_control": 3,
+      "small_control": 9,
+      "small_std_deg": 3.0,
+      "max_neighbour_deg": 6.0,
+      "mean_from_shape": "triangular"
+    },
+    "oscillation": {
+      "period_steps": [40.0, 100.0],
+      "amplitude_deg": [20.0, 45.0],
+      "noise_deg": 2.0,
+      "noise_correlation": 0.9
+    },
+    "front": {
+      "probability": 0.75,
+      "right_probability": 0.65,
+      "mean_from_deg": [35.0, 65.0],
+      "twist_deg": [45.0, 70.0],
+      "width_x": 20.0,
+      "width_y": 20.0,
+      "spatial_scale": 0.35,
+      "start_y": [25.0, 45.0],
+      "turning_probability": 0.7,
+      "turning_steps": [15.0, 35.0]
+    },
+    "gusts": {
+      "rate_per_step": 0.063,
+      "radius_cells": [15.0, 25.0],
+      "strength_magnitude": [0.4, 0.6],
+      "lull_probability": 0.5,
+      "speed_cells_per_step": [1.5, 3.0],
+      "direction_spread_deg": 30.0,
+      "lifetime_steps": [80.0, 150.0],
+      "shift_deg": [-25.0, 25.0]
+    }
+  }
+}
