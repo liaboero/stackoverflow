@@ -64,7 +64,8 @@ fn main() {
     let lf = l as f64;
     // Plafond de viscosité turbulente des essais 1024 et 2048 : valeur de
     // Clauser 0,0168 U δ* de la plaque théorique à mi-longueur (unités de la veine).
-    let nu_cap = 0.0168 * 0.1 * 0.046 * 0.5 * (0.5 * re).powf(-0.2) * lf * std::env::var("PLAQUE_CAP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+    let u_res: f64 = std::env::var("SOUFFLERIE_U").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
+    let nu_cap = 0.0168 * u_res * 0.046 * 0.5 * (0.5 * re).powf(-0.2) * lf * std::env::var("PLAQUE_CAP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
 
     // Veine : 1,5 L en amont, 2,5 L en aval de la plaque (zone éponge à
     // 0,85 nx, au-delà des grilles fines), 3 L de haut.

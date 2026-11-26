@@ -3541,6 +3541,40 @@ donne la plaque juste à U = 0,05 et diverge à 0,1. Sans borne (essai
 précédent), plaque instable pour Λ = 1/4, 1/12, 0,02 et 0,005. Pas de
 réglage à la fois stable et indépendant de U : régularisation gardée.
 
+**Source de l'écart : sous-résolution de la couche limite, et fp16 aux
+grilles fines.** À L = 64 et Re = 10⁶, la couche limite turbulente de la
+plaque tient dans une maille environ (θ théorique 0,097 maille) : le θ
+relevé est surtout une épaisseur numérique, fixée par le traitement des
+premiers nœuds. Diagnostics (`SOUFFLERIE_DIAG`, θ à x/L = 0,6, mailles de la
+veine ; plafond `nu_cap` désormais à l'échelle de U) :
+
+| Variante | U = 0,05 | U = 0,1 |
+|---|---|---|
+| défaut | 0,253 | 0,207 |
+| moments d'ordre 3 d'équilibre seuls (DIAG 1) | 0,275 | 0,130 |
+| ν_t uniforme = `nu_cap` (DIAG 2) | 0,192 | 0,162 |
+| ν_t uniforme = 10 `nu_cap` | 0,249 | 0,164 |
+| ν̃ plafonné (essai 2048) | 0,201 | 0,177 |
+
+L'écart subsiste à ν_t uniforme : ni Spalart–Allmaras ni la variation de
+ν_t n'en sont la cause ; les moments d'ordre 3 de la régularisation le
+réduisent (sans eux il triple). Il diminue avec la résolution de la paroi,
+et les deux vitesses tendent vers la théorie (populations en f32) :
+
+| Paroi | U = 0,05 | U = 0,1 | écart |
+|---|---|---|---|
+| sans raffinement | 0,253 | 0,203 | 22 % |
+| ×2 | 0,162 | 0,154 | 5 % |
+| ×4 | 0,126 | 0,113 | 11 % |
+
+En fp16, la grille ×4 s'écarte : 0,157 à U = 0,05 (U_e 1,081 au lieu de
+1,053) et 0,103 à U = 0,1. Le stockage fp16 n'a pas d'effet sans
+raffinement, mais en a sur les grilles fines, d'autant plus que U est petit
+(écarts à l'équilibre plus faibles). L'écart de portance avec U est donc une
+erreur de discrétisation de la couche limite sous-résolue, qui se corrige
+par le raffinement de paroi, pas par un changement de schéma ; et les
+calculs raffinés à fort enjeu doivent être vérifiés en f32.
+
 **Couche ×32 à la paroi (16°).** La propagation en place permet enfin le
 niveau de plus que demandait le critère β (« Raffinement de paroi par
 zones ») : 128 mailles par corde de base, couches ×16 et ×32 sur une

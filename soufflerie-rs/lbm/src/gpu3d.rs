@@ -1585,6 +1585,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     if ((P.essai & 4u) != 0u && nuw >= 0.0) {{ nuc = nut_cell(idx); }}
     tau += 3.0 * nuc;
   }}
+  // Diagnostic (SOUFFLERIE_DIAG & 2) : ν_t uniforme `essai_nu` partout.
+  if ((DIAG_C & 2u) != 0u) {{ tau = P.tau0 + 3.0 * P.essaiNu; }}
   if (u32(x) > P.spongeStart) {{
     let s = f32(u32(x) - P.spongeStart) / f32(max(1u, P.nx - 1u - P.spongeStart));
     tau += (P.tauSponge - P.tau0) * s * s;
@@ -1678,6 +1680,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     ayyz = eyyz + km * ((4.0 * myyz + 2.0 * mxxz) / 3.0 - eyyz);
   }}
 /*]TRT*/
+  // Diagnostic (SOUFFLERIE_DIAG & 1) : moments d'ordre 3 d'équilibre seuls.
+  if ((DIAG_C & 1u) != 0u) {{
+    axxy = rho * u.x * u.x * u.y; axyy = rho * u.x * u.y * u.y;
+    axxz = rho * u.x * u.x * u.z; axzz = rho * u.x * u.z * u.z;
+    ayyz = rho * u.y * u.y * u.z; ayzz = rho * u.y * u.z * u.z;
+  }}
   // Bandes absorbantes : rappel vers l'écoulement amont près des bords
   // latéraux (périodiques), de l'entrée et dans la zone éponge de sortie.
   let sig = absorb(x, y, z);
@@ -3334,6 +3342,8 @@ fn trt_strip(code: &str) -> String {
 fn specialize(code: &str, c: [u32; 7]) -> String {
     let code = mach3_strip(code, c[3] & MACH3_BIT != 0);
     let code = trt_strip(&code);
+    let diag: u32 = std::env::var("SOUFFLERIE_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let code = code.replace("DIAG_C", &format!("{diag}u"));
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
