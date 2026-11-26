@@ -93,7 +93,12 @@ def job(args):
         at = oracle(regime, seed)
         return {"agent": name, "kind": kind, "seed": seed, "arrival_time": at, "score": episode_score(at),
                 "seconds": time.time() - t0}
-    agent = Greedy() if name == "Greedy" else ForecastPlanner(params)
+    if name.startswith("Net:"):   # a trained network (alphastar/), e.g. "Net:alphastar/bc.pt"
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "alphastar"))
+        from model import NetAgent
+        agent = NetAgent(os.path.join(os.path.dirname(HERE), name[4:]))
+    else:
+        agent = Greedy() if name == "Greedy" else ForecastPlanner(params)
     r = run_episode(agent, seed, regime=regime)
     return {"agent": name, "kind": kind, "seed": seed, "arrival_time": r["arrival_time"], "score": r["score"],
             "crashes": r["crashes"], "seconds": time.time() - t0, "act_seconds": r["act_seconds"], "steps": r["steps"]}
@@ -108,6 +113,7 @@ def main():
     trained = {k: v for k, v in json.load(open(a.params)).items() if k != "train_score"}
     params = {"Trained": trained, "Untrained": {"horizon": 5, "beam": 16}, "Persistence": PERSIST, "Greedy": None, "Oracle": None}
     names = a.agents.split(",")
+    params.update({n: None for n in names if n.startswith("Net:")})
     jobs = [(n, k, s, params[n]) for n in names for k, s in TEST_EPISODES]
     jobs.sort(key=lambda j: j[0] != "Oracle")  # the long jobs first
     with Pool(os.cpu_count()) as pool:
