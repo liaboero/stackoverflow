@@ -434,7 +434,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // Gradient de pression (8388608) : viscosité de la couche pariétale de
     // la loi de Mellor, κ h √(u_τ² + P h), écrite par la passe de paroi.
     if ((P.essai & 8388608u) != 0u && (P.essai & 16777216u) == 0u) {
-      let nw = utau[arrayLength(&utau) / 9u * 5u + k];
+      let nw = utau[arrayLength(&utau) / 16u * 5u + k];
       if (nw >= 0.0) { out = min(NU_TILDE_MAX, nw); }
     }
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
@@ -889,7 +889,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // hors loi de paroi (maille ordinaire pour la collision et ν̃).
     if (gw0.w == 0.0) {
       utau[4u * wk] = 0.0;
-      utau[arrayLength(&utau) / 9u * 5u + wk] = -1.0;
+      utau[arrayLength(&utau) / 16u * 5u + wk] = -1.0;
       return;
     }
     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
@@ -1082,8 +1082,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // vitesse de son propre nœud (glissement presque libre près de la paroi)
     // n'a pas de rappel et diverge ; en régime établi, sans effet (β = 0,1 ou
     // 0,02 : mêmes efforts à 0,3 % près).
-    let prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+    var prev = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+    // Glissement = moyenne relaxée ū_s (état en [12n, 15n)) + fluctuation
+    // que la loi elle-même donne : celle du nœud, u_n − ū_n (ū_n relaxée au
+    // même taux, en [9n, 12n)), moins y_n fois celle de la pente de la couche
+    // pariétale, u_τ²/(ν + ν_w) − ḡ. La loi de paroi impose une contrainte, pas
+    // une vitesse : une paroi qui garde une vitesse lissée est adhérente pour
+    // les fluctuations, et avec le rebond pur (paroi à q ≈ ½) un mode
+    // pair-impair (damier en x, période 2 pas) des premiers rangs y vit et
+    // porte −u′w′ vers la paroi ; une paroi qui suit la fluctuation du nœud
+    // sans la réponse de la pente le reporte au deuxième rang (README, marche).
+    // La relaxation ne sert qu'à la moyenne (dérive sans rappel d'un nœud
+    // près de la paroi). Diagnostic 2147483648 : glissement relaxé seul
+    // (ancien défaut).
+    let fl = (P.essai & 2147483648u) == 0u;
+    let ob = arrayLength(&utau) / 16u * 9u + 3u * wk;
+    let os = arrayLength(&utau) / 16u * 12u + 3u * wk;
+    if (fl) { prev = vec3<f32>(utau[os], utau[os + 1u], utau[os + 2u]); }
     uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
+    if (fl) {
+      let pn = vec3<f32>(utau[ob], utau[ob + 1u], utau[ob + 2u]);
+      let un = pn + 0.1 * (tv0 - pn);
+      utau[ob] = un.x; utau[ob + 1u] = un.y; utau[ob + 2u] = un.z;
+      utau[os] = uw.x; utau[os + 1u] = uw.y; utau[os + 2u] = uw.z;
+      // Réponse de la loi à la fluctuation : pente u_τ²/(ν + ν_w) instantanée
+      // moins sa moyenne relaxée ḡ (en [15n, 16n)), le long du nœud.
+      let og = arrayLength(&utau) / 16u * 15u + wk;
+      let gi = select(0.0, ut2 * ut2 / (P.nu + nuw), nuw >= 0.0);
+      let gb = utau[og] + 0.1 * (gi - utau[og]);
+      utau[og] = gb;
+      if (!edge) {
+        let d = tv0 - un;
+        uw += d - dot(d, gw.xyz) * gw.xyz;
+        if (ut0 >= 1e-12) { uw -= (tv0 / ut0) * (y0 * (gi - gb)); }
+      }
+    }
     utau[4u * wk + 1u] = uw.x;
     utau[4u * wk + 2u] = uw.y;
     utau[4u * wk + 3u] = uw.z;
@@ -1098,12 +1131,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       let gl = ut2 * ut2 / (P.nu + nuw);
       gq = tt * clamp(dot(tv0 - uw, tt) / y0, 0.0, gl);
     }
-    let o9 = arrayLength(&utau) / 9u * 6u + 3u * wk;
+    let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
     utau[o9] = gq.x;
     utau[o9 + 1u] = gq.y;
     utau[o9 + 2u] = gq.z;
   }
-  utau[arrayLength(&utau) / 9u * 5u + wk] = nuw;
+  utau[arrayLength(&utau) / 16u * 5u + wk] = nuw;
 }
 ";
 
@@ -1509,7 +1542,7 @@ fn oct_decode(k: f32) -> vec3<f32> {{
 // qui glissent à τ ≈ ½ (README, « Mode pair-impair des parois à
 // mi-maille ») ; à q = 1, le lien mêle les deux populations du nœud.
 fn wall_q1(uwl: vec3<f32>, nf: vec3<f32>, c: vec3<f32>, q: f32, wk: u32) -> vec3<f32> {{
-  let o9 = arrayLength(&utau) / 9u * 6u + 3u * wk;
+  let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
   let g = vec3<f32>(utau[o9], utau[o9 + 1u], utau[o9 + 2u]);
   let gt = g - dot(g, nf) * nf;
   return uwl - gt * (max(0.0, dot(c, nf)) * (1.0 - q));
@@ -1591,13 +1624,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var nuw = -1.0;
   if (P.sa != 0u && hasWall) {{
     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
-    nuw = utau[arrayLength(&utau) / 9u * 5u + wk];
+    nuw = utau[arrayLength(&utau) / 16u * 5u + wk];
   }}
   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
   var vn = 0.0;
   if (P.sa != 0u && hasWall) {{
-    vn = utau[arrayLength(&utau) / 9u * 4u + wk];
+    vn = utau[arrayLength(&utau) / 16u * 4u + wk];
   }}
 {prefetch}  g[0] = pop(0u, idx);
 {pull}
@@ -3394,7 +3427,15 @@ pub(crate) fn wall_q1() -> bool {
     std::env::var("SOUFFLERIE_PAROI_Q1").map_or(false, |v| v != "0")
 }
 
+/// Bits d'essai ajoutés par `SOUFFLERIE_ESSAI` (diagnostic, sur tous les bancs).
+fn essai_env() -> u32 {
+    static E: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *E.get_or_init(|| std::env::var("SOUFFLERIE_ESSAI").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
 fn specialize(code: &str, c: [u32; 7]) -> String {
+    let mut c = c;
+    c[3] |= essai_env();
     let code = mach3_strip(code, c[3] & MACH3_BIT != 0);
     let code = trt_strip(&code);
     let diag: u32 = std::env::var("SOUFFLERIE_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -5433,7 +5474,7 @@ impl Gpu3D {
         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
         // (à la suite, une valeur par maille) la vitesse de transpiration,
         // puis la viscosité de la couche pariétale (passe `wall3d`).
-        let utau_buf = mk("utau3d", (36 * wall_count) as u64, st);
+        let utau_buf = mk("utau3d", (64 * wall_count) as u64, st);
         let nsa = if sa { 4 * ns as u64 * (1 + keps as u64 + vles as u64) } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if keps {
@@ -6281,7 +6322,7 @@ impl Gpu3D {
             les_a: self.les_a as f32,
             xtr: self.xtr as f32,
             band: (self.l as f32 / 10.0).max(3.0),
-            essai: self.essai,
+            essai: self.essai | essai_env(),
             essai_nu: self.essai_nu,
             bnx: self.sparse.as_ref().map_or(0, |m| m.bd[0] as u32),
             bny: self.sparse.as_ref().map_or(0, |m| m.bd[1] as u32),

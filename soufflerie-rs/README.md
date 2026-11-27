@@ -3532,8 +3532,54 @@ demi-maille) :
 Sur les corps courbes ou inclinés, les q se répartissent à peu près
 uniformément et le damier ne trouve pas de paroi plane à mi-maille : il
 tient à la marche, dont les parois sont posées exactement à mi-maille.
-Correction retenue pour la marche : y placer la paroi hors de q = ½
-(`--q`), pas changer la paroi de tous les cas.
+Une paroi posée exactement à mi-maille reste toutefois possible (plans
+alignés sur la grille) : la correction doit tenir à q = ½.
+
+*Correction retenue : glissement moyen relaxé, fluctuations données par la
+loi* (défaut ; ancien glissement : `--essai 2147483648`, ou
+`SOUFFLERIE_ESSAI=2147483648` sur tous les bancs). Les essais de la marche
+courte (amont 30 h) isolent le mécanisme : le mode vit quand la paroi garde
+une vitesse lissée (glissement relaxé β = 0,1, ou ancré au point relevé à h
+par le plancher), c'est-à-dire adhérente pour les fluctuations de maille ;
+il s'éteint au premier rang quand le glissement suit le nœud à chaque pas
+(β = 1 sans plancher), mais ce glissement tout instantané dérègle les autres
+cas (plaque : échange 0,00308 contre loi 0,00525 ; aile 4° Cx 0,0244 ;
+Ahmed 25° profils 0,200). Or une loi de paroi impose une contrainte, pas
+une vitesse : la fluctuation de la vitesse de glissement est celle que la
+loi donne, u_s′ = u_n′ − y_n g′, avec g = u_τ²/(ν + ν_w) la pente de la
+couche pariétale. Le glissement est donc la moyenne relaxée de l'ancien
+glissement (la relaxation ne sert qu'à éviter la dérive sans rappel d'un
+nœud près de la paroi) plus u_n − ū_n − y_n (g − ḡ), les moyennes ū_n et ḡ
+relaxées au même taux. Sans le terme de pente, la paroi est glissante
+libre pour les fluctuations et le mode passe au deuxième rang (0,40 U).
+Aucun facteur nouveau ; en écoulement stationnaire les fluctuations sont
+nulles et rien ne change.
+
+Marche n = 16, amont 80 h, q = ½ :
+
+| Glissement | Mode rang 1 / 2 à −10 h | δ₉₉ / h | H | Re_θ | x_r/h (1er nœud / frottement) | Cf 10 h (échange / loi) | Cf 20 h (échange / loi) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Relaxé (ancien) | 0,19 / 0,26 | 2,28 | 1,62 | 13 900 | 5,86 / 7,55 | 0,0035 / — | 0,0063 / — |
+| Moyenne + fluctuation du nœud | 0,014 / 0,40 | 1,09 | 1,21 | 4 180 | 6,27 / 11,05 | −0,0003 / — | 0,0009 / — |
+| **Moyenne + fluctuation de la loi** | 0,0004 / 0,026 | 1,09 | 1,20 | 4 210 | **6,30** / 10,7 | −0,0002 / 0,0009 | 0,0012 / 0,0018 |
+| Mesure | — | 1,5 | ≈ 1,3 | 5 000 | 6,26 | ≈ 0,001 | ≈ 0,002 |
+
+Autres cas (même tableau que la paroi virtuelle, L = 64) :
+
+| Cas | Ancien | Fluctuation de la loi |
+| --- | --- | --- |
+| Plaque : frottement échange / loi | 0,00418 / 0,00403 | 0,00417 / 0,00404 |
+| Aile 4° : Cz / Cx (bilan) | 0,457 / 0,0163 | 0,457 / 0,0156 |
+| Aile 16° : Cz / Cx (bilan) | 1,604 / 0,0499 | 1,604 / 0,0503 |
+| Ahmed 25° : Cx boîte, profils | 0,603, 0,113 | 0,645, 0,121 |
+| Ahmed 35° : Cx boîte, profils | 0,689, 0,086 | 0,617, 0,087 |
+
+Ahmed est instationnaire et moyenné sur 4 t* : la variante sans terme de
+pente donnait 0,600 / 0,109 et 0,641 / 0,082, de quoi juger de la
+dispersion d'un tirage à l'autre (Cx boîte ± 0,04, profils ± 0,008). Le
+frottement de la loi en aval de la marche est celui de la mesure ; restent
+l'échange, 0,0006 à 0,0011 sous la loi, et le recollement du frottement
+(10,7 h).
 
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
@@ -4454,6 +4500,12 @@ fois en fin de calcul.
 
 Diagnostic `SOUFFLERIE_DIAG_Q` : un parcours des liens au démarrage, rien
 au calcul.
+
+Glissement moyen + fluctuation de la loi (défaut) : 28 octets de plus par
+maille pariétale (ū_n, ū_s, ḡ ; tampon de 36 à 64 octets), quelques
+lectures et écritures de plus dans la passe de la loi de paroi : durée
+inchangée à la mesure près (marche n = 16, amont 80 h : 1 min 31 s).
+`SOUFFLERIE_ESSAI` (bits d'essai ajoutés sur tous les bancs) : lu une fois.
 
 Paroi virtuelle à q = 1 (`SOUFFLERIE_PAROI_Q1`) : désactivée, liens de
 paroi identiques au caractère près (constante de compilation) ; résultats
