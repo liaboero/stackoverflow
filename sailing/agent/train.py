@@ -24,9 +24,9 @@ SPACE = {  # name: (low, high, integer)
     "osc_weight": (0.0, 1.5, False),
     "osc_min_steps": (4, 30, True),
     "trend_weight": (0.0, 1.5, False),
-    "front_weight": (0.0, 1.5, False),
+    "front_weight": (0.0, 4.0, False),   # was (0, 1.5): the first two trainings ended on the bound
     "front_threshold": (5.0, 60.0, False),
-    "front_prior_T": (8.0, 50.0, False),
+    "front_prior_T": (8.0, 80.0, False),
     "lag_frac": (0.0, 1.0, False),
 }
 FIXED = {"horizon": 5, "beam": 16}

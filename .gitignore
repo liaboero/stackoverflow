@@ -11,3 +11,7 @@ sailing/agent/params_long.json
 sailing/agent/train_long_*
 sailing/agent/params_long_big.json
 sailing/agent/results_long*.json
+sailing/agent/params_front.json
+sailing/agent/train_front_*
+sailing/agent/results_front.json
+sailing/agent/eval_front.txt
