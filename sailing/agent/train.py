@@ -31,6 +31,21 @@ SPACE = {  # name: (low, high, integer)
 }
 FIXED = {"horizon": 5, "beam": 16}
 
+# --space v2: the parameters of the agent with the gust forecast and the Bayesian oscillation forecast
+SPACE_V2 = {
+    "osc_weight": (0.0, 1.5, False),
+    "osc_sigma": (1.0, 12.0, False),
+    "front_weight": (0.0, 2.0, False),
+    "front_threshold": (5.0, 60.0, False),
+    "front_prior_T": (8.0, 80.0, False),
+    "lag_frac": (0.0, 1.0, False),
+    "gust_weight": (0.0, 1.5, False),
+    "gust_decay": (5.0, 100.0, False),
+}
+FIXED_V2 = {**FIXED, "osc_mode": "bayes", "gust_lag": 1}
+if "--space" in sys.argv and sys.argv[sys.argv.index("--space") + 1] == "v2":
+    SPACE, FIXED = SPACE_V2, FIXED_V2
+
 
 def run_one(args):
     params, regime, seed = args
@@ -63,6 +78,7 @@ def main():
     ap.add_argument("--pop", type=int, default=8)
     ap.add_argument("--sigma", type=float, default=0.25)
     ap.add_argument("--out", default=os.path.join(HERE, "params.json"))
+    ap.add_argument("--space", default="v1", choices=["v1", "v2"])
     ap.add_argument("--init", default=None, help="start from these parameters (JSON) instead of the defaults")
     ap.add_argument("--log", default=os.path.join(HERE, "train_log.jsonl"))
     a = ap.parse_args()

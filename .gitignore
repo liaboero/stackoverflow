@@ -17,3 +17,7 @@ sailing/agent/results_front.json
 sailing/agent/eval_front.txt
 sailing/agent/params_v*.json
 sailing/agent/results_v*.json
+sailing/agent/params_v2train.json
+sailing/agent/train_v2_*
+sailing/agent/results_v2train.json
+sailing/agent/eval_v2train.txt
