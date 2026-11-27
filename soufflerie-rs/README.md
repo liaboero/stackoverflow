@@ -3056,6 +3056,108 @@ grille) ; (3) retirer les surfels des grilles grossières dont toutes les
 mailles sont recouvertes par une grille fine (travail inutile) ; (4)
 ensuite seulement, raffinement et Ahmed à L = 136.
 
+### Perte à l'arrêt et bord de fuite des surfels (travail 5)
+
+**Mesures** (`AILE_P0=1` de `aile_infinie`, nouvelles lignes) : Cp des
+nœuds fluides près du nez et au bord de fuite, Cp pariétal extrapolé
+(`surface_forces`, même méthode pour les deux parois) et, pour les surfels,
+pression de chaque surfel tirée de son effort, p − p_réf = −F·n/A (exacte
+pour le rebond, sans extrapolation ; contrôle : Σ redonne le Cz d'échange à
+10⁻³ près). Aile 4°, `aile_infinie 16 2 6e6 4 t - 60` (64 mailles par
+corde), Spalart–Allmaras :
+
+| t = 4 cordes | Bouzidi | Surfels | Surfels + miroir |
+| --- | --- | --- | --- |
+| Cp max pariétal extrapolé (Bernoulli sans perte : 1,0075) | 1,07 | 0,73 | 0,72 |
+| Effort normal des surfels du nez (x/c < 0,003), moyenne, en q | — | 1,65 | 1,70 |
+| Perte de p₀ intégrée à x/c = 0, à 1 (∫/(q c)) | 0,011 ; 0,039 | 0,049 ; 0,072 | 0,033 ; 0,063 |
+| Perte de p₀ au premier rang, x/c ≈ 0,1 (extrados / intrados), en q | 0,24 / 0,09 | 0,76 / 0,29 | 0,71 / 0,21 |
+| Cp au bord de fuite : premier rang (extr. / intr.), sillage | 0,08 / 0,14, 0,14 | 0,06 / 0,04, 0,05 | 0,07 / 0,09, 0,07 |
+| Cp au bord de fuite, extrapolé (extr. / intr.) | 0,10 / 0,21 | 0,12 / −0,03 | 0,13 / 0,06 |
+
+(Référence visqueuse au bord de fuite : Cp ≈ +0,1 à +0,15 des deux côtés.)
+Le Cp max des nœuds fluides dépend de leur place : Bouzidi en a un à
+0,08 maille du nez (Cp 1,11, surpression de 0,1 q), les surfels n'en ont
+qu'à 1 maille (0,81) ; le rayon du bord d'attaque vaut une maille fine.
+
+**Diagnostic.** Les efforts intégrés des surfels sont exacts (masse
+conservée, échange = bilan sur boîte), mais leur répartition locale ne
+l'est pas : les surfels du nez poussent en moyenne avec 1,65 q, au-delà de
+toute pression d'arrêt, et ceux des 3 derniers % de corde tirent (≈ −0,45 q),
+avec des sauts de 0,6 q d'un voxel coupé à l'autre (surfels voisins de même
+normale : 1,17 et 0,57 q). Le corps freine trop le fluide devant le nez :
+c'est cette quantité de mouvement retirée qui fait la perte de p₀ qui naît
+au bord d'attaque. Ce qui ne l'explique pas :
+
+- *Spalart–Allmaras* : sans modèle (Re = 6·10⁶ laminaire), Cp max
+  extrapolé 0,73 contre 1,12 pour Bouzidi, perte à x/c = 0 de 0,063 contre
+  0,025 ;
+- *mode pair-impair non amorti des voxels coupés* (ω ≈ 2, la collision
+  retourne leur non-équilibre à chaque pas) : à Re = 200 (τ = 0,69) et
+  2 000, l'effort du nez reste à 1,72 et 1,54 q et le Cp max extrapolé à
+  0,82 et 0,76 (Bouzidi 1,19 et 1,08) ; en aval, les pertes visqueuses
+  sont celles de Bouzidi à 1 % (Re = 200) et 5 % (2 000) près ;
+- *géométrie* : recouvrements, fuites et écarts V − Dᵢ nuls à 10⁻¹³ sur
+  les trois grilles de l'aile ;
+- *répartition uniforme du rebond sur le parallélépipède* : seulement en
+  partie (ci-dessous, un tiers de la perte du bord d'attaque).
+
+Reste la représentation par une valeur par voxel coupé, qui mélange à
+chaque pas des particules venues de régions distinctes (part transmise de
+la maille amont et part émise, dans la même maille), comme un schéma de
+volumes finis décentré d'ordre 1 à nombre de Courant fractionnaire : au nez,
+dont le rayon tient dans une maille, ce mélange ne laisse pas le fluide
+s'arrêter dans les voxels coupés.
+
+**Rebond miroir (`SOUFFLERIE_SURFELS_MIROIR=1`, option des surfels,
+désactivée).** Une particule entrante partie à la hauteur η au-dessus du
+surfel le frappe au temps η/h (h = |c·n|) et revient en sens inverse : au
+pas suivant elle est en φ(x) = x + (1 − 2η/h) c, à la hauteur h − η. φ est
+une involution affine du parallélépipède ; `surfel::mirror_overlaps` découpe
+exactement, pour chaque couple de voxels (y, x) de ses parts, le volume
+M_yx des points de y que φ envoie dans x (Σ_x M_yx = w_y, Σ_y M_yx = w_x).
+La densité rebondie reçue par x devient Σ_y M_yx f*(y) / w_x au lieu de la
+moyenne Γⁱⁿ/P de tout le parallélépipède ; la perturbation de la loi de
+paroi reste uniforme. Masse et efforts inchangés par construction ; mise à
+mi-maille d'une paroi alignée : la moitié basse du voxel coupé reçoit la
+moitié haute du parallélépipède (test `miroir_paroi_plane`). La passe des
+surfels calcule ces densités par cible (une case par maille réceptrice et
+paire de chaque surfel, après les Γᵒᵘᵗ/P dans `force`) : propagation en
+place sans lecture concurrente.
+
+| Cas | Surfels | Surfels + miroir | Bouzidi |
+| --- | --- | --- | --- |
+| Masse Σ V ρ, sphère, 4 000 pas : dérive | 5,7·10⁻⁵ | 5,7·10⁻⁵ | 1,6·10⁻⁴ |
+| Poiseuille incliné (H = 10,7) : débit, profil | +0,71 %, 0,05 % | +0,48 %, 0,01 % | — |
+| Sphère Re = 100 : Cx échange / boîte | 1,250 / 1,252 | 1,224 / 1,224 | 1,239 / 1,246 |
+| Aile 4°, 12 cordes : bilan Cz / Cx | 0,399 / 0,0432 | 0,414 / 0,0418 | 0,457 / 0,0156 |
+| Aile 4°, 4 cordes : perte de p₀ à x/c = 0 | 0,049 | 0,033 | 0,011 |
+| `plaque3d 64` : frottement échange / loi ; δ* à 0,6 L ; Cx échange | 0,00365 / 0,00329 ; 0,62 ; 0,055 | 0,00374 / 0,00336 ; 0,59 ; 0,051 | 0,00417 / 0,00404 ; 0,26 ; 0,019 |
+| Aile 4°, Re = 6·10⁶ sans modèle de turbulence | stable | diverge | stable |
+
+Gain réel mais partiel : un tiers de la perte du bord d'attaque, le bord de
+fuite rapproché de la référence à l'intrados (Cp extrapolé −0,03 → 0,06),
+frottement et épaisseur de la plaque un peu mieux ; l'effort excessif du nez
+ne bouge pas. Le rebond miroir amortit moins que la moyenne uniforme :
+l'écoulement presque non visqueux sans modèle de turbulence diverge. Option
+laissée désactivée, comme les surfels ; défaut (Bouzidi) inchangé au bit
+près (aile 4 cordes : Cz 0,3514, Cx 0,01543 avant et après ; plaque
+0,00417 / 0,00404).
+
+**Bord de fuite.** Les voxels traversés par les deux faces (120, 321 et
+603 sur les trois grilles) ne sont toujours pas dédoublés : le Cp du bord
+de fuite des surfels reste plus bas que celui de Bouzidi (premier rang
+0,06 / 0,04 contre 0,08 / 0,14 ; miroir 0,07 / 0,09). Le dédoublement
+demande des mailles hors grille dans toutes les passes (inchangé).
+
+**Suite** (dans l'ordre) : (1) reconstruction linéaire de la part
+transmise et du rassemblement dans les voxels coupés, f(y) + g·(r − r_y)
+avec g tiré d'une maille voisine entièrement fluide le long de la normale ;
+la correction du rassemblement est l'opposée de celle de la part transmise
+(masse exacte) et se calcule dans la passe des surfels comme les cibles du
+miroir ; c'est le mélange de la maille, et non plus la paroi, qui reste
+d'ordre 1 ; (2) voxels dédoublés au bord de fuite.
+
 ## Domaine de Mach du D3Q19
 
 **Défaut.** Sur D3Q19, c_α³ = c_α : le moment d'ordre 3 Σ f c_α³ vaut ρ u_α,
@@ -4795,6 +4897,22 @@ parallèle, négligeable devant la découpe. Piste de réduction notable :
 les surfels des grilles grossières sous une grille fine (aile : 124 000
 sur 268 000) ne servent à rien ; les retirer demande de connaître le
 recouvrement à la préparation des tables.
+
+### Rebond miroir des surfels (`SOUFFLERIE_SURFELS_MIROIR=1`, désactivé)
+
+Défaut (Bouzidi) et surfels sans l'option : shaders inchangés (la passe des
+surfels ne déclare qu'un tableau de 9 entiers de plus). Avec l'option :
+préparation, découpe de φ(voxel) dans chaque part (≈ 27 parts par surfel,
+6 plans) : surfels de l'aile à 64 mailles de 3,8 / 7,5 / 14,7 s à
+9,3 / 16,2 / 33,3 s (×2,3, une fois par calcul) ; mémoire, par cible
+(≈ 27 par surfel) une case f32 et un début de sources, 8 octets par source
+(≈ 2 par cible) : ≈ 650 octets par surfel, ≈ 170 Mo pour les 268 000
+surfels de l'aile ; calcul, ≈ 3 lectures de population de plus par cible dans la passe
+des surfels. Mesure (`AILE_PROFIL=100`, aile 4°, deux passages alternés,
+GPU partagé à 100 % par d'autres calculs) : collision pariétale de la grille
+fine 4,5 / 4,5 ms sans l'option, 3,6 / 3,7 ms avec, somme des passes 27 / 28
+contre 21 / 15 ms : écart dans la dispersion, non mesurable sur ce GPU
+partagé.
 
 ### Correction du défaut cubique du D3Q19 (`MACH3_BIT`)
 

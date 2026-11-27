@@ -339,6 +339,57 @@ fn main() {
         {
             let (yc0, yc1) = (2.0 * (ny / 4) as f64 - 2.0, 2.0 * (ny / 4) as f64 + 2.0);
             let w = sim.take_wall_forces();
+            // Paroi volumique (AILE_P0) : pression pariétale de chaque surfel,
+            // p − p_réf = −F·n / A (effort du rebond, exact, sans extrapolation) :
+            // Cp max sur les 5 premiers % de corde, Cp des 3 derniers %.
+            if std::env::var("AILE_P0").is_ok() {
+                if let Some(na) = sim.surfel_normal_area() {
+                    let (mac, d, _, sc) = sim.finest_macros();
+                    let (mut ri, mut nr) = (0.0, 0.0);
+                    for k in 3..d[2] - 3 {
+                        for j in 0..d[1] {
+                            ri += mac[3 + d[0] * (j + d[1] * k)][3] as f64;
+                            nr += 1.0;
+                        }
+                    }
+                    let ri = ri / nr;
+                    let xle = pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+                    let xte = pts.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+                    let zc = |x: f64| pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (x - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+                    let (mut cmax, mut te) = (f64::NEG_INFINITY, [[0.0f64; 2]; 2]);
+                    let (mut fzs, mut fzp) = (0.0, 0.0);
+                    let mut nose = [0.0f64; 2];
+                    for ((p, v), g) in w.pos.iter().zip(&w.force).zip(&na) {
+                        if p[1] < yc0 || p[1] >= yc1 || g[3] <= 1e-3 {
+                            continue;
+                        }
+                        let a = g[3] as f64 / (sc * sc);
+                        let pw = -(v[0] * g[0] as f64 + v[1] * g[1] as f64 + v[2] * g[2] as f64) / a;
+                        let c = (pw - (ri - 1.0) / 3.0) / q;
+                        fzs += v[2];
+                        fzp += -(pw - (ri - 1.0) / 3.0) * g[2] as f64 * a;
+                        let xc = (p[0] - xle) / (xte - xle);
+                        if xc < 0.003 {
+                            nose[0] += c * a;
+                            nose[1] += a;
+                        }
+                        if xc < 0.05 {
+                            cmax = cmax.max(c);
+                            if std::env::var("AILE_SURF").is_ok() {
+                                println!("    surfel x/c {xc:.4} z {:.2} n ({:.2},{:.2},{:.2}) A {:.3} Cp {c:.3}", p[2] - zc(p[0]), g[0], g[1], g[2], g[3]);
+                            }
+                        }
+                        if xc > 0.97 {
+                            let o = if p[2] > zc(p[0]) { 0 } else { 1 };
+                            te[o][0] += c * a;
+                            te[o][1] += a;
+                        }
+                    }
+                    println!("  surfels : contrôle Cz effort {:.4} / pression {:.4} (aire Σ {:.1})", fzs / (q * lf * (yc1 - yc0)), fzp / (q * lf * (yc1 - yc0)), na.iter().zip(&w.pos).filter(|(_, p)| p[1] >= yc0 && p[1] < yc1).map(|(g, _)| g[3] as f64).sum::<f64>() / (sc * sc));
+                    println!("  surfels : Cp moyen du nez (x/c < 0,003) {:.4} · Cp max {cmax:.4}", nose[0] / nose[1].max(1e-30));
+                    println!("  surfels : Cp max {cmax:.4} · bord de fuite {:.4} / {:.4} (extrados / intrados)", te[0][0] / te[0][1].max(1e-30), te[1][0] / te[1][1].max(1e-30));
+                }
+            }
             let mut f = [0.0f64; 2];
             for (p, v) in w.pos.iter().zip(&w.force) {
                 if p[1] >= yc0 && p[1] < yc1 {
@@ -695,6 +746,76 @@ fn perte_p0(sim: &mut Gpu3D, pts: &[[f64; 2]], lf: f64, ny: usize, u: f64, nu: f
         }
     }
     let v: Vec<String> = bins.iter().enumerate().map(|(b, x)| format!("{:.2}:{:.3}/{:.3}", (b as f64 + 0.5) / nb as f64, x[0] / x[1].max(1.0), x[2] / x[3].max(1.0))).collect();
+    // Point d'arrêt et bord de fuite : Cp = (ρ − ρ∞) c_s² / q des nœuds
+    // fluides (Bernoulli isotherme sans perte : Cp max = (e^{3U²/2} − 1)/(3U²/2),
+    // 1,0075 à U = 0,1). Cp max sur les 5 premiers % de corde, avec la perte
+    // de p₀ de ce nœud et sa distance à la paroi ; au bord de fuite,
+    // moyenne du premier rang (x/c ∈ [0,97 ; 1], extrados / intrados) et
+    // nœuds du sillage à moins de 1,5 maille fine en aval.
+    {
+        let cp = |c: &[f32; 4]| (c[3] as f64 - rinf) / 3.0 / q;
+        let (mut best, mut bp0, mut bd) = (f64::NEG_INFINITY, 0.0, 0.0);
+        let mut te = [[0.0f64; 2]; 3];
+        for j in j0..=j1 {
+            for k in 3..d[2] - 3 {
+                for i in 3..d[0] - 3 {
+                    let (xr, zr) = (org[0] + i as f64 / sc, org[2] + k as f64 / sc);
+                    if xr < xle - 1.0 || xr > xte + 2.0 || inside(xr, zr) {
+                        continue;
+                    }
+                    let c = at(i, j, k);
+                    let dw = dist(xr, zr) * sc;
+                    if xr < xle + 0.05 * ch && cp(c) > best {
+                        best = cp(c);
+                        bp0 = rinf * (hinf - h(c).0) / q;
+                        bd = dw;
+                    }
+                    if dw <= 1.5 {
+                        let zc = pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (xr - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+                        let o = if xr > xte { 2 } else if zr > zc { 0 } else { 1 };
+                        if xr > xte || xr > xle + 0.97 * ch {
+                            te[o][0] += cp(c);
+                            te[o][1] += 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        let m = |a: [f64; 2]| a[0] / a[1].max(1.0);
+        // Pression pariétale extrapolée (`surface_forces`, triangles de la
+        // tranche centrale) : Cp max et Cp moyen des 3 derniers % de corde.
+        if let Some(s) = sim.surface_forces() {
+            let (mut wmax, mut wte, mut wn) = (f64::NEG_INFINITY, [[0.0f64; 2]; 2], [0.0f64; 2]);
+            let zc = |x: f64| pts[0][1] + (pts[pts.len() / 2][1] - pts[0][1]) * (x - pts[0][0]) / (pts[pts.len() / 2][0] - pts[0][0]);
+            for ((p, _), (_, pw)) in s.loads.iter().zip(&s.walls) {
+                if p[1] < yc0 || p[1] >= yc1 {
+                    continue;
+                }
+                let c = (pw - (rinf - 1.0) / 3.0) / q;
+                let xc = (p[0] - xle) / ch;
+                if xc < 0.05 {
+                    wmax = wmax.max(c);
+                }
+                if xc < 0.003 {
+                    wn[0] += c;
+                    wn[1] += 1.0;
+                }
+                if xc > 0.97 {
+                    let o = if p[2] > zc(p[0]) { 0 } else { 1 };
+                    wte[o][0] += c;
+                    wte[o][1] += 1.0;
+                }
+            }
+            println!("  paroi (extrapolée) : Cp moyen du nez (x/c < 0,003) {:.4} · Cp max {wmax:.4} · bord de fuite {:.4} / {:.4} (extrados / intrados)", m(wn), m(wte[0]), m(wte[1]));
+        }
+        println!(
+            "  arrêt : Cp max {best:.4} (sans perte {:.4}), perte de p₀ {bp0:.3} q à {bd:.2} maille · bord de fuite : Cp premier rang {:.4} / {:.4} (extrados / intrados), sillage {:.4}",
+            ((1.5 * u * u).exp() - 1.0) / (1.5 * u * u),
+            m(te[0]),
+            m(te[1]),
+            m(te[2])
+        );
+    }
     if let Ok(v) = std::env::var("AILE_COL") {
         // Colonnes x/c ∈ [a, b] : 6 premiers nœuds fluides au-dessus de
         // l'extrados, distance à la paroi (mailles fines) et déficit.

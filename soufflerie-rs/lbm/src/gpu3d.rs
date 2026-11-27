@@ -2150,8 +2150,8 @@ pub fn surfels_o2() -> bool {
 /// corps, et Γᵒᵘᵗ/P (populations décalées de leur poids) pour la propagation
 /// des mailles réceptrices. Tampon `force` : effort du surfel s en s, puis
 /// Γᵒᵘᵗ/P de ses paires en 4 n + 12 s + p (cases flottantes).
-fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool, ep: bool) -> String {
-    let code = wgsl_surfel_base(fp16, p16, n, o2);
+fn wgsl_surfel(fp16: bool, p16: bool, n: u32, o2: bool, ep: bool, mirror: Option<u32>) -> String {
+    let code = wgsl_surfel_base(fp16, p16, n, o2, mirror);
     if !ep {
         return code;
     }
@@ -2185,7 +2185,7 @@ fn pop(i: u32, c: u32) -> f32 {{
     )
 }
 
-fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
+fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool, mirror: Option<u32>) -> String {
     let half = if fp16 { 5 } else { 10 };
     let load = if p16 {
         "fn pop(i: u32, c: u32) -> f32 {
@@ -2232,6 +2232,7 @@ fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
       sum += bitcast<f32>(gat[2u * e + 1u]) * (pop(ii, gat[2u * e]) + {w});
     }}
     gin[{p}] = sum;
+    iin[{p}] = ii;
     pv[{p}] = abs(cn) * area;
     cin[{p}] = select(c1, -c1, cn > 0.0);
     fin += cin[{p}] * sum;
@@ -2256,9 +2257,28 @@ fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
     if (inv > 0.0) {{
       let k = 4u * SURFN + 12u * s + {p}u;
       force[k >> 2u][k & 3u] = gout[{p}] * inv - {w};
-    }}
+{mir}    }}
   }}
 ",
+            mir = match mirror {
+                None => String::new(),
+                Some(_) => format!(
+                    "      // Rebond miroir : densité rebondie de chaque cible, Σ (M/w_x) f*(y),
+      // plus la perturbation de la loi de paroi, uniforme.
+      let t1 = gst[MST + 9u * s + {p1}u];
+      for (var t = gst[MST + 9u * s + {p}u]; t < t1; t++) {{
+        var rb = 0.0;
+        let q1 = gst[MSS + t + 1u];
+        for (var q = gst[MSS + t]; q < q1; q++) {{
+          rb += bitcast<f32>(gat[2u * (GATN + q) + 1u]) * (pop(iin[{p}], gat[2u * (GATN + q)]) + {w});
+        }}
+        let km = 16u * SURFN + t;
+        force[km >> 2u][km & 3u] = rb + (gout[{p}] - gin[{p}]) * inv - {w};
+      }}
+",
+                    p1 = p + 1
+                ),
+            },
             row = 5 + p / 4,
             comp = ["x", "y", "z", "w"][p % 4],
         );
@@ -2315,6 +2335,7 @@ fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
     let en = pop16_enable(p16);
     let pt = if p16 { "u16" } else { "u32" };
     let sa_fns = SA_FNS;
+    let (mst, mss, gatn) = (9 * n + 1, 2 * (9 * n + 1), mirror.unwrap_or(0));
     format!(
         "{en}{PARAMS_WGSL}
 @group(0) @binding(0) var<uniform> P: Params;
@@ -2336,6 +2357,9 @@ fn wgsl_surfel_base(fp16: bool, p16: bool, n: u32, o2: bool) -> String {
 @group(0) @binding(10) var<storage, read> pst: array<u32>;
 @group(0) @binding(11) var<storage, read> prb: array<u32>;
 const SURFN = {n}u;
+const MST = {mst}u;
+const MSS = {mss}u;
+const GATN = {gatn}u;
 {sa_fns}
 {load}
 
@@ -2348,6 +2372,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let area = g0.w;
   let home = bitcast<u32>(sgeo[8u * s + 1u].w);
   var gin: array<f32, 9>;
+  var iin: array<u32, 9>;
   var pv: array<f32, 9>;
   var cin: array<vec3<f32>, 9>;
   var fin = vec3<f32>(0.0);
@@ -3339,6 +3364,8 @@ pub(crate) struct SurfPass {
     /// Nombre de surfels, et leurs centres (efforts par position).
     n: usize,
     center: Vec<[f32; 3]>,
+    /// Normale et aire de chaque surfel (diagnostics).
+    normal_area: Vec<[f32; 4]>,
     /// Volume fluide de chaque maille réceptrice (bilan de masse).
     vol: Vec<f32>,
     stats: crate::surfel3d::Stats,
@@ -4326,8 +4353,13 @@ fn surfel_setup(body: &Body3D, nested: bool) -> Result<CellSetup, String> {
     let mut qs: Vec<f32> = st.recv_a.clone();
     qs.extend(st.recv_start.iter().map(|&v| f32::from_bits(v)));
     for &(k, w) in &st.recv {
-        let (sf, p) = (k / 9, k % 9);
-        qs.push(f32::from_bits(4 * ns_ + 12 * sf + p));
+        // Rebond miroir : cible t = k − 9 n, case 16 n + t.
+        if k >= 9 * ns_ {
+            qs.push(f32::from_bits(16 * ns_ + k - 9 * ns_));
+        } else {
+            let (sf, p) = (k / 9, k % 9);
+            qs.push(f32::from_bits(4 * ns_ + 12 * sf + p));
+        }
         qs.push(w);
     }
     let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
@@ -5493,7 +5525,9 @@ impl Gpu3D {
         };
         // Surfels : un effort par surfel, puis Γᵒᵘᵗ/P (12 cases par surfel).
         let n_surf = surf.as_ref().map_or(0, |(st, _)| st.area.len());
-        let fsize = if surf.is_some() { (16 * 4 * n_surf).max(16) } else { (16 * wall_count).max(16) } as u64;
+        // Rebond miroir : une case de plus par cible.
+        let n_mt = surf.as_ref().map_or(0, |(st, _)| st.msub_start.len().saturating_sub(1));
+        let fsize = if surf.is_some() { (16 * 4 * n_surf + 4 * n_mt).max(16) } else { (16 * wall_count).max(16) } as u64;
         let force = mk("force3d", fsize, st);
         let force_read = mk("force3d_read", if surf.is_some() { (16 * n_surf).max(16) as u64 } else { fsize }, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
 
@@ -5750,8 +5784,14 @@ impl Gpu3D {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE })
             };
             let geo_buf = mk_init("surfel_geo", bytemuck::cast_slice(&geo));
-            let gst_buf = mk_init("surfel_gst", bytemuck::cast_slice(&st.gath_start));
+            // Rebond miroir : débuts des cibles et des sources après ceux du
+            // rassemblement, sources après ses entrées.
+            let mut gst: Vec<u32> = st.gath_start.clone();
+            gst.extend_from_slice(&st.mt_start);
+            gst.extend_from_slice(&st.msub_start);
+            let gst_buf = mk_init("surfel_gst", bytemuck::cast_slice(&gst));
             let mut gat: Vec<u32> = st.gath.iter().flat_map(|&(c, w)| [c, w.to_bits()]).collect();
+            gat.extend(st.msub.iter().flat_map(|&(c, w)| [c, w.to_bits()]));
             if gat.is_empty() {
                 gat.resize(2, 0);
             }
@@ -5780,7 +5820,7 @@ impl Gpu3D {
                     uniform(12, false, 16),
                 ],
             });
-            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32, surfels_o2(), ep), true);
+            let pipe_s = pipe("surfel3d", &lay, wgsl_surfel(fp16, p16, ns_ as u32, surfels_o2(), ep, (!st.mt_start.is_empty()).then_some(st.gath.len() as u32)), true);
             let bind = (0..2)
                 .map(|s| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5816,6 +5856,7 @@ impl Gpu3D {
                 disp: (dx, groups.div_ceil(dx)),
                 n: ns_,
                 center: st.center.iter().map(|c| c.map(|v| v as f32)).collect(),
+                normal_area: st.normal.iter().zip(&st.area).map(|(n, &a)| [n[0] as f32, n[1] as f32, n[2] as f32, a as f32]).collect(),
                 vol,
                 stats: st.stats,
                 gpu_bytes: st.gpu_bytes(),
@@ -7666,6 +7707,17 @@ impl Gpu3D {
 
     /// Paroi volumique : (surfels, mailles réceptrices, écarts géométriques,
     /// octets des tables sur le GPU) de la grille la plus fine.
+    /// Paroi volumique : normale et aire (mailles de la grille au carré) de
+    /// chaque surfel de la grille entière la plus fine, dans l'ordre de
+    /// `take_wall_forces`.
+    pub fn surfel_normal_area(&self) -> Option<Vec<[f32; 4]>> {
+        let g = match &self.refine {
+            Some(r) => &r.levels[r.full - 1],
+            None => self,
+        };
+        g.surf.as_ref().map(|s| s.normal_area.clone())
+    }
+
     pub fn surfel_info(&self) -> Option<(crate::surfel3d::Stats, usize)> {
         let g = match &self.refine {
             Some(r) => r.levels.last()?,
