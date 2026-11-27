@@ -56,7 +56,11 @@ DEFAULT_PARAMS = {
     "map_eta_scale": 1.0,    # "timed": the time of passage is multiplied by this (< 1: trust the far forecast less)            # "timed": the forecast is computed every map_bin steps
     "gust_weight": 0.0,      # 0: the gusts stay where they are now, 1: they drift with the flow measured on the past
     "gust_decay": 40.0,      # the forecast gusts fade with this time constant (steps)
-    "gust_lag": 2,           # steps between the two fields used to measure the drift
+    "gust_lag": 2,
+    "gust_max_tau": 1e9,     # the gust forecast stops at this horizon (a gust moves: far ahead, it is applied to
+                             # cells the boat passes much earlier)
+    "lag_from": "previous",  # remaining time used to set the horizon: "previous" map (can flip from step to step)
+                             # or "current" (a map of the present wind, recomputed every step: stable)           # steps between the two fields used to measure the drift
 }
 
 
@@ -249,6 +253,7 @@ class ForecastPlanner(BaseAgent):
         if p["gust_weight"] <= 0 or tau <= 0 or len(self.logspeed) < 2:
             return None
         L = self.logspeed[-1] - self.logspeed0
+        tau = min(tau, p["gust_max_tau"])
         ux, uy = self._gust_flow() * tau
         Lf = _shift(L, ux, uy) * math.exp(-tau / max(p["gust_decay"], 1e-3))
         return np.exp(p["gust_weight"] * (Lf - L))
@@ -347,7 +352,10 @@ class ForecastPlanner(BaseAgent):
         vel = np.asarray(obs["velocity"], dtype=float)
 
         # map on the forecast at the expected half-way time (two passes: the remaining time depends on the map)
-        T0 = self._ttg_map(field) if self._map_cache is None else self._map_cache
+        if p["lag_from"] == "current" or self._map_cache is None:
+            T0 = self._ttg_map(field)
+        else:
+            T0 = self._map_cache
         remaining = self._value(T0, pos)
         if not np.isfinite(remaining):
             remaining = 60.0
