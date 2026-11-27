@@ -108,3 +108,25 @@ Paired difference, retrained - B: -0.02 ± 0.34 on the test set, -0.26 ± 0.28 o
 are equivalent: the retraining brings no measurable gain. On the 5 game scenarios (only 5 races), the retrained
 version does 51.9, 78.6, 61.6, 62.6 and 51.9 steps. That beats the game's Forecaster (72.76 on average), and beats the
 game's Oracle on scenarios 1 and 2.
+
+## Decisions on 400-episode sets (`agent/validate.py`, `agent/train_robust.py`)
+
+Validation set: 400 new episodes, 300 on random regimes and 100 on the training regime. A paired difference is
+measured to about ±0.15 point.
+
+| Version | Validation | Difference vs B |
+|---|---|---|
+| B (`best_params.json`) | 72.73 | — |
+| Retrained | 72.78 | +0.05 ± 0.16 |
+| Previous best, without the new forecasts | 72.17 | **-0.56 ± 0.19** |
+
+The gust and oscillation forecasts are a real gain. The retraining is not.
+
+**Training that resists over-fitting.** Every generation sails fresh episodes, 3/4 of them on random regimes. A
+candidate must beat the incumbent on a first batch, then again on a second fresh batch. In 10 generations, 5
+changes were accepted (generations 2, 3, 5, 6 and 9). The best intermediate version on the validation set was
+generation 3, at +0.24 ± 0.11. On a second set of 400 new episodes it does **-0.03 ± 0.11**: its lead was the luck of
+being chosen among 5 versions on the same episodes.
+
+**Conclusion:** B stays the best model for unknown maps (72.7 to 72.8 on 800 new episodes). Its parameters are on a
+plateau: no retraining improves them measurably. Further gains need new forecasting ideas, not more tuning.
