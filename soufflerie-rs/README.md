@@ -3581,6 +3581,38 @@ frottement de la loi en aval de la marche est celui de la mesure ; restent
 l'échange, 0,0006 à 0,0011 sous la loi, et le recollement du frottement
 (10,7 h).
 
+*Écart entre l'échange et la loi en aval.* Il ferme le bilan de quantité
+de mouvement du premier rang : la maille pariétale (h/16) glisse vite et
+accélère après le recollement, et ρ u ∂u/∂x sur la maille moins
+−∂p/∂x vaut l'écart (Cf, unités de q, `marche_n16.csv`) :
+
+| x/h | Loi − échange | Inertie − pression du premier rang |
+| --- | --- | --- |
+| 10 | 0,0012 | 0,0011 |
+| 15 | 0,0008 | 0,0006 |
+| 20 | 0,0008 | 0,0003 (loi : état final bruité) |
+
+La loi d'équilibre ignore cette inertie ; un vrai profil logarithmique sur
+la même hauteur (y⁺ ≤ 70) en porte ≈ 86 % (moyenne de u² sur la couche) :
+l'échange est donc cohérent, la loi trop forte en couche qui se relève, et
+ce n'est pas la condition limite qui perd de la contrainte. Essais :
+
+| Variante (marche, amont 80 h) | Mode rang 2 | x_r/h (1er nœud / frottement) | Cf 10 h (échange / loi) | Cf 20 h (échange / loi) |
+| --- | --- | --- | --- | --- |
+| Défaut | 0,026 | 6,30 / 10,7 | −0,0002 / 0,0009 | 0,0012 / 0,0018 |
+| Sans plancher (`--essai 4194304`) | 0,002 | 6,45 / 8,79 | 0,0003 / 0,0009 | 0,0013 / 0,0018 |
+| TBLE gradient (`SOUFFLERIE_TBLE=gp`) | 0,37 | 6,49 / 13,8 | bruité | 0,0013 / 0,0019 |
+| TBLE gradient + convection (`gpc`) | 0,29 | 6,41 / 17,8 | 0,0016 / bruité | 0,0020 / 0,0011 |
+
+Le plancher rapproche le recollement du frottement de 2 h mais il est
+indispensable ailleurs : sans lui, plaque échange 0,00307 contre loi
+0,00525, aile 4° Cx 0,0242, aile 16° Cx 0,0542, Ahmed 25° profils 0,196
+(c'était déjà la cause de la dégradation du glissement instantané sans
+plancher). La TBLE (`marche` la lit désormais) répond lentement aux
+fluctuations : sa pente ne suit pas, le mode revient au deuxième rang et
+le frottement devient bruité. Reste donc le relèvement du frottement après
+la bulle, 2 à 4 h trop lent, et non la transmission de la contrainte.
+
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
 implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à

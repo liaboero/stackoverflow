@@ -20,7 +20,8 @@
 //! par hauteur de marche), --amont (longueur amont, h), --aval (h), --ny
 //! (envergure, mailles), --t (durée, h/U), --moy (fenêtre de moyenne),
 //! --re (Re_h), --essai (bits de `set_essai`), --q (position de la paroi basse
-//! dans la maille, ½ par défaut), --fp16 (0 : simple précision), --sortie.
+//! dans la maille, ½ par défaut), --fp16 (0 : simple précision), --sortie ;
+//! `SOUFFLERIE_TBLE` (eq, gp, gpc) : loi de paroi hors équilibre.
 //! Profils aval (u, ν_t, contrainte, −u'w' résolue) : `marche_profils_n*.csv`.
 use std::io::Write;
 use std::sync::Arc;
@@ -121,6 +122,11 @@ fn main() {
     sim.periodic_span = true;
     if essai != 0 {
         sim.set_essai(essai, 0.0);
+    }
+    // Loi de paroi hors équilibre (`SOUFFLERIE_TBLE` = eq, gp, gpc).
+    if let Some(m) = lbm::tble::ParoiTble::from_env() {
+        sim.set_paroi_tble(Some(m));
+        println!("Loi de paroi TBLE : {m:?}");
     }
     println!("{} · τ₀ = {:.6} · liens de paroi {}", sim.adapter_name(), sim.tau0, sim.wall_count);
     let spt = hf / u as f64;
