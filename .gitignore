@@ -15,3 +15,5 @@ sailing/agent/params_front.json
 sailing/agent/train_front_*
 sailing/agent/results_front.json
 sailing/agent/eval_front.txt
+sailing/agent/params_v*.json
+sailing/agent/results_v*.json

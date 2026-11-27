@@ -56,3 +56,41 @@ episodes with a turning front and 28 without one, all new:
 
 Anticipating the front more strongly hurts (-1.7 ± 0.8 at 2.0, -4.1 ± 1.3 at 3.0). The bound was not what limited
 the agent.
+
+## Improving the forecast, step by step (`agent/diagnose.py`, `agent/sweep.py`)
+
+**1. Diagnostic.** The planner was given the true future of one wind component, with its own forecast for the
+others. Gain over the agent, on 48 development episodes:
+
+| True future of... | Gain |
+|---|---|
+| global rotation (oscillation) | +1.16 ± 0.48 |
+| gusts (ignored until now) | +1.12 ± 0.56 |
+| turning front | +0.38 ± 0.20 |
+| everything | +1.69 ± 0.57 |
+
+**2. Gust forecast.** The drift of the speed pattern is measured by a global Lucas-Kanade fit between two steps and
+extrapolated, with gusts fading over 30 steps. A first version filled the area entering from the map edge with a copy
+of the edge; a long shift then spread one gust over a whole band of the map (scenario 2: 83 → 102 steps). It now fills
+that area with "no gust".
+
+**3. Oscillation forecast.** A Bayesian average over 7,488 sinusoids (period 25-140, amplitude 0-60, phase), weighted
+by their fit to the measured rotation, replaces the single sinusoid fitted after 19 steps. Error 10 steps ahead, at
+step 10: 5.7° instead of 13.2°. Most of the gain the diagnostic promised is out of reach, though: 30 steps ahead the
+rotation cannot be known early in the race (error 25° at step 10, for every method). A prior narrowed to the
+training regime was worse (-0.2).
+
+**4. Hedging on the front** (a mix of the maps "the front turns" and "it does not"): no gain (-0.03 to -1.9). Not kept.
+
+**5. Time-dependent map** (every cell uses the forecast at the time the boat would pass there): worse (-0.4 to
+-0.9). Not kept.
+
+**Test set (75 episodes), paired against the previous best (72.39):**
+
+| Version | Scenarios | Training regime | Random regimes | All | Gain |
+|---|---|---|---|---|---|
+| A: new oscillation forecast | 72.51 | 73.33 | 72.22 | 72.68 | +0.30 ± 0.30 |
+| **B: A + gust forecast (`agent/best_params.json`)** | 72.43 | 73.32 | 72.93 | **73.05** | **+0.67 ± 0.43** |
+
+B is better than A on the development set (+0.32 ± 0.39) and on the test set (+0.37 ± 0.40). Scenarios with B: 49.7,
+83.7, 60.8, 61.9 and 67.2 steps. Scenario 5 is worse than with the previous best (59.4).

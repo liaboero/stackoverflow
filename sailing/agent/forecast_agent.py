@@ -44,7 +44,36 @@ DEFAULT_PARAMS = {
     "horizon": 6,            # depth of the beam search
     "beam": 24,              # width of the beam search
     "speed_floor": 0.05,     # minimal speed in the map (cells per step), avoids infinite times
+    "osc_mode": "fit",       # "fit": one sinusoid fitted after osc_min_steps; "bayes": average over all sinusoids
+    "osc_sigma": 3.0,        # "bayes": noise of the measured rotation (degrees)
+    "osc_period": [25.0, 140.0],   # "bayes": prior ranges of the period (steps) and of the amplitude (degrees)
+    "osc_amplitude": [0.0, 60.0],
+    "front_hedge": 1.0,      # while a turning front is only presumed (not seen turning yet): weight of the map where
+                             # it turns, the rest on the map where it does not (1: bet on the turn, as before)
+    "map_mode": "lag",       # "lag": one forecast field for the whole map, at the half-way time;
+                             # "timed": every cell uses the forecast at the time the boat would pass there
+    "map_bin": 8,
+    "map_eta_scale": 1.0,    # "timed": the time of passage is multiplied by this (< 1: trust the far forecast less)            # "timed": the forecast is computed every map_bin steps
+    "gust_weight": 0.0,      # 0: the gusts stay where they are now, 1: they drift with the flow measured on the past
+    "gust_decay": 40.0,      # the forecast gusts fade with this time constant (steps)
+    "gust_lag": 2,           # steps between the two fields used to measure the drift
 }
+
+
+def _shift(a, dx, dy, fill=0.0):
+    """a moved by (dx, dy) cells (bilinear): out[y, x] = a[y - dy, x - dx]. What comes in from outside the map is
+    `fill` (no gust), not a copy of the edge: copying the edge would spread one gust over a whole band of the map."""
+    n = a.shape[0]
+    ys, xs = np.mgrid[0:n, 0:n].astype(float)
+    outside = (xs - dx < 0) | (xs - dx > n - 1) | (ys - dy < 0) | (ys - dy > n - 1)
+    x = np.clip(xs - dx, 0, n - 1.000001)
+    y = np.clip(ys - dy, 0, n - 1.000001)
+    i, j = x.astype(int), y.astype(int)
+    fx, fy = x - i, y - j
+    out = ((a[j, i] * (1 - fx) + a[j, np.minimum(i + 1, n - 1)] * fx) * (1 - fy)
+           + (a[np.minimum(j + 1, n - 1), i] * (1 - fx) + a[np.minimum(j + 1, n - 1), np.minimum(i + 1, n - 1)] * fx) * fy)
+    out[outside] = fill
+    return out
 
 
 def _wrap(a):
@@ -69,6 +98,8 @@ class ForecastPlanner(BaseAgent):
         self._w = w / w.sum()
         self.ang0 = None
         self.g_hist, self.s_hist = [], []
+        self.logspeed = []      # log of the wind speed of every cell, per step (gusts and lulls change the speed)
+        self._flow = None
         self.c0 = 0.0
         self.turning_prob = 0.0
         self._map_cache = None
@@ -89,6 +120,10 @@ class ForecastPlanner(BaseAgent):
             same = c_lo * c_hi > 0
             self.c0 = 0.5 * (c_lo + c_hi)
             self.turning_prior = bool(same and min(abs(c_lo), abs(c_hi)) > self.p["front_threshold"])
+        self.logspeed.append(np.log(np.maximum(np.hypot(field[..., 0], field[..., 1]), 1e-3)).astype(float))
+        if len(self.logspeed) == 1:
+            self.logspeed0 = float(np.median(self.logspeed[0]))
+        self._flow = None
         d = _wrap(ang - self.ang0)
         # least squares on [1, lat], weighted by the free cells
         w = self._w
@@ -115,6 +150,8 @@ class ForecastPlanner(BaseAgent):
         """Predicted change of the global rotation between now (t) and t + tau."""
         g = np.asarray(self.g_hist)
         p = self.p
+        if p["osc_mode"] == "bayes":
+            return p["osc_weight"] * self._bayes_g(t, tau) if tau > 0 and len(g) >= 2 else 0.0
         if tau <= 0 or len(g) < 3:
             return 0.0
         if len(g) < p["osc_min_steps"]:
@@ -135,6 +172,29 @@ class ForecastPlanner(BaseAgent):
         f = lambda u: c[0] * math.sin(2 * math.pi * u / P) + c[1] * math.cos(2 * math.pi * u / P) + c[2]
         return p["osc_weight"] * (f(t + tau) - f(t))
 
+    def _osc_grid(self):
+        if not hasattr(self, "_grid") or self._grid[0] != (tuple(self.p["osc_period"]), tuple(self.p["osc_amplitude"])):
+            P = np.linspace(*self.p["osc_period"], 24)
+            A = np.linspace(*self.p["osc_amplitude"], 13)
+            phi = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+            PP, AA, FF = (x.ravel() for x in np.meshgrid(P, A, phi, indexing="ij"))
+            self._grid = ((tuple(self.p["osc_period"]), tuple(self.p["osc_amplitude"])), 2 * np.pi / PP, AA, FF)
+        return self._grid[1:]
+
+    def _bayes_g(self, t, tau):
+        """Expected change of the global rotation between t and t + tau, averaged over all the sinusoids
+        g(u) = A sin(w u + phi) - A sin(phi) (g(0) = 0 by construction), weighted by how well they fit the history."""
+        g = np.asarray(self.g_hist)
+        w, A, phi = self._osc_grid()
+        u = np.arange(len(g), dtype=float)
+        pred = A[:, None] * (np.sin(w[:, None] * u[None, :] + phi[:, None]) - np.sin(phi)[:, None])
+        sse = ((pred - g[None, :]) ** 2).sum(1)
+        logw = -0.5 * sse / self.p["osc_sigma"] ** 2
+        wt = np.exp(logw - logw.max())
+        wt /= wt.sum()
+        change = A * (np.sin(w * (t + tau) + phi) - np.sin(w * t + phi))
+        return float((wt * change).sum())
+
     def _front_T(self, t):
         """Duration of the turn of the front (estimated), or None when there seems to be no turning front."""
         s = np.asarray(self.s_hist)
@@ -149,6 +209,7 @@ class ForecastPlanner(BaseAgent):
                 return float(t)  # the turn is over
             return float(min(max(math.pi * t / max(math.acos(r), 1e-3), t), 60.0))
         if self.turning_prior and t < self.p["front_prior_T"]:
+            self._front_presumed = True
             return float(self.p["front_prior_T"])
         return None
 
@@ -160,9 +221,44 @@ class ForecastPlanner(BaseAgent):
         fut = c0 * (math.cos(math.pi * min((t + tau) / T, 1.0)) - 1.0)
         return self.p["front_weight"] * (fut - now)
 
+    # ------------------------------------------------------------------ gusts: drift of the speed pattern
+    def _gust_flow(self):
+        """Drift (cells per step) of the log-speed pattern, by a global Lucas-Kanade fit on the last fields."""
+        if self._flow is None:
+            k = int(self.p["gust_lag"])
+            L = self.logspeed
+            if len(L) <= k:
+                self._flow = np.zeros(2)
+            else:
+                a, b = L[-1 - k], L[-1]
+                It = (b - a) / k
+                Iy, Ix = np.gradient(0.5 * (a + b))
+                A = np.array([[(Ix * Ix).sum(), (Ix * Iy).sum()], [(Ix * Iy).sum(), (Iy * Iy).sum()]])
+                rhs = -np.array([(Ix * It).sum(), (Iy * It).sum()])
+                try:
+                    u = np.linalg.solve(A + 1e-6 * np.eye(2), rhs)
+                except np.linalg.LinAlgError:
+                    u = np.zeros(2)
+                n = np.hypot(*u)
+                self._flow = u * (min(n, 4.0) / n) if n > 0 else u
+        return self._flow
+
+    def _gust_ratio(self, tau):
+        """Factor on the wind speed of every cell between now and now + tau, if the gusts drift and fade."""
+        p = self.p
+        if p["gust_weight"] <= 0 or tau <= 0 or len(self.logspeed) < 2:
+            return None
+        L = self.logspeed[-1] - self.logspeed0
+        ux, uy = self._gust_flow() * tau
+        Lf = _shift(L, ux, uy) * math.exp(-tau / max(p["gust_decay"], 1e-3))
+        return np.exp(p["gust_weight"] * (Lf - L))
+
     def _forecast_field(self, field, t, tau, T):
         dg = self._forecast_g(t, tau)
         ds = self._forecast_s(t, tau, T)
+        ratio = self._gust_ratio(tau)
+        if ratio is not None:
+            field = np.asarray(field, dtype=float) * ratio[..., None]
         if abs(dg) < 1e-9 and abs(ds) < 1e-9:
             return np.asarray(field, dtype=float)
         rot = np.radians(dg + ds * self.lat)
@@ -226,12 +322,26 @@ class ForecastPlanner(BaseAgent):
             return float(T[min(int(p[1]), N - 1), min(int(p[0]), N - 1)])
         return float((vals[0, 0] * (1 - fx) + vals[0, 1] * fx) * (1 - fy) + (vals[1, 0] * (1 - fx) + vals[1, 1] * fx) * fy)
 
+    def _timed_field(self, field, t, T0, remaining, T_front):
+        """A field where every cell holds the forecast wind at the time the boat would reach it: now + (expected
+        remaining time - time-to-goal from that cell), from the previous map T0."""
+        b = max(int(self.p["map_bin"]), 1)
+        eta = self.p["map_eta_scale"] * (remaining - np.where(np.isfinite(T0), T0, remaining))
+        eta = np.clip(eta, 0.0, self.p["lag_max"])
+        bins = np.minimum((eta / b + 0.5).astype(int), int(self.p["lag_max"] // b))
+        out = np.empty(np.shape(field), dtype=float)
+        for k in np.unique(bins):
+            sel = bins == k
+            out[sel] = self._forecast_field(field, t, k * b, T_front)[sel]
+        return out
+
     # ------------------------------------------------------------------ act
     def act(self, obs):
         p = self.p
         field = obs["wind_field"]
         t = int(obs["step"])
         self._analyse(field)
+        self._front_presumed = False
         T_front = self._front_T(t)
         pos = np.asarray(obs["position"], dtype=float)
         vel = np.asarray(obs["velocity"], dtype=float)
@@ -242,7 +352,13 @@ class ForecastPlanner(BaseAgent):
         if not np.isfinite(remaining):
             remaining = 60.0
         lag = min(p["lag_frac"] * remaining, p["lag_max"])
-        Tmap = self._ttg_map(self._forecast_field(field, t, lag, T_front))
+        if p["map_mode"] == "timed":
+            Tmap = self._ttg_map(self._timed_field(field, t, T0, remaining, T_front))
+        else:
+            Tmap = self._ttg_map(self._forecast_field(field, t, lag, T_front))
+        h = p["front_hedge"]
+        if self._front_presumed and h < 1.0:   # hedge between "the front turns" and "it does not"
+            Tmap = h * Tmap + (1.0 - h) * self._ttg_map(self._forecast_field(field, t, lag, None))
         self._map_cache = Tmap
 
         # beam search on the forecast fields of the next steps
