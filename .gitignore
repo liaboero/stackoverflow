@@ -21,3 +21,6 @@ sailing/agent/params_v2train.json
 sailing/agent/train_v2_*
 sailing/agent/results_v2train.json
 sailing/agent/eval_v2train.txt
+sailing/agent/validation_cache/
+sailing/agent/params_robust.json
+sailing/agent/train_robust_*
