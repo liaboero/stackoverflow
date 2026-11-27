@@ -1,12 +1,12 @@
 {
-  "osc_weight": 0.7891894871226414,
-  "osc_min_steps": 21,
-  "trend_weight": 0.0,
+  "osc_weight": 0.7706365344765771,
+  "osc_min_steps": 19,
+  "trend_weight": 0.008528855329988387,
   "front_weight": 1.5,
-  "front_threshold": 6.953930556109196,
-  "front_prior_T": 50.0,
-  "lag_frac": 0.552492956322464,
+  "front_threshold": 15.150188399919939,
+  "front_prior_T": 48.668178060526316,
+  "lag_frac": 0.5635762153041464,
   "horizon": 5,
   "beam": 16,
-  "train_score": 74.41774304744908
+  "train_score": 74.61054375157798
 }
