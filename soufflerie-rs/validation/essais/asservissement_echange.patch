@@ -1,0 +1,360 @@
+diff --git a/soufflerie-rs/lbm/examples/plaque3d.rs b/soufflerie-rs/lbm/examples/plaque3d.rs
+index 0c55161..91105c6 100644
+--- a/soufflerie-rs/lbm/examples/plaque3d.rs
++++ b/soufflerie-rs/lbm/examples/plaque3d.rs
+@@ -187,6 +187,32 @@ fn main() {
+             let flat = wc.iter().filter(|c| c.1 < 0.5 && c.0[0] > x_le + 0.2 * lf && c.0[0] < x_le + 0.8 * lf).count();
+             println!("essai {essai} : Cz {:.4}, {} mailles pariétales, {edges} d'arête dont {flat} sur la partie plane", f.fz / (0.5 * (u as f64).powi(2) * body.area), wc.len());
+         }
++        if let Ok(path) = std::env::var("PLAQUE_SERVO") {
++            // Diagnostic : état de la loi de paroi par maille pariétale de
++            // l'extrados, partie plane (0,3 à 0,7 L).
++            use std::io::Write as _;
++            std::env::set_var("PLAQUE_SERVO_F", "1");
++            let nst = 400usize;
++            sim.run(nst, &ramp);
++            let (raw, geo) = sim.finest_wall_raw();
++            let wc = sim.finest_wall_cells();
++            let n = geo.len();
++            let mut fo = std::fs::File::create(&path).unwrap();
++            writeln!(fo, "x,y,z,nz,yn,ut,uwx,unx,usx,nuw,ev,c,ek,fx,fsx,evs").unwrap();
++            for (k, (p, _)) in wc.iter().enumerate() {
++                let g = geo[k];
++                if g[2] < 0.9 || p[0] < x_le + 0.3 * lf || p[0] > x_le + 0.7 * lf {
++                    continue;
++                }
++                writeln!(
++                    fo,
++                    "{:.2},{:.2},{:.3},{:.3},{:.4},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e}",
++                    p[0], p[1], p[2], g[2], g[3], raw[4 * k], raw[4 * k + 1], raw[9 * n + 3 * k], raw[12 * n + 3 * k],
++                    raw[5 * n + k], raw[16 * n + k], raw[17 * n + k], raw[18 * n + k], wf.force[k][0], raw[19 * n + 4 * k], raw[19 * n + 4 * k + 3]
++                )
++                .unwrap();
++            }
++        }
+         if std::env::var("PLAQUE_NUT").is_ok() {
+             // Diagnostic : ν̃/ν et u/U (moyennes d'envergure) au-dessus du nez.
+             let nt = sim.nu_tilde();
+diff --git a/soufflerie-rs/lbm/src/gpu3d.rs b/soufflerie-rs/lbm/src/gpu3d.rs
+index 6917468..3fe4343 100644
+--- a/soufflerie-rs/lbm/src/gpu3d.rs
++++ b/soufflerie-rs/lbm/src/gpu3d.rs
+@@ -434,7 +434,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+     // Gradient de pression (8388608) : viscosité de la couche pariétale de
+     // la loi de Mellor, κ h √(u_τ² + P h), écrite par la passe de paroi.
+     if ((P.essai & 8388608u) != 0u && (P.essai & 16777216u) == 0u) {
+-      let nw = utau[arrayLength(&utau) / 16u * 5u + k];
++      let nw = utau[arrayLength(&utau) / 19u * 5u + k];
+       if (nw >= 0.0) { out = min(NU_TILDE_MAX, nw); }
+     }
+     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
+@@ -889,7 +889,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+     // hors loi de paroi (maille ordinaire pour la collision et ν̃).
+     if (gw0.w == 0.0) {
+       utau[4u * wk] = 0.0;
+-      utau[arrayLength(&utau) / 16u * 5u + wk] = -1.0;
++      utau[arrayLength(&utau) / 19u * 5u + wk] = -1.0;
+       return;
+     }
+     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
+@@ -1096,8 +1096,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+     // près de la paroi). Diagnostic 2147483648 : glissement relaxé seul
+     // (ancien défaut).
+     let fl = (P.essai & 2147483648u) == 0u;
+-    let ob = arrayLength(&utau) / 16u * 9u + 3u * wk;
+-    let os = arrayLength(&utau) / 16u * 12u + 3u * wk;
++    let ob = arrayLength(&utau) / 19u * 9u + 3u * wk;
++    let os = arrayLength(&utau) / 19u * 12u + 3u * wk;
+     if (fl) { prev = vec3<f32>(utau[os], utau[os + 1u], utau[os + 2u]); }
+     uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
+     if (fl) {
+@@ -1105,9 +1105,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+       let un = pn + 0.1 * (tv0 - pn);
+       utau[ob] = un.x; utau[ob + 1u] = un.y; utau[ob + 2u] = un.z;
+       utau[os] = uw.x; utau[os + 1u] = uw.y; utau[os + 2u] = uw.z;
++      let utau_s = uw;
+       // Réponse de la loi à la fluctuation : pente u_τ²/(ν + ν_w) instantanée
+       // moins sa moyenne relaxée ḡ (en [15n, 16n)), le long du nœud.
+-      let og = arrayLength(&utau) / 16u * 15u + wk;
++      let og = arrayLength(&utau) / 19u * 15u + wk;
+       let gi = select(0.0, ut2 * ut2 / (P.nu + nuw), nuw >= 0.0);
+       let gb = utau[og] + 0.1 * (gi - utau[og]);
+       utau[og] = gb;
+@@ -1115,6 +1116,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+         let d = tv0 - un;
+         uw += d - dot(d, gw.xyz) * gw.xyz;
+         if (ut0 >= 1e-12) { uw -= (tv0 / ut0) * (y0 * (gi - gb)); }
++        // La loi donne la contrainte à la paroi, pas au premier nœud : entre
++        // les deux, le bilan du premier rang (inertie, pression) que la loi
++        // d'équilibre ignore. Correction c du glissement moyen, le long de
++        // ū_n, qui annule l'écart moyen entre l'échange et la loi (calculé
++        // au pas précédent par la collision, en [16n, 17n), en vitesse de
++        // glissement par la sensibilité du rebond mobile) ; intégrée au taux
++        // de la relaxation de la moyenne, en [17n, 18n). Elle ne fait que
++        // freiner : le glissement de la loi reste un plafond (au-delà, la
++        // paroi tend vers le glissement libre chargé d'une force, sans rappel
++        // du nœud : mode pair-impair ×30, couche amont faussée). Essai 268435456,
++        // non retenu : juste sur la marche (q = ½), faux aux parois à q
++        // quelconque (plaque : échange négatif ; README).
++        let lw = arrayLength(&utau) / 19u;
++        let tb = un - dot(un, gw.xyz) * gw.xyz;
++        let tl = length(tb);
++        var cc = 0.0;
++        if ((P.essai & 268435456u) != 0u && nuw >= 0.0 && tl > 1e-9) {
++          let tt = tb / tl;
++          let sb = dot(utau_s, tt);
++          // Écart filtré sur les mailles pariétales voisines, noyau [1 2 1]
++          // dans chaque direction (sur une paroi plane, [1 2 1] ⊗ [1 2 1]
++          // dans son plan) : nul sur le mode à deux mailles, que l'échange
++          // de chaque maille porte et qu'une correction maille par maille
++          // imprimerait dans le glissement (mode pair-impair ×20). Écart et
++          // sensibilité filtrés séparément : une maille à un seul lien oblique
++          // (K ≈ 0, parois à q quelconque) ne pèse que son aire.
++          var es = 0.0;
++          var ks = 0.0;
++          for (var dz = -1; dz <= 1; dz++) {
++            for (var dy = -1; dy <= 1; dy++) {
++              for (var dx = -1; dx <= 1; dx++) {
++                let wn = wall[cell(x + dx, y + dy, z + dz)];
++                if (wn != 0u && wallGeo[wn - 1u].w > 0.0) {
++                  let wt = f32(1 << u32(3 - abs(dx) - abs(dy) - abs(dz)));
++                  es += wt * utau[lw * 16u + wn - 1u];
++                  ks += wt * utau[lw * 18u + wn - 1u];
++                }
++              }
++            }
++          }
++          cc = clamp(utau[lw * 17u + wk] + select(0.0, 0.1 * es / ks, ks > 0.0), -max(sb, 0.0), 0.0);
++          uw += cc * tt;
++        }
++        utau[lw * 17u + wk] = cc;
+       }
+     }
+     utau[4u * wk + 1u] = uw.x;
+@@ -1131,12 +1176,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+       let gl = ut2 * ut2 / (P.nu + nuw);
+       gq = tt * clamp(dot(tv0 - uw, tt) / y0, 0.0, gl);
+     }
+-    let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
++    let o9 = arrayLength(&utau) / 19u * 6u + 3u * wk;
+     utau[o9] = gq.x;
+     utau[o9 + 1u] = gq.y;
+     utau[o9 + 2u] = gq.z;
+   }
+-  utau[arrayLength(&utau) / 16u * 5u + wk] = nuw;
++  utau[arrayLength(&utau) / 19u * 5u + wk] = nuw;
+ }
+ ";
+ 
+@@ -1477,7 +1522,7 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool, ep: bool) -> String
+ // du nœud à la paroi (x, y, z, d), et u_τ écrit pour la passe de transport.
+ @group(0) @binding(9) var<storage, read> nut: array<f32>;
+ @group(0) @binding(10) var<storage, read> wallGeo: array<vec4<f32>>;
+-@group(0) @binding(11) var<storage, read> utau: array<f32>;
++@group(0) @binding(11) var<storage, read_write> utau: array<f32>;
+ // Distance à la paroi de chaque maille (amortissement de la sous-maille).
+ @group(0) @binding(12) var<storage, read> wdist: array<f32>;
+ // Étendue en x du corps par tranche y (zone laminaire).
+@@ -1542,7 +1587,7 @@ fn oct_decode(k: f32) -> vec3<f32> {{
+ // qui glissent à τ ≈ ½ (README, « Mode pair-impair des parois à
+ // mi-maille ») ; à q = 1, le lien mêle les deux populations du nœud.
+ fn wall_q1(uwl: vec3<f32>, nf: vec3<f32>, c: vec3<f32>, q: f32, wk: u32) -> vec3<f32> {{
+-  let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
++  let o9 = arrayLength(&utau) / 19u * 6u + 3u * wk;
+   let g = vec3<f32>(utau[o9], utau[o9 + 1u], utau[o9 + 2u]);
+   let gt = g - dot(g, nf) * nf;
+   return uwl - gt * (max(0.0, dot(c, nf)) * (1.0 - q));
+@@ -1617,6 +1662,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+   let r_yp_zp = oyp + ozp;
+   var g: array<f32, 19>;
+   var fsum = vec3<f32>(0.0);
++  // Écart échange − loi du pas (diagnostic, cumulé dans force.w).
++  var evw = 0.0;
+   // Loi de paroi (passe `wall3d`, juste avant ce pas, sur le champ du pas
+   // précédent) : glissement de la paroi et viscosité de la couche pariétale.
+   var uw = vec3<f32>(0.0);
+@@ -1624,13 +1671,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+   var nuw = -1.0;
+   if (P.sa != 0u && hasWall) {{
+     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+-    nuw = utau[arrayLength(&utau) / 16u * 5u + wk];
++    nuw = utau[arrayLength(&utau) / 19u * 5u + wk];
+   }}
+   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
+   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
+   var vn = 0.0;
+   if (P.sa != 0u && hasWall) {{
+-    vn = utau[arrayLength(&utau) / 16u * 4u + wk];
++    vn = utau[arrayLength(&utau) / 19u * 4u + wk];
+   }}
+ {prefetch}  g[0] = pop(0u, idx);
+ {pull}
+@@ -1780,7 +1827,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+         } else {
+             "
+   if (hasWall) {
+-    force[wk] += vec4<f32>(fsum, 0.0);
++    force[wk] += vec4<f32>(fsum, evw);
+   }"
+         },
+         wforce = if bouzidi {
+@@ -1797,6 +1844,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+                     z = f(cz as f64)
+                 );
+             }
++            let mut kq = String::new();
++            for i in 1..19 {
++                let [cx, cy, cz] = C3[i];
++                let c = format!("vec3<f32>({}, {}, {})", f(cx as f64), f(cy as f64), f(cz as f64));
++                let _ = writeln!(
++                    kq,
++                    "      if (qa[{k}] > 0.0) {{ aw += {w6} * abs(dot({c}, oct_decode(ca[{k}]))); kk += {w6} * dot({c}, tt) * dot({c}, tt); rf += {w6} * ut3 * dot({c}, ut3) - {w2} * rho * {c} * (1.0 + 4.5 * dot({c}, ua) * dot({c}, ua) - 1.5 * dot(ua, ua)); }}",
++                    k = i - 1,
++                    w6 = f(6.0 * w3(i)),
++                    w2 = f(2.0 * w3(i)),
++                );
++            }
+             let mut d = String::new();
+             for i in 1..19 {
+                 let [cx, cy, cz] = C3[i];
+@@ -1821,7 +1880,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
+ {d}      fsum -= fw;
+     }}
+   }}
+-"
++  // Écart entre l'échange et la loi, le long de la vitesse moyenne relaxée
++  // du nœud ū_n : F·t − ρ u_τ² A (en [16n, 17n)), et ρ K, K = 6 Σ w_i (c_i · t)²
++  // sur les liens de paroi (sensibilité de l'échange au glissement du rebond
++  // mobile, en [18n, 19n)). La passe `wall3d` intègre leur rapport, filtrés
++  // séparément sur les voisines, dans le glissement moyen.
++  if (P.sa != 0u && nuw >= 0.0) {{
++    let lw = arrayLength(&utau) / 19u;
++    let ob = lw * 9u + 3u * wk;
++    let nw = wallGeo[wk].xyz;
++    let ub = vec3<f32>(utau[ob], utau[ob + 1u], utau[ob + 2u]);
++    let tb = ub - dot(ub, nw) * nw;
++    let tl = length(tb);
++    var ev = 0.0;
++    var ek = 0.0;
++    if (tl > 1e-9) {{
++      let tt = tb / tl;
++      var aw = 0.0;
++      var kk = 0.0;
++      var rf = vec3<f32>(0.0);
++      // Parties tangentielles seules : les produits u_t u_n (flux à travers
++      // la paroi transpirante) sont physiques.
++      let ua = u - dot(u, nw) * nw;
++      let ut3 = uw - dot(uw, nw) * nw;
++{k}      let ts = utau[4u * wk];
++      // Parts paires de l'équilibre retirées avant la projection : pression
++      // ρ Σ 2 w_i (−c_i) (≈ ρ/3 par maille, 10⁴ fois le frottement : sur la
++      // plaque, 7·10⁻⁵ rad de défaut d'orthogonalité de t suffisaient à
++      // fausser l'écart de la valeur du frottement), flux ρ (c_i·u_t)² et
++      // terme galiléen u_wt 6 w_i (c_i·u_wt), d'ordre ρ u² (10³ fois le
++      // frottement) et non nuls en tangentiel sur une maille en escalier
++      // (aile : Cz −20 %). Reste la part impaire, ∝ u − u_w, et hors
++      // équilibre : le frottement transmis.
++      ev = dot(fsum - rf, tt) - rho * ts * ts * aw;
++      ek = rho * kk;
++    }}
++    utau[lw * 16u + wk] = ev;
++    utau[lw * 18u + wk] = ek;
++    evw = ev;
++  }}
++",
++                k = kq
+             )
+         } else {
+             String::new()
+@@ -5474,7 +5573,7 @@ impl Gpu3D {
+         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
+         // (à la suite, une valeur par maille) la vitesse de transpiration,
+         // puis la viscosité de la couche pariétale (passe `wall3d`).
+-        let utau_buf = mk("utau3d", (64 * wall_count) as u64, st);
++        let utau_buf = mk("utau3d", (76 * wall_count) as u64, st);
+         let nsa = if sa { 4 * ns as u64 * (1 + keps as u64 + vles as u64) } else { 16 };
+         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
+         let nut0: Vec<f32> = if keps {
+@@ -5512,7 +5611,7 @@ impl Gpu3D {
+                 storage(8, false),
+                 storage(9, true),
+                 storage(10, true),
+-                storage(11, true),
++                storage(11, false),
+                 storage(12, true),
+                 storage(13, true),
+                 storage(14, true),
+@@ -7122,6 +7221,38 @@ impl Gpu3D {
+         g.read(&g._utau, &staging, size).chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+     }
+ 
++    /// Diagnostic : tampon u_τ entier (19 n flottants, disposition de
++    /// `WALL3_WGSL`) et géométrie (normale, distance du nœud) des mailles
++    /// pariétales de la grille entière la plus fine.
++    pub fn finest_wall_raw(&self) -> (Vec<f32>, Vec<[f32; 4]>) {
++        let g = match self.refine.as_ref() {
++            Some(r) => &r.levels[r.full - 1],
++            None => self,
++        };
++        if g.wall_count == 0 || !g.sa {
++            return (Vec::new(), Vec::new());
++        }
++        let mk = |size: u64| {
++            g.device.create_buffer(&wgpu::BufferDescriptor {
++                label: Some("wall_raw"),
++                size,
++                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
++                mapped_at_creation: false,
++            })
++        };
++        let n = g.wall_count as u64;
++        let u = g.read(&g._utau, &mk(76 * n), 76 * n);
++        if std::env::var("PLAQUE_SERVO_F").is_ok() {
++            let f = g.read(&g.force, &mk(16 * n), 16 * n);
++            let mut u = u;
++            u.extend(f);
++            let w = g.read(&g._wall_geo, &mk(16 * n), 16 * n).chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
++            return (u, w);
++        }
++        let w = g.read(&g._wall_geo, &mk(16 * n), 16 * n).chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
++        (u, w)
++    }
++
+     pub fn finest_wall_cells(&self) -> Vec<([f64; 3], f32)> {
+         let (g, org, s) = match self.refine.as_ref() {
+             Some(r) => {
+diff --git a/soufflerie-rs/lbm/src/refine3d.rs b/soufflerie-rs/lbm/src/refine3d.rs
+index 70b317c..359955e 100644
+--- a/soufflerie-rs/lbm/src/refine3d.rs
++++ b/soufflerie-rs/lbm/src/refine3d.rs
+@@ -405,7 +405,7 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
+   var vn = 0.0;
+   if (wm) {
+     uw = vec3<f32>(putau[4u * wk + 1u], putau[4u * wk + 2u], putau[4u * wk + 3u]);
+-    vn = putau[arrayLength(&putau) / 16u * 4u + wk];
++    vn = putau[arrayLength(&putau) / 19u * 4u + wk];
+   }
+   for (var i = 0u; i < 19u; i++) {
+     var q = 0.0;
+@@ -418,10 +418,10 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
+       let ci = vec3<f32>(f32(CX[i]), f32(CY[i]), f32(CZ[i]));
+       var uwl = uw - dot(uw, nf) * nf + vn * nf;
+       // Paroi virtuelle à q = 1 sous loi de paroi (`wall_q1` de gpu3d).
+-      let nuw = putau[arrayLength(&putau) / 16u * 5u + wk];
++      let nuw = putau[arrayLength(&putau) / 19u * 5u + wk];
+       let q1 = WALLQ1_C != 0u && nuw >= 0.0;
+       if (q1) {
+-        let o9 = arrayLength(&putau) / 16u * 6u + 3u * wk;
++        let o9 = arrayLength(&putau) / 19u * 6u + 3u * wk;
+         let g = vec3<f32>(putau[o9], putau[o9 + 1u], putau[o9 + 2u]);
+         uwl -= (g - dot(g, nf) * nf) * (max(0.0, dot(ci, nf)) * (1.0 - q));
+       }
+@@ -461,7 +461,7 @@ fn pre_scale(m0: Mom, x: i32, y: i32, z: i32) -> Mom {
+   }
+   // Couche pariétale de la loi de paroi : viscosité ν_w de la collision.
+   if (wm && P.sa == 1u) {
+-    let nuw = putau[arrayLength(&putau) / 16u * 5u + wk];
++    let nuw = putau[arrayLength(&putau) / 19u * 5u + wk];
+     if (nuw >= 0.0) { vt = nuw; }
+   }
+   if (P.sa == 2u) {

@@ -3613,6 +3613,40 @@ fluctuations : sa pente ne suit pas, le mode revient au deuxième rang et
 le frottement devient bruité. Reste donc le relèvement du frottement après
 la bulle, 2 à 4 h trop lent, et non la transmission de la contrainte.
 
+*Essai non retenu : glissement asservi à l'échange.* La loi donne la
+contrainte à la paroi ; imposer à la place la pente au premier nœud laisse
+à la paroi la contrainte moins l'inertie du premier rang. Essai : le
+glissement moyen est corrigé (intégrateur au taux 0,1 de la moyenne) pour
+que l'échange moyen égale ρ u_τ² A, l'écart étant converti en vitesse par
+la sensibilité du rebond mobile, ρ · 6 Σ w_i (c_i·t)² sur les liens de
+paroi, et filtré [1 2 1] sur les mailles voisines (numérateur et
+dénominateur séparément) ; la correction ne fait que freiner (au-delà, la
+paroi tend vers le glissement libre chargé d'une force : mode ×30). Code
+gardé en patch (`validation/essais/asservissement_echange.patch`, +12 o par
+maille pariétale) :
+
+| Variante | Marche Re_θ / x_r frottement / mode rang 2 | Plaque échange / loi | Aile 4° Cz / Cx | Aile 16° Cz / Cx |
+| --- | --- | --- | --- | --- |
+| Sans correction | 4 207 / 10,7 h / 0,026 | 0,00417 / 0,00404 | 0,457 / 0,0156 | 1,604 / 0,050 |
+| Écart brut | 4 943 / 6,72 h / 0,088 | −0,00162 / 0,00279 | 0,488 / 0,045 | — |
+| Pression au repos ρ Σ 2w_i(−c_i) retirée | 5 133 / 7,04 h / 0,145 | 0,00404 / 0,00385 | 0,364 / 0,035 | 1,164 / 0,102 |
+| Flux ρ(c_i·u)² et terme galiléen retirés | — | 0,00785 / 0,00355 | 0,452 / 0,025 | 1,441 / 0,080 |
+| Leurs parties tangentielles seules | — | 0,00354 / 0,00348 | 0,346 / 0,049 | 0,771 / 0,216 |
+
+Sur la marche (paroi alignée, q = ½) l'idée tient : recollement du
+frottement à 7 h au lieu de 10,7. Mais l'échange d'une maille n'est pas
+une mesure locale du frottement dès que la paroi est quelconque : la
+poussée de pression normale (≈ ρ/3 par maille, 10⁴ fois le frottement)
+fuit dans la composante tangentielle au moindre défaut d'orthogonalité
+(plaque : 7·10⁻⁵ rad suffisaient), et sur une maille en escalier (liens
+asymétriques) le flux d'équilibre ρu² (10³ fois le frottement) aussi ; le
+retirer en entier fausse la plaque (le produit u_t u_n est un vrai flux à
+travers la paroi transpirante), n'en retirer que la partie tangentielle
+effondre l'aile. Les méthodes publiées qui imposent la contrainte par le
+glissement du rebond (iMEM, Asmuth et al., *Phys. Fluids* 33, 105111,
+2021 ; Ponsin et Lozano, *Phys. Fluids* 37, 095101, 2025) ne traitent que
+des parois planes alignées sur la grille.
+
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
 implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
