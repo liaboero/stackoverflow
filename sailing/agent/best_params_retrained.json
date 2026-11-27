@@ -1,0 +1,15 @@
+{
+  "osc_weight": 0.6163327714331902,
+  "osc_sigma": 1.363780374494045,
+  "front_weight": 0.9208006406765642,
+  "front_threshold": 37.16958691876509,
+  "front_prior_T": 34.13399864265132,
+  "lag_frac": 0.7323222975541277,
+  "gust_weight": 0.5296074520833371,
+  "gust_decay": 38.887972817213694,
+  "horizon": 5,
+  "beam": 16,
+  "osc_mode": "bayes",
+  "gust_lag": 1,
+  "train_score": 74.75383988916977
+}

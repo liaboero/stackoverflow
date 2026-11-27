@@ -94,3 +94,17 @@ training regime was worse (-0.2).
 
 B is better than A on the development set (+0.32 ± 0.39) and on the test set (+0.37 ± 0.40). Scenarios with B: 49.7,
 83.7, 60.8, 61.9 and 67.2 steps. Scenario 5 is worse than with the previous best (59.4).
+
+## Retraining with the new forecasts (`agent/best_params_retrained.json`)
+
+8 parameters were retrained jointly, starting from B: 10 generations on 64 episodes, training score 74.09 → 74.75.
+
+| Version | Scenarios | Training regime | Random regimes | All (test) | Development set |
+|---|---|---|---|---|---|
+| B (`best_params.json`) | 72.43 | 73.32 | 72.93 | 73.05 | 72.53 |
+| Retrained | **73.61** | **73.78** | 72.40 | 73.03 | 72.26 |
+
+Paired difference, retrained - B: -0.02 ± 0.34 on the test set, -0.26 ± 0.28 on the development set. In general the two
+are equivalent: the retraining brings no measurable gain. On the 5 game scenarios (only 5 races), the retrained
+version does 51.9, 78.6, 61.6, 62.6 and 51.9 steps. That beats the game's Forecaster (72.76 on average), and beats the
+game's Oracle on scenarios 1 and 2.
