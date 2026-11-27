@@ -19,7 +19,9 @@
 //! `cargo run --release --example marche -- --n 16` ; options : --n (mailles
 //! par hauteur de marche), --amont (longueur amont, h), --aval (h), --ny
 //! (envergure, mailles), --t (durée, h/U), --moy (fenêtre de moyenne),
-//! --re (Re_h), --essai (bits de `set_essai`), --sortie.
+//! --re (Re_h), --essai (bits de `set_essai`), --q (position de la paroi basse
+//! dans la maille, ½ par défaut), --fp16 (0 : simple précision), --sortie.
+//! Profils aval (u, ν_t, contrainte, −u'w' résolue) : `marche_profils_n*.csv`.
 use std::io::Write;
 use std::sync::Arc;
 
@@ -64,6 +66,7 @@ fn main() {
     let moy: f64 = a.get("moy", 60.0);
     let re: f64 = a.get("re", 36000.0);
     let essai: u32 = a.get("essai", 0);
+    let fp16 = a.get("fp16", 1u32) != 0;
     let sortie: String = a.get("sortie", "target/marche".to_string());
     std::fs::create_dir_all(&sortie).unwrap();
     let hf = n as f64;
@@ -79,7 +82,8 @@ fn main() {
     // Parois à mi-chemin entre deux nœuds (q = ½) : paroi basse aval en z_lo,
     // dessus de la marche en z_lo + h, paroi haute en z_lo + 9 h ; arête de la
     // marche en x_s (entre deux nœuds aussi).
-    let z_lo = tw + 0.5;
+    let qz: f64 = a.get("q", 0.5);
+    let z_lo = tw + qz;
     let z_st = z_lo + hf;
     let z_hi = z_lo + 9.0 * hf;
     let x_s = (amont * hf).round() + 0.5;
@@ -113,7 +117,7 @@ fn main() {
         "Marche de Driver et Seegmiller · h = {n} mailles · veine {nx}×{ny}×{nz} = {:.2} M mailles · amont {amont} h, aval {aval} h · Re_h = {re:.0}",
         cells as f64 / 1e6
     );
-    let mut sim = Gpu3D::with_turbulence(&body, nu, u, true, lbm::gpu3d::Turbulence::rans_from_env()).unwrap_or_else(|e| panic!("GPU : {e}"));
+    let mut sim = Gpu3D::with_turbulence(&body, nu, u, fp16, lbm::gpu3d::Turbulence::rans_from_env()).unwrap_or_else(|e| panic!("GPU : {e}"));
     sim.periodic_span = true;
     if essai != 0 {
         sim.set_essai(essai, 0.0);
@@ -128,7 +132,7 @@ fn main() {
     let total = (t_end * spt).round() as usize;
     let debut = ((t_end - moy) * spt).round() as usize;
     // Moyennes d'envergure du plan (x, z) : u, w, ρ.
-    let mut somme = vec![[0.0f64; 3]; nx * nz];
+    let mut somme = vec![[0.0f64; 4]; nx * nz];
     let mut nsnap = 0usize;
     // Frottement de la paroi basse par colonne x.
     let mut fric = vec![0.0f64; nx];
@@ -159,6 +163,7 @@ fn main() {
                         s[0] += m[0] as f64;
                         s[1] += m[2] as f64;
                         s[2] += m[3] as f64;
+                        s[3] += m[0] as f64 * m[2] as f64;
                     }
                 }
             }
@@ -166,6 +171,27 @@ fn main() {
         }
     }
     let wf = sim.take_wall_forces();
+    // Mode pair-impair en x des premiers rangs (paroi à q ≈ ½ sous loi de
+    // paroi) : |u − moyenne des deux voisines|/U, état final.
+    {
+        let mac = sim.macros();
+        let z1 = z_lo.ceil() as usize;
+        let zst = z_st.ceil() as usize;
+        let oe = |x: usize, z: usize| {
+            let g = |x: usize| mac[id(x, 0, z)][0] as f64;
+            ((g(x) - 0.5 * (g(x - 1) + g(x + 1))) / u as f64).abs()
+        };
+        let xs_i = x_s.ceil() as usize;
+        let pts: Vec<String> = [-10.0, 15.0]
+            .iter()
+            .map(|&xh| {
+                let x = (x_s + xh * hf).round() as usize;
+                let zb = if x < xs_i { zst } else { z1 };
+                format!("{xh} h : {:.4} / {:.4}", oe(x, zb), oe(x, zb + 1))
+            })
+            .collect();
+        println!("Mode pair-impair (rangs 1 / 2) : {}", pts.join(" · "));
+    }
     // u_τ de la loi de paroi (état final), paroi basse aval.
     let mut cfl = vec![0.0f64; nx];
     for ((pp, _), st) in sim.finest_wall_cells().iter().zip(sim.finest_wall_state()) {
@@ -290,6 +316,30 @@ fn main() {
         cp_max.0,
         cp_max.1
     );
+    // Profils en aval (x = 10, 15, 20 h) : u moyen, ν_t de SA (état final,
+    // ν̃ f_v1, sans Smagorinsky), contrainte (ν + ν_t) du/dy rapportée à q.
+    let nt = sim.nu_tilde();
+    if !nt.is_empty() {
+        let pp = format!("{sortie}/marche_profils_n{n}.csv");
+        let mut g = std::fs::File::create(&pp).unwrap();
+        writeln!(g, "x_h,y_h,u_uref,nut_nu,tau_q,uw_res_q,cf_echange").unwrap();
+        for xv in [10.0, 15.0, 20.0] {
+            let x = (x_s + xv * hf).round() as usize;
+            let nut = |z: usize| {
+                let s: f64 = (0..ny).map(|y| nt[id(x, y, z)] as f64).sum::<f64>() / ny as f64;
+                let chi = s / nu;
+                s * chi.powi(3) / (chi.powi(3) + 7.1f64.powi(3))
+            };
+            for z in z1..(z_lo + 3.0 * hf) as usize {
+                let yv = z as f64 - z_lo;
+                let dudy = if z == z1 { mean(x, z + 1)[0] - mean(x, z)[0] } else { 0.5 * (mean(x, z + 1)[0] - mean(x, z - 1)[0]) };
+                let tau = (nu + nut(z)) * dudy / q;
+                let m = mean(x, z);
+                let uw = -(m[3] - m[0] * m[1]) / q;
+                writeln!(g, "{xv},{:.4},{:.5},{:.1},{:.6},{:.6},{:.6}", yv / hf, m[0] / ucore, nut(z) / nu, tau, uw, fric[x] / ny as f64 / q).unwrap();
+            }
+        }
+    }
     let res = format!("{sortie}/resultats.csv");
     let neuf = !std::path::Path::new(&res).exists();
     let mut g = std::fs::OpenOptions::new().create(true).append(true).open(&res).unwrap();

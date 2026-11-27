@@ -3447,6 +3447,49 @@ n = 16 : recollement au premier nœud 4,17 → **6,19 h** (mesure 6,26),
 frottement à 10 h / 20 h 0,0095 / 0,0104 → 0,0046 / 0,0072 ; plaque plane
 inchangée (0,00415 → 0,00420).
 
+**Mode pair-impair des parois à mi-maille (source du frottement aval).**
+Sur la marche, le frottement par échange (0,0066 à 15 h) est bien plus
+grand que la contrainte du profil moyen au premier rang, (ν + ν_t) du/dy
+≈ 0,0026 (profils `marche_profils_n16.csv`). L'écart vient d'un mode
+parasite des deux premiers rangs de toutes les parois sous loi : damier en
+x, de période 2 pas en temps, u et w en opposition (au premier rang, u
+alterne entre 0,15 et 0,32 U, w = ±0,09 U ; amplitude |u − moyenne des
+voisines| ≈ 0,2 U en amont comme en aval, nulle au recollement). Il porte
+une contrainte −u′w′ ≈ 0,0086 q vers la paroi : c'est l'excès de frottement,
+et en amont la couche « lente numérique » (H 1,6 au lieu de 1,3).
+
+Le mode n'existe que si la paroi est à moins de ≈ 0,03 maille de la
+mi-maille (q = ½, rebond pur de Bouzidi) **et** glisse (loi de paroi). Il
+est là en simple précision, sans la couche de la loi, en k-ε, avec la
+collision d'équilibre au troisième ordre (`SOUFFLERIE_DIAG=1`), avec TRT
+(Λ = ¼), en glissement libre (`--essai 16`), sans plancher du glissement,
+avec le point relevé à 2,5 mailles. Il disparaît avec la paroi adhérente
+(`SOUFFLERIE_SANS_LOI=1`) ou dès que l'interpolation de Bouzidi mêle deux
+populations (q = 0,45 ou 0,55) ; un glissement non relaxé (`--essai 8`)
+l'éteint sur les parois planes mais pas en aval. Rebond pur, paroi mobile
+à la vitesse du fluide et τ ≈ ½ aux premiers nœuds (ν_w = 34 ν) : rien n'y
+amortit ce mode de grille. La marche avait ses parois exactement à q = ½.
+
+Marche n = 16, couche amont développée sur 80 h (`--amont 80`, δ ≈ 1,5 h
+visé) :
+
+| Paroi | δ₉₉ / h | H | Re_θ | x_r/h (1er nœud / frottement) | Cf 10 h (échange / loi) | Cf 20 h (échange / loi) |
+| --- | --- | --- | --- | --- | --- | --- |
+| q = ½ (mode) | 2,28 | 1,62 | 13 900 | 5,86 / 7,55 | 0,0035 / — | 0,0063 / — |
+| q = 0,45 | 1,10 | 1,21 | 4 440 | 5,65 / 9,70 | 0,0001 / 0,0011 | 0,0014 / 0,0019 |
+| q = 0,55 | 1,03 | 1,18 | 4 180 | 5,28 / 9,40 | 0,0002 / — | 0,0014 / — |
+| q = 0,45, sans plancher (`--essai 4194304`) | 1,10 | 1,21 | 4 430 | 5,74 / 7,94 | 0,0005 / 0,0010 | 0,0014 / 0,0019 |
+| Mesure | 1,5 | ≈ 1,3 | 5 000 | 6,26 | ≈ 0,001 | ≈ 0,002 |
+
+Sans le mode, la couche amont est celle d'une plaque turbulente
+(δ ≈ 0,37 x Re_x^−0,2) et approche la mesure, et le frottement aval de la
+loi est celui de la mesure (0,0011 à 10 h, 0,0019 à 20 h). Restent :
+l'échange transmet 0,0005 de moins que la loi (relèvement après la bulle
+plus lent), le recollement au premier nœud tombe à 5,3–5,7 h et celui du
+frottement passe à 9,4–9,7 h (plancher du glissement : 7,9 h sans lui).
+Les recollements « justes » de la marche à q = ½ (6,2 h en k-ε) tenaient
+en partie au mode.
+
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
 implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
@@ -4357,6 +4400,12 @@ Durées mesurées sur la GTX 1070 partagée avec d'autres calculs : la durée
 totale varie de ±30 % d'un passage à l'autre ; les temps par passe
 (`AILE_PROFIL=200`, chaque passe isolée) sont plus sûrs. Deux passages
 alternés par modèle, on garde le plus rapide.
+
+### Diagnostic du mode pair-impair (`marche`)
+
+Options et relevés de l'exemple seulement (`--q`, `--fp16`, profils aval,
+amplitude du mode) : solveur inchangé, coût nul ; relevé des profils une
+fois en fin de calcul.
 
 ### Essai TRT des moments d'ordre 3 (`SOUFFLERIE_LAMBDA`)
 
