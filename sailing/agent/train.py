@@ -17,6 +17,8 @@ from forecast_agent import ForecastPlanner, DEFAULT_PARAMS
 
 # training episodes: half on the training regime, half on random regimes (seeds disjoint from evaluate.py)
 TRAIN_EPISODES = [("train", 1000 + i) for i in range(16)] + [("random", 10000 + i) for i in range(16)]
+if os.environ.get("SAILING_TRAIN_EPISODES") == "64":   # longer training: twice as many episodes
+    TRAIN_EPISODES += [("train", 1100 + i) for i in range(16)] + [("random", 11000 + i) for i in range(16)]
 
 SPACE = {  # name: (low, high, integer)
     "osc_weight": (0.0, 1.5, False),
@@ -61,10 +63,13 @@ def main():
     ap.add_argument("--pop", type=int, default=8)
     ap.add_argument("--sigma", type=float, default=0.25)
     ap.add_argument("--out", default=os.path.join(HERE, "params.json"))
+    ap.add_argument("--init", default=None, help="start from these parameters (JSON) instead of the defaults")
     ap.add_argument("--log", default=os.path.join(HERE, "train_log.jsonl"))
     a = ap.parse_args()
     rng = np.random.default_rng(0)
     start = {k: DEFAULT_PARAMS[k] for k in SPACE}
+    if a.init:
+        start.update({k: v for k, v in json.load(open(a.init)).items() if k in SPACE})
     with Pool(os.cpu_count()) as pool:
         best_u = to_unit(start)
         best_score = evaluate(pool, [from_unit(best_u)])[0]
