@@ -434,7 +434,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // Gradient de pression (8388608) : viscosité de la couche pariétale de
     // la loi de Mellor, κ h √(u_τ² + P h), écrite par la passe de paroi.
     if ((P.essai & 8388608u) != 0u && (P.essai & 16777216u) == 0u) {
-      let nw = utau[arrayLength(&utau) / 6u * 5u + k];
+      let nw = utau[arrayLength(&utau) / 9u * 5u + k];
       if (nw >= 0.0) { out = min(NU_TILDE_MAX, nw); }
     }
     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
@@ -889,7 +889,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     // hors loi de paroi (maille ordinaire pour la collision et ν̃).
     if (gw0.w == 0.0) {
       utau[4u * wk] = 0.0;
-      utau[arrayLength(&utau) / 6u * 5u + wk] = -1.0;
+      utau[arrayLength(&utau) / 9u * 5u + wk] = -1.0;
       return;
     }
     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
@@ -1087,8 +1087,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     utau[4u * wk + 1u] = uw.x;
     utau[4u * wk + 2u] = uw.y;
     utau[4u * wk + 3u] = uw.z;
+    // Pente du profil imposé entre la paroi et le nœud, (u_t − u_s) / y_n,
+    // le long de la vitesse du nœud, bornée par celle de la couche de la
+    // loi, u_τ² / (ν + ν_w) : la paroi virtuelle à q = 1 (`wall_q1`) la
+    // prolonge. Sans la borne, un nœud tout près de la paroi (y_n ≪ 1)
+    // amplifierait sa propre vitesse de (1 − q) / q.
+    var gq = vec3<f32>(0.0);
+    if (ut0 >= 1e-12 && nuw >= 0.0) {
+      let tt = tv0 / ut0;
+      let gl = ut2 * ut2 / (P.nu + nuw);
+      gq = tt * clamp(dot(tv0 - uw, tt) / y0, 0.0, gl);
+    }
+    let o9 = arrayLength(&utau) / 9u * 6u + 3u * wk;
+    utau[o9] = gq.x;
+    utau[o9 + 1u] = gq.y;
+    utau[o9 + 2u] = gq.z;
   }
-  utau[arrayLength(&utau) / 6u * 5u + wk] = nuw;
+  utau[arrayLength(&utau) / 9u * 5u + wk] = nuw;
 }
 ";
 
@@ -1193,14 +1208,22 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool, ep: bool) -> String
       // la normale de la maille n'est celle d'aucune face : sa composante
       // normale ferait souffler la paroi).
       var uwl = uw;
+      var q1 = false;
       if (P.sa != 0u) {{
         let nf = oct_decode(ca[{im1}]);
         // Transpiration : vitesse normale de la face (déplacement de la
         // couche limite) ; la paroi mobile de Bouzidi injecte ce débit.
         uwl = uw - dot(uw, nf) * nf + vn * nf;
+        // Paroi virtuelle au nœud solide (q = 1), voir `wall_q1`.
+        if (WALLQ1_C != 0u && nuw >= 0.0) {{
+          uwl = wall_q1(uwl, nf, vec3<f32>({ccx}, {ccy}, {ccz}), q, wk);
+          q1 = true;
+        }}
       }}
       let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
-      if (q < 0.5 && qo == 0.0) {{
+      if (q1) {{
+        v = 0.5 * (fj + pop({i}u, idx) + corr);
+      }} else if (q < 0.5 && qo == 0.0) {{
         let nb = cell(x + {cx}, y + {cy}, z + {cz});
         v = 2.0 * q * fj + (1.0 - 2.0 * q) * pop({j}u, nb) + corr;
       }} else if (q < 0.5) {{
@@ -1476,6 +1499,22 @@ fn oct_decode(k: f32) -> vec3<f32> {{
   return normalize(vec3<f32>(u, v, z));
 }}
 
+// Loi de paroi : paroi virtuelle au nœud solide du lien (q = 1). Entre la
+// paroi et le nœud, le glissement u_s et la vitesse du nœud fixent un profil
+// linéaire de pente g = (u_t − u_s) / y_n (passe `wall3d`) ; prolongé
+// jusqu'au nœud solide (c·n (1 − q) sous la paroi), il donne la vitesse de
+// la paroi virtuelle, et le lien de Bouzidi à q = 1 reproduit le même
+// profil. Le rebond pur à q = ½ (paroi exactement à mi-maille) laisse sinon
+// vivre un mode pair-impair en x, de période deux pas, aux nœuds pariétaux
+// qui glissent à τ ≈ ½ (README, « Mode pair-impair des parois à
+// mi-maille ») ; à q = 1, le lien mêle les deux populations du nœud.
+fn wall_q1(uwl: vec3<f32>, nf: vec3<f32>, c: vec3<f32>, q: f32, wk: u32) -> vec3<f32> {{
+  let o9 = arrayLength(&utau) / 9u * 6u + 3u * wk;
+  let g = vec3<f32>(utau[o9], utau[o9 + 1u], utau[o9 + 2u]);
+  let gt = g - dot(g, nf) * nf;
+  return uwl - gt * (max(0.0, dot(c, nf)) * (1.0 - q));
+}}
+
 fn absorb(x: i32, y: i32, z: i32) -> f32 {{
   // Aux Reynolds de maille modérés, la viscosité suffit à amortir les ondes ;
   // les bandes y ajouteraient un confinement (traînée de la sphère +1 % à Re = 20).
@@ -1552,13 +1591,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var nuw = -1.0;
   if (P.sa != 0u && hasWall) {{
     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
-    nuw = utau[arrayLength(&utau) / 6u * 5u + wk];
+    nuw = utau[arrayLength(&utau) / 9u * 5u + wk];
   }}
   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
   var vn = 0.0;
   if (P.sa != 0u && hasWall) {{
-    vn = utau[arrayLength(&utau) / 6u * 4u + wk];
+    vn = utau[arrayLength(&utau) / 9u * 4u + wk];
   }}
 {prefetch}  g[0] = pop(0u, idx);
 {pull}
@@ -1949,12 +1988,19 @@ fn pull_ep(walls: bool, surf: bool) -> String {
       let fj = side[wk * 18u + {jm1}u];
       let qo = qa[{jm1}];
       var uwl = uw;
+      var q1 = false;
       if (P.sa != 0u) {{
         let nf = oct_decode(ca[{im1}]);
         uwl = uw - dot(uw, nf) * nf + vn * nf;
+        if (WALLQ1_C != 0u && nuw >= 0.0) {{
+          uwl = wall_q1(uwl, nf, vec3<f32>({ccx}, {ccy}, {ccz}), q, wk);
+          q1 = true;
+        }}
       }}
       let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
-      if (q < 0.5 && qo == 0.0) {{
+      if (q1) {{
+        v = 0.5 * (fj + side[wk * 18u + {im1}u] + corr);
+      }} else if (q < 0.5 && qo == 0.0) {{
         v = 2.0 * q * fj + (1.0 - 2.0 * q) * raw[{j}] + corr;
       }} else if (q < 0.5) {{
         v = fj + corr;
@@ -3339,11 +3385,21 @@ fn trt_strip(code: &str) -> String {
     }
 }
 
+/// Paroi virtuelle à q = 1 des liens sous loi de paroi (`wall_q1` du
+/// shader), essai `SOUFFLERIE_PAROI_Q1=1` : éteint le mode pair-impair des
+/// parois à mi-maille, mais change aussi les cas qui ne l'ont pas (plaque :
+/// frottement d'échange +12 % ; README, « Mode pair-impair des parois à
+/// mi-maille »). Désactivé par défaut.
+pub(crate) fn wall_q1() -> bool {
+    std::env::var("SOUFFLERIE_PAROI_Q1").map_or(false, |v| v != "0")
+}
+
 fn specialize(code: &str, c: [u32; 7]) -> String {
     let code = mach3_strip(code, c[3] & MACH3_BIT != 0);
     let code = trt_strip(&code);
     let diag: u32 = std::env::var("SOUFFLERIE_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let code = code.replace("DIAG_C", &format!("{diag}u"));
+    let code = code.replace("WALLQ1_C", if wall_q1() { "1u" } else { "0u" });
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
@@ -5340,7 +5396,7 @@ impl Gpu3D {
         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
         // (à la suite, une valeur par maille) la vitesse de transpiration,
         // puis la viscosité de la couche pariétale (passe `wall3d`).
-        let utau_buf = mk("utau3d", (24 * wall_count) as u64, st);
+        let utau_buf = mk("utau3d", (36 * wall_count) as u64, st);
         let nsa = if sa { 4 * ns as u64 * (1 + keps as u64 + vles as u64) } else { 16 };
         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
         let nut0: Vec<f32> = if keps {

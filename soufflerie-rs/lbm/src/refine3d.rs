@@ -405,7 +405,7 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
   var vn = 0.0;
   if (wm) {
     uw = vec3<f32>(putau[4u * wk + 1u], putau[4u * wk + 2u], putau[4u * wk + 3u]);
-    vn = putau[arrayLength(&putau) / 6u * 4u + wk];
+    vn = putau[arrayLength(&putau) / 9u * 4u + wk];
   }
   for (var i = 0u; i < 19u; i++) {
     var q = 0.0;
@@ -416,9 +416,19 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
       let qo = pq[wk * 18u + j - 1u];
       let nf = oct_dec(pq[arrayLength(&pq) / 2u + wk * 18u + i - 1u]);
       let ci = vec3<f32>(f32(CX[i]), f32(CY[i]), f32(CZ[i]));
-      let uwl = uw - dot(uw, nf) * nf + vn * nf;
+      var uwl = uw - dot(uw, nf) * nf + vn * nf;
+      // Paroi virtuelle à q = 1 sous loi de paroi (`wall_q1` de gpu3d).
+      let nuw = putau[arrayLength(&putau) / 9u * 5u + wk];
+      let q1 = WALLQ1_C != 0u && nuw >= 0.0;
+      if (q1) {
+        let o9 = arrayLength(&putau) / 9u * 6u + 3u * wk;
+        let g = vec3<f32>(putau[o9], putau[o9 + 1u], putau[o9 + 2u]);
+        uwl -= (g - dot(g, nf) * nf) * (max(0.0, dot(ci, nf)) * (1.0 - q));
+      }
       let corr = 6.0 * W[i] * dot(ci, uwl);
-      if (q < 0.5 && qo == 0.0) {
+      if (q1) {
+        f[i] = 0.5 * (fj + LDpf(i, x, y, z) + corr);
+      } else if (q < 0.5 && qo == 0.0) {
         f[i] = 2.0 * q * fj + (1.0 - 2.0 * q) * LDpf(j, x + CX[i], y + CY[i], z + CZ[i]) + corr;
       } else if (q < 0.5) {
         f[i] = fj + corr;
@@ -451,7 +461,7 @@ fn pre_scale(m0: Mom, x: i32, y: i32, z: i32) -> Mom {
   }
   // Couche pariétale de la loi de paroi : viscosité ν_w de la collision.
   if (wm && P.sa == 1u) {
-    let nuw = putau[arrayLength(&putau) / 6u * 5u + wk];
+    let nuw = putau[arrayLength(&putau) / 9u * 5u + wk];
     if (nuw >= 0.0) { vt = nuw; }
   }
   if (P.sa == 2u) {
@@ -992,7 +1002,8 @@ impl Link3 {
         let pre = module(
             "pre3d",
             format!(
-                "const EP_PRE = {ep};\n{}{}{PRE}",
+                "const EP_PRE = {ep};\nconst WALLQ1_C = {}u;\n{}{}{PRE}",
+                u32::from(crate::gpu3d::wall_q1()),
                 access("pf", 3, 4, fp16, parent.p16, false, "P.pn"),
                 access_xyz("pf", ep, parent.p16, false, "P.pn", "pcell", "P.tp")
             ),

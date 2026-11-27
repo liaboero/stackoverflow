@@ -3490,6 +3490,32 @@ frottement passe à 9,4–9,7 h (plancher du glissement : 7,9 h sans lui).
 Les recollements « justes » de la marche à q = ½ (6,2 h en k-ε) tenaient
 en partie au mode.
 
+*Essai de correction : paroi virtuelle à q = 1* (`SOUFFLERIE_PAROI_Q1=1`,
+désactivé par défaut). Tout lien sous loi de paroi est traité comme si la
+paroi passait au nœud solide (Bouzidi à q = 1, qui mêle les deux
+populations du nœud), à la vitesse que donne le profil linéaire imposé
+entre la paroi et le nœud, (u_t − u_s)/y_n, prolongé de c·n (1 − q) ;
+pente bornée par celle de la loi (u_τ²/(ν + ν_w)), sans quoi un nœud tout
+près de la paroi amplifie sa propre vitesse de (1 − q)/q et le calcul
+diverge (plaque, aile). Le mode disparaît à q = ½ comme à 0,45 (marche
+n = 16, amont 80 h : δ₉₉ 1,16 h, H 1,24, Re_θ 4 730 ; recollement 6,5 /
+10,9 h ; Cf 20 h 0,0015). Mais le lien à q = 1 ne transmet pas la même
+contrainte que le lien à la vraie place, même là où le mode n'existait
+pas :
+
+| Cas | Défaut | Paroi virtuelle q = 1 |
+| --- | --- | --- |
+| Plaque (`plaque3d 64`, q = 0,3) : frottement échange / loi | 0,00418 / 0,00403 | 0,00467 / 0,00401 |
+| Aile 4° (`aile_infinie 16 2 6e6 4 12 - 60`) : Cz / Cx (bilan) | 0,457 / 0,0163 | 0,450 / 0,0177 |
+| Aile 16° : Cz / Cx (bilan) | 1,604 / 0,0499 | 1,705 / 0,0388 (pente de la loi seule) |
+| Ahmed 25°, L = 64 (pente de la loi seule) : Cx surface / boîte, C_K, C_B, profils | 0,532 / 0,603, 0,145, 0,188, 0,113 | 0,559 / 0,747, 0,150, 0,201, 0,102 |
+| Ahmed 35°, L = 64 (pente de la loi seule) : Cx surface / boîte, profils | 0,578 / 0,689, 0,086 | 0,584 / 0,756, 0,088 |
+
+Écart de même ordre avec la pente de la loi seule ou celle du profil
+imposé : il tient au lien à q = 1 lui-même (profil réel courbe sous le
+nœud, extrapolé plus loin), pas au prolongement. Non retenu par défaut ;
+la correction reste à trouver (amortir le mode sans déplacer la paroi).
+
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
 implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
@@ -4406,6 +4432,13 @@ alternés par modèle, on garde le plus rapide.
 Options et relevés de l'exemple seulement (`--q`, `--fp16`, profils aval,
 amplitude du mode) : solveur inchangé, coût nul ; relevé des profils une
 fois en fin de calcul.
+
+Paroi virtuelle à q = 1 (`SOUFFLERIE_PAROI_Q1`) : désactivée, liens de
+paroi identiques au caractère près (constante de compilation) ; résultats
+inchangés au bit près (plaque, aile 4°). Mémoire : 12 octets de plus par
+maille pariétale (pente du profil imposé), toujours alloués. Activée :
+une moyenne de deux populations par lien au lieu de l'interpolation,
+non chronométré (essai).
 
 ### Essai TRT des moments d'ordre 3 (`SOUFFLERIE_LAMBDA`)
 
