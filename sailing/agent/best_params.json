@@ -12,5 +12,6 @@
   "osc_sigma": 5.0,
   "gust_weight": 1.0,
   "gust_lag": 1,
-  "gust_decay": 30.0
+  "gust_decay": 30.0,
+  "gust_max_tau": 10.0
 }

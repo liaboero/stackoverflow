@@ -130,3 +130,20 @@ being chosen among 5 versions on the same episodes.
 
 **Conclusion:** B stays the best model for unknown maps (72.7 to 72.8 on 800 new episodes). Its parameters are on a
 plateau: no retraining improves them measurably. Further gains need new forecasting ideas, not more tuning.
+
+## Scenario 5: false start, cause and fix (`gust_max_tau`)
+
+With B, the boat went west for 6 steps at the start of scenario 5, then came back east (67.2 steps; 57.3 without the
+gust forecast). The gust forecast was right in itself: the bottom of the map on the east side loses about 10% of its
+wind 30 steps later. But the time-to-goal map uses one forecast field, about 30-40 steps ahead, for the whole route.
+The boat passes the bottom of the map in the first 5-15 steps. A moving gust forecast 30 steps ahead was therefore
+applied where the boat would be much earlier: a false lull on the good side, worth about 10 steps on the map.
+
+Fix: the gust forecast stops at 10 steps (`gust_max_tau`). Scenario 5: 53.6 steps. On the 400 validation episodes:
++0.04 ± 0.10 (a cap of 20: +0.11 ± 0.09). The fix is neutral on average and corrects a real modelling flaw, so it is
+now in `best_params.json` (B without the cap: `best_params_B_nocap.json`). With it, the 5 scenarios take 51.95, 84.51,
+60.83, 61.92 and 53.60 steps.
+
+A second flaw was found: the forecast horizon of the map flips from step to step (28, 40, 28 steps...), because it
+is set from the remaining time read on the previous map. Making it stable (a map of the present wind every step) is
+worse on scenario 5 (81.8 steps). It is left off (`lag_from`).

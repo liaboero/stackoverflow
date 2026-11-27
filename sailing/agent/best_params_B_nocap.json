@@ -1,0 +1,16 @@
+{
+  "osc_weight": 1.0,
+  "osc_min_steps": 19,
+  "trend_weight": 0.008528855329988387,
+  "front_weight": 1.5,
+  "front_threshold": 15.150188399919939,
+  "front_prior_T": 48.668178060526316,
+  "lag_frac": 0.5635762153041464,
+  "horizon": 5,
+  "beam": 16,
+  "osc_mode": "bayes",
+  "osc_sigma": 5.0,
+  "gust_weight": 1.0,
+  "gust_lag": 1,
+  "gust_decay": 30.0
+}
