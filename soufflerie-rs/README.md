@@ -3516,6 +3516,25 @@ imposé : il tient au lien à q = 1 lui-même (profil réel courbe sous le
 nœud, extrapolé plus loin), pas au prolongement. Non retenu par défaut ;
 la correction reste à trouver (amortir le mode sans déplacer la paroi).
 
+*Où le mode peut jouer* (`SOUFFLERIE_DIAG_Q=1` : répartition des q des
+liens de paroi au démarrage, par niveau de grille). Le mode demande des
+mailles dont tous les liens sont à ½ ± 0,03 (paroi plane alignée sur une
+demi-maille) :
+
+| Cas | Liens à ½ ± 0,03 | Mailles tout à ½ ± 0,03 |
+| --- | --- | --- |
+| Marche n = 16 | 100 % | 100 % |
+| Plaque 64 (q ≈ 0,3) | 1,8 % | 1,4 % |
+| Aile 4° (niveaux grossier / moyen / fin) | 5,7 / 16,5 / 5,2 % | 2,6 / 9,3 / 1,4 % |
+| Aile 16° | 5,7 / 7,4 / 5,2 % | 0 % |
+| Ahmed 25° / 35°, L = 64 | 1,0 / 0,9 % | 0,1 % |
+
+Sur les corps courbes ou inclinés, les q se répartissent à peu près
+uniformément et le damier ne trouve pas de paroi plane à mi-maille : il
+tient à la marche, dont les parois sont posées exactement à mi-maille.
+Correction retenue pour la marche : y placer la paroi hors de q = ½
+(`--q`), pas changer la paroi de tous les cas.
+
 **Vitesse du réseau et fortes incidences.** La couche ×16 à 17° (et la ×32
 à 16°) divergeait. Ce n'est pas le transport de ν̃ (diffusion à centre
 implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
@@ -4432,6 +4451,9 @@ alternés par modèle, on garde le plus rapide.
 Options et relevés de l'exemple seulement (`--q`, `--fp16`, profils aval,
 amplitude du mode) : solveur inchangé, coût nul ; relevé des profils une
 fois en fin de calcul.
+
+Diagnostic `SOUFFLERIE_DIAG_Q` : un parcours des liens au démarrage, rien
+au calcul.
 
 Paroi virtuelle à q = 1 (`SOUFFLERIE_PAROI_Q1`) : désactivée, liens de
 paroi identiques au caractère près (constante de compilation) ; résultats

@@ -3962,6 +3962,41 @@ struct CellSetup {
     surf: Option<(crate::surfel3d::SurfelSetup, Vec<bool>)>,
 }
 
+/// Diagnostic `SOUFFLERIE_DIAG_Q` : répartition des fractions q des liens de
+/// paroi (le mode pair-impair demande |q − ½| ≲ 0,03 avec une paroi glissante).
+fn diag_q(qs: &[f32], wall_count: usize) {
+    if std::env::var("SOUFFLERIE_DIAG_Q").map_or(true, |v| v == "0") {
+        return;
+    }
+    let (mut n, mut n3, mut n5) = (0usize, 0usize, 0usize);
+    let mut bins = [0usize; 10];
+    let (mut c_all, mut c_maj) = (0usize, 0usize);
+    for r in 0..wall_count {
+        let row = &qs[18 * r..18 * r + 18];
+        let (mut k, mut k3) = (0usize, 0usize);
+        for &q in row.iter().filter(|&&q| q > 0.0) {
+            k += 1;
+            let e = (q - 0.5).abs();
+            k3 += (e < 0.03) as usize;
+            n5 += (e < 0.05) as usize;
+            bins[((q * 10.0) as usize).min(9)] += 1;
+        }
+        n += k;
+        n3 += k3;
+        c_all += (k > 0 && k3 == k) as usize;
+        c_maj += (2 * k3 > k) as usize;
+    }
+    let pc = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
+    println!(
+        "Liens de paroi : {} mailles, {} liens · |q−½| < 0,03 : {:.1} % des liens, < 0,05 : {:.1} % · mailles tout à ½ ± 0,03 : {:.1} %, majorité : {:.1} %",
+        wall_count, n, pc(n3, n), pc(n5, n), pc(c_all, wall_count), pc(c_maj, wall_count)
+    );
+    println!(
+        "  q par dixième : {}",
+        bins.iter().map(|&b| format!("{:.0}", pc(b, n))).collect::<Vec<_>>().join(" / ")
+    );
+}
+
 /// Liens de paroi d'une maille fluide en `p` : fractions q, normales des
 /// faces (codées), plus petit cosinus entre elles, et si un voisin est
 /// solide. `solid_at` dit si le nœud voisin est solide.
@@ -4163,6 +4198,7 @@ fn dense_setup(body: &Body3D, nested: bool) -> CellSetup {
         }
     }
     let wall_count = wall_cells.len();
+    diag_q(&qs, wall_count);
     // Normales des liens rangées après les fractions q (même tampon).
     qs.extend_from_slice(&qn);
     let solid_mask: Vec<bool> = wall.iter().map(|&w| w == SOLID).collect();
@@ -4536,6 +4572,7 @@ fn band_setup(body: &Body3D, spec: &LayerSpec) -> Result<CellSetup, String> {
         }
     }
     let wall_count = wall_cells.len();
+    diag_q(&qs, wall_count);
     qs.extend_from_slice(&qn);
     // Fantômes à remplir : voisins (26) d'une maille active.
     let active = |c: usize| wall[c] < ghost;
