@@ -16,6 +16,9 @@ from sailing_challenge import run_episode
 from forecast_agent import ForecastPlanner
 
 VAL = [("random", 120000 + i) for i in range(300)] + [("train", 110000 + i) for i in range(100)]
+SET = os.environ.get("SAILING_VAL_SET", "validation")
+if SET == "confirmation":   # a second set of 400 new episodes, to confirm a choice made on the first one
+    VAL = [("random", 130000 + i) for i in range(300)] + [("train", 140000 + i) for i in range(100)]
 CACHE = os.path.join(HERE, "validation_cache")
 
 
@@ -32,6 +35,7 @@ def job(args):
 
 def scores(params, pool):
     key = hashlib.sha1(json.dumps(params, sort_keys=True).encode()).hexdigest()[:16]
+    key = key if SET == "validation" else f"{SET}-{key}"
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, key + ".json")
     if os.path.exists(path):
