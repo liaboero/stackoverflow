@@ -39,3 +39,20 @@ merged states on a grid of 1 cell and 1 cell/step.
 
 A* needs 10,000 to 50,000 expansions per race and finds slower routes. The heuristic is not admissible (the wind
 changes) and the state merging is coarse. With finer merging, A* stays stuck on head-wind plateaus.
+
+## Weight of the turning-front forecast (`agent/sweep_front.py`)
+
+Two trainings ended with front_weight on its upper bound (1.5). A third training allowed values up to 4. It found
+nothing better than 74.61 in 4 generations, so it was stopped. A targeted test then varied only front_weight, on 28
+episodes with a turning front and 28 without one, all new:
+
+| front_weight | Turning front | Others |
+|---|---|---|
+| 1.0 | 75.63 | 69.84 |
+| 1.5 (trained) | 75.19 | 69.69 |
+| 2.0 | 73.45 | 69.71 |
+| 2.5 | 73.40 | 69.81 |
+| 3.0 | 71.08 | 69.65 |
+
+Anticipating the front more strongly hurts (-1.7 ± 0.8 at 2.0, -4.1 ± 1.3 at 3.0). The bound was not what limited
+the agent.
