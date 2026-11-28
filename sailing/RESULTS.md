@@ -191,3 +191,36 @@ itself (was the side right?) rather than only the final score. Above all, struct
 choose the side with the uncertainty of the forecast in mind (expected time over several plausible futures, or wait
 before committing), detect the front with a probability rather than a threshold, and replace the single-horizon
 map.
+
+## Structural changes (`front_model.py`, plan_mode "ensemble", `side_model.py`, `side_commit.py`)
+
+**1. Learned turning-front probability** (`front_model.json`): one logistic regression per step, trained on 3,000
+maps with the generator's own label (a turning front or not), so only the wind is needed and no sailing. On 1,000
+other maps, compared with the old threshold rule:
+
+| Step | Log-loss: model | Old rule | Accuracy: model | Old rule |
+|---|---|---|---|---|
+| 0 | 0.063 | 0.154 | 98.1% | 97.8% |
+| 6 | 0.005 | 0.149 | 99.8% | 98.0% |
+| 24 | 0.004 | 0.195 | 99.9% | 95.9% |
+
+It fixes the imaginary front of train 1105 (69.0 → 47.7 steps). Gain on the agent: **+0.18 ± 0.11** on the validation
+set and **+0.11 ± 0.07** on the 400 confirmation episodes. **Kept** (`best_params.json`; the previous version is
+`best_params_rule_front.json`).
+
+**2. Planning over plausible futures** (expected time over "the front turns / does not", and the rotation at -1, 0,
++1 standard deviation): +0.02 ± 0.11 over the probabilistic front alone, with 9 races clearly better and 15 clearly
+worse. Not kept. Averaging the times of several futures plans as if the route were fixed now, while the boat
+adapts as the wind becomes clearer. Planning under uncertainty would have to model that adaptation.
+
+**3. The right side of the island, learned from a direct signal.** 400 episodes were labelled: the planner with the
+true future wind sails each one with the left corridor closed, then with the right one closed. The side matters: the
+median gap is 13.6 steps.
+- Predicted at the start (step 0): 58% right (62% weighted by the gap). The side cannot be read from the start.
+- The agent's own choice, made around step 12: 72% right (82% weighted). A wrong side costs 12.2 steps on average
+  and makes 65% of the agent's loss. Waiting before committing is what makes the choice good.
+- A side model at the commit point (5-fold cross-validation): 75.5% right (85.1% weighted), a little better than the
+  agent. Tilting the map with it is worse, though: -0.11 ± 0.09 (light tilt), -0.80 ± 0.27 (strong tilt). Not kept.
+
+With the probabilistic front, the 5 game scenarios take 51.95, 84.51, 60.83, 61.92 and 53.60 steps, a mean score of
+73.20.
