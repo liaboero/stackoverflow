@@ -319,7 +319,84 @@ fn main() {
         sim.set_essai(essai, cap * u as f64 * lf / re);
     }
     let moy: f64 = std::env::var("AILE_MOY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-    sim.run(((t_end - moy) * spt) as usize, &ramp);
+    // AILE_MACH=dt (cordes) : suivi de l'établissement par pas de dt, Mach
+    // du réseau maximal de la grille la plus fine (|u|/c_s), son lieu
+    // (x/c, z/c depuis le bord d'attaque, mailles de la veine) et ρ extrêmes ;
+    // arrêt au premier NaN, avec son lieu.
+    if let Some(dt) = std::env::var("AILE_MACH").ok().and_then(|v| v.parse::<f64>().ok()) {
+        let le = pts[n];
+        let mut t = 0.0;
+        // AILE_MACH_T0 : sans relevé avant cet instant (cordes).
+        if let Some(t0) = std::env::var("AILE_MACH_T0").ok().and_then(|v| v.parse::<f64>().ok()) {
+            sim.run((t0 * spt) as usize, &ramp);
+            t = t0;
+        }
+        while t < t_end - moy {
+            sim.run((dt * spt) as usize, &ramp);
+            t += dt;
+            let (pos, mac, walls, sc) = sim.deepest_cells();
+            let mut paroi = vec![usize::MAX; mac.len()];
+            for (k, (c, _)) in walls.iter().enumerate() {
+                if *c < paroi.len() {
+                    paroi[*c] = k;
+                }
+            }
+            let (mut mx, mut im, mut mx2, mut im2, mut rmin, mut ir, mut rmax, mut nnan, mut inan) = (0.0f32, 0usize, 0.0f32, 0usize, f32::INFINITY, 0usize, 0.0f32, 0usize, usize::MAX);
+            for (i, m) in mac.iter().enumerate() {
+                if !m[3].is_finite() || !m[0].is_finite() {
+                    nnan += 1;
+                    if inan == usize::MAX {
+                        inan = i;
+                    }
+                    continue;
+                }
+                if m[3] <= 0.0 {
+                    continue;
+                }
+                let v = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                if v > mx {
+                    mx = v;
+                    im = i;
+                }
+                if paroi[i] == usize::MAX && v > mx2 {
+                    mx2 = v;
+                    im2 = i;
+                }
+                if m[3] < rmin {
+                    rmin = m[3];
+                    ir = i;
+                }
+                rmax = rmax.max(m[3]);
+            }
+            let lieu = |i: usize| {
+                let p = pos[i];
+                format!("x/c {:+.4} z/c {:+.4} y {:.1}{}", (p[0] - le[0]) / lf, (p[2] - le[1]) / lf, p[1], if paroi[i] != usize::MAX { " [paroi]" } else { "" })
+            };
+            println!(
+                "  t = {t:.3} c (×{sc}) : Mach max {:.3} à {} ; hors paroi {:.3} à {} ; ρ min {:.3} à {}, max {:.3}{}",
+                mx * 3f32.sqrt(),
+                lieu(im),
+                mx2 * 3f32.sqrt(),
+                lieu(im2),
+                rmin,
+                lieu(ir),
+                rmax,
+                if inan != usize::MAX { format!(" ; NaN ({nnan} mailles) dès {}", lieu(inan)) } else { String::new() }
+            );
+            if paroi[im] != usize::MAX {
+                let w = walls[paroi[im]].1;
+                let m = mac[im];
+                println!("    maille du max : u_τ {:.4}, glissement ({:.4}, {:.4}, {:.4}), nœud ({:.4}, {:.4}, {:.4})", w[0], w[1], w[2], w[3], m[0], m[1], m[2]);
+            }
+            if inan != usize::MAX {
+                break;
+            }
+        }
+        let reste = ((t_end - moy - t).max(0.0) * spt) as usize;
+        sim.run(reste, &ramp);
+    } else {
+        sim.run(((t_end - moy) * spt) as usize, &ramp);
+    }
     let _ = sim.take_forces();
     let _ = sim.take_wall_forces();
     let mut ex = [0.0f64; 2];

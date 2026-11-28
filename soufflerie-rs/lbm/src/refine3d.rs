@@ -403,9 +403,15 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
   let wk = select(0u, wid - 1u, wm);
   var uw = vec3<f32>(0.0);
   var vn = 0.0;
+  // Masse volumique de la paroi mobile : celle du nœud (comme `gpu3d`).
+  var rw = 1.0;
   if (wm) {
     uw = vec3<f32>(putau[4u * wk + 1u], putau[4u * wk + 2u], putau[4u * wk + 3u]);
     vn = putau[arrayLength(&putau) / 16u * 4u + wk];
+    if (RHOW_C != 0u) {
+      rw = 0.0;
+      for (var i = 0u; i < 19u; i++) { rw += LDpf(i, x, y, z); }
+    }
   }
   for (var i = 0u; i < 19u; i++) {
     var q = 0.0;
@@ -425,7 +431,7 @@ fn pre_f(x: i32, y: i32, z: i32, solid: u32) -> Mom {
         let g = vec3<f32>(putau[o9], putau[o9 + 1u], putau[o9 + 2u]);
         uwl -= (g - dot(g, nf) * nf) * (max(0.0, dot(ci, nf)) * (1.0 - q));
       }
-      let corr = 6.0 * W[i] * dot(ci, uwl);
+      let corr = 6.0 * W[i] * rw * dot(ci, uwl);
       if (q1) {
         f[i] = 0.5 * (fj + LDpf(i, x, y, z) + corr);
       } else if (q < 0.5 && qo == 0.0) {
@@ -1002,8 +1008,9 @@ impl Link3 {
         let pre = module(
             "pre3d",
             format!(
-                "const EP_PRE = {ep};\nconst WALLQ1_C = {}u;\n{}{}{PRE}",
+                "const EP_PRE = {ep};\nconst WALLQ1_C = {}u;\nconst RHOW_C = {}u;\n{}{}{PRE}",
                 u32::from(crate::gpu3d::wall_q1()),
+                u32::from(crate::gpu3d::rho_paroi()),
                 access("pf", 3, 4, fp16, parent.p16, false, "P.pn"),
                 access_xyz("pf", ep, parent.p16, false, "P.pn", "pcell", "P.tp")
             ),

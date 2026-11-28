@@ -2352,6 +2352,135 @@ puis couches ×8 et ×8 + ×16 sur la même corde d'envergure ; base 128 et
   calcul de référence (L = 136) prend déjà 5,7 Go ; il faudrait d'abord
   des couches sans boîtes rattachées directement à la veine.
 
+### Paroi mobile : masse volumique du nœud (défaut depuis novembre 2026)
+
+**Diagnostic des divergences à forte incidence** (`AILE_MACH=dt` :
+relevé toutes les dt cordes, sur la grille la plus profonde, du Mach du
+réseau maximal, dans le fluide et hors des mailles pariétales, de ρ
+minimal, de leur lieu et du premier NaN ; `Gpu3D::deepest_cells`). Cas
+court : `aile_infinie 16 2 6e6 20 15 - 60` (64 mailles par corde, 20°)
+diverge en 50 s. Le NaN naît à t = 1,66 corde, pendant la mise en
+vitesse, dans **une seule maille pariétale**, au même point sur toute
+l'envergure : l'extrados au pic d'aspiration (x/c = 0,044). Sa vitesse
+passe de Mach 0,31 à 0,53 en 0,08 corde, quand le fluide voisin plafonne
+à 0,33 ; ρ y vaut 0,83, et le glissement de la loi de paroi 0,84 à 0,93
+fois la vitesse du nœud. Couche ×32 à 17° (64 mailles de base, ×8, ×16,
+×32 sur un quart de corde d'envergure, 32 M mailles) : même scénario au
+nœud du bord d'attaque (x/c = 0,004), Mach 0,70 au nœud (Cp ≈ −15) contre
+0,51 dans le fluide (Cp ≈ −8), divergence entre 3 et 4 cordes. Ce n'était
+donc pas la limite de Mach du D3Q19 (section « Vitesse du réseau ») : le
+fluide reste stable à Mach 0,5, c'est la condition de paroi qui emballe
+un nœud.
+
+**Cause.** Le lien de paroi de Bouzidi ajoute le terme de paroi mobile de
+Ladd, 6 w_i ρ_w (c_i · u_w), avec ici ρ_w = 1. Or une paroi qui glisse à
+u_w le long d'un fluide de masse volumique ρ ≠ 1 ne conserve même pas un
+écoulement uniforme : chaque lien rend (1 − ρ) 6 w_i (c_i · u_w) de trop,
+et la paroi accélère le fluide où la pression est basse, le freine où
+elle est haute. Le calcul dépendait du niveau absolu de la pression. Au
+pic d'aspiration, ρ ≈ 0,84 : la paroi, qui glisse à 0,84–0,93 fois la
+vitesse du nœud, agit comme une paroi 1/ρ ≈ 1,19 fois plus rapide, donc
+plus rapide que le nœud. Elle l'accélère, ρ baisse encore : rétroaction
+sans rappel. L'erreur pèse partout ailleurs aussi. Le glissement vaut
+O(U) et le frottement O(u_τ²) ; un écart de 1 à 3 % de ρ sur l'extrados à
+4° y fait une poussée du même ordre que le frottement, dans le sens de
+l'écoulement.
+
+**Correction** (`SOUFFLERIE_RHO_PAROI=0` rend l'ancien calcul). ρ_w est
+la masse volumique du nœud, écrite par la collision qui a produit les
+populations rebondies (même instant), dans les deux propagations et dans
+le tirage des mailles fantômes qui refait le pas pariétal de la grille
+parente (`refine3d`, somme des populations du nœud). Aucun paramètre :
+c'est la forme exacte du terme. Variantes essayées et écartées (patch
+`validation/essais/rho_paroi_variantes.patch`) :
+
+| Variante de ρ_w | Aile 20°, 64 | Marche : mode rang 2 | Plaque θ (0,6 L) |
+| --- | --- | --- | --- |
+| 1 (ancien) | diverge | 0,026 | 0,207 |
+| **nœud (retenue)** | **stable** | 0,118 | 0,225 |
+| relevé à h (∂p/∂n ≈ 0) | diverge | 0,358 | 0,212 |
+| moyenne relaxée du nœud (taux 0,1 de ū_s) | diverge | 0,131 | 0,187 |
+| ρ_w = 1 et glissement total borné par u_h − pente · y_n | stable (Mach 0,48 au pic) | — | — |
+
+ρ relevé à h suppose ∂p/∂n ≈ 0, faux au nez très courbe, où la pression
+remonte en s'éloignant de la paroi : la correction n'y est que partielle.
+La moyenne relaxée retarde la correction pendant la mise en vitesse. La
+borne du glissement (essai `SOUFFLERIE_BORNE_GL`) ne traite pas la cause
+et ne joue pas là où le relevé à h se replie sur le nœud (bord d'attaque
+du ×32 : divergence encore).
+
+**Décrochage** (aile infinie, 64 mailles par corde, bilan sur boîte à
+0,2 corde, 15 cordes dont 4 de moyenne au-delà de 4° ; « avant » : même
+programme avec `SOUFFLERIE_RHO_PAROI=0` à 4, 16, 18 et 20°, sinon
+tableau de « Décrochage ») :
+
+| α | Avant Cz / Cx | Après Cz / Cx | Ladson Cz | TMR SA Cz / Cx |
+| --- | --- | --- | --- | --- |
+| 4° | 0,457 / 0,0156 | 0,452 / 0,0181 | 0,43–0,44 | — |
+| 8° | 0,971 / 0,0284 | 0,962 / 0,0321 | 0,87–0,89 | — |
+| 10° | 1,115 / 0,0312 | 1,095 / 0,0349 | 1,07–1,08 | 1,091 / 0,0123 |
+| 12° | 1,311 / 0,0360 | 1,293 / 0,0422 | 1,26–1,27 | — |
+| 14° | 1,534 / 0,0603 | 1,452 / 0,0668 | 1,44–1,45 | — |
+| 15° | 1,491 / 0,0670 | 1,321 / 0,0759 | 1,51–1,53 | 1,546 / 0,021 |
+| 16° | 1,613 / 0,0480 | 1,560 / 0,0584 | 1,57–1,58 | 1,62 / 0,025 |
+| 17° | 1,641 / 0,0698 | **1,611** / 0,0880 | 1,61–1,63 | 1,67 / 0,030 |
+| 18° | 1,694 / 0,1060 | 1,518 / 0,1149 | 1,0–1,2 | 1,69 / 0,039 |
+| 19° | 1,693 / 0,1159 | 1,432 / 0,1263 | — | 1,60 / 0,060 |
+| 20° | diverge | 1,422 / 0,1316 | — | — |
+
+Pour la première fois la portance a un maximum : **Cz max 1,61 à 17°**,
+celui de Ladson (1,61–1,63 à 17,1–17,2°), puis elle baisse, de 6 % à 18°
+et de 11 % à 19°. Le plateau de 1,69 à 1,71 de 17 à 19° a disparu, et 20°
+ne diverge plus. La chute reste plus douce que la mesure (1,0–1,2 à 18°),
+comme chez SA lui-même (TMR : 1,69 à 18°, 1,60 à 19°). En dessous du
+décrochage, Cz baisse de 1 à 2 % et s'approche de Ladson (10° : 1,095
+contre 1,07–1,08 ; TMR SA 1,091). Reste le creux de 15° à 64 mailles,
+déjà présent avant (1,32 sous 14°), signe d'une résolution insuffisante.
+Le relevé de décollement (vitesse moyenne du nœud pariétal, et minimum
+de u·t sur la normale jusqu'à 0,08 c) ne trouve toujours pas de reflux :
+la vitesse du nœud au dernier 40e de l'extrados tombe à 0,28 U∞ à 18°
+(0,6 U∞ avant), mais le glissement de Spalding garde le signe de u_τ.
+La perte de portance vient d'une couche limite qui s'épaissit fortement
+au bord de fuite (Cx 0,115 à 18°), pas d'un reflux à la paroi.
+
+**Prix : la traînée en attaché.** Cx monte de 10 à 16 % de 4 à 12° (4° :
+0,0181 contre 0,0156 ; Ladson 0,008), entièrement en pression (surface à
+4° : 0,0079 contre 0,0069 ; frottement de la loi inchangé, 0,0062).
+L'ancien terme poussait l'extrados (ρ < 1) et amincissait la couche lente
+numérique : l'accord à 4° tenait en partie à cette compensation.
+
+**Autres cas** (même programme) :
+
+| Cas | Avant | Après | Référence |
+| --- | --- | --- | --- |
+| Plaque (`plaque3d 64`) : frottement échange / loi | 0,00417 / 0,00404 | 0,00454 / 0,00401 | théorie 0,00389 |
+| Plaque : θ à 0,6 L (mailles) | 0,207 | 0,225 | 0,097 |
+| Marche n = 16, amont 80 h : mode rang 1 / 2 à −10 h | 0,0004 / 0,026 | 0,0012 / 0,118 | — |
+| Marche : δ₉₉ / h, H, Re_θ | 1,09, 1,20, 4 210 | 1,22, 1,22, 4 922 | 1,5, ≈ 1,3, 5 000 |
+| Marche : x_r/h (1er nœud / frottement) | 6,30 / 10,7 | 6,33 / 10,51 | 6,26 |
+| Marche : Cf 10 h / 20 h (échange) | −0,0002 / 0,0012 | −0,0002 / 0,0012 | ≈ 0,001 / 0,002 |
+| Ahmed 25°, L = 64 : Cx boîte ±0,1 L / extrapolée, profils | 0,645, 0,121 | 0,622 / 0,641, 0,120 | 0,30 |
+| Ahmed 35°, L = 64 : Cx boîte ±0,1 L / extrapolée, profils | 0,617, 0,087 | 0,605 / 0,634, 0,086 | 0,26 |
+
+La plaque passe à +13 % entre l'échange et la loi (+3 % avant), même
+mécanisme qu'à 4° (U_e/U = 1,06 au-dessus de la plaque, donc ρ < 1). La
+marche (parois à q = ½) retrouve une couche amont plus épaisse, plus
+proche de la mesure (Re_θ 4 922 contre 5 000), mais le mode pair-impair
+reprend au deuxième rang (0,12 U ; recollement et frottement aval
+inchangés). Ahmed (instationnaire, ±0,04 sur Cx d'un tirage à l'autre)
+est inchangé.
+
+**Couches fines : stables.** Couche ×32 à 17° (64 mailles de base,
+couches ×8, ×16, ×32, cette dernière sur un quart de corde d'envergure ;
+32 M mailles, 512 mailles par corde à la paroi ; 10 cordes, 3 de moyenne,
+55 min) : elle divergeait entre 3 et 4 cordes. Elle tient maintenant, le
+nœud pariétal du bord d'attaque suit le fluide (Mach 0,60 contre 0,57
+dans le fluide à 7 cordes). **Cz 1,624 ± 0,007**, Cx 0,067 ; bilan
+indépendant de la marge (Cz 1,616 à 1,624, Cx 0,065 à 0,067 de 0,05 à
+0,2 c). La portance ne monte plus quand la paroi est affinée : 1,611 à
+64 mailles, 1,624 à 512 (avant : 1,62 → 1,73 de 64 à 256 à 16°, puis
+divergence). Toujours aucun reflux relevé.
+
 ### Programmes de diagnostic
 
 Les essais décrits dans ce document se refont avec les programmes de
@@ -3653,6 +3782,9 @@ implicite essayée : diverge aussi), c'est le nombre de Mach du réseau : à
 U = 0,1 (Mach 0,17 à l'entrée), le pic d'aspiration du bord d'attaque
 (Cp ≈ −10, |u| ≈ 3,3 U) atteint Mach 0,57, au-delà de la stabilité du
 D3Q19 ; les grilles grossières l'étalent, les couches fines le résolvent.
+*Diagnostic corrigé depuis* : le fluide tient Mach 0,5 ; c'est un nœud
+pariétal du pic d'aspiration que le terme de paroi mobile, pris à ρ_w = 1,
+emballait (voir « Paroi mobile : masse volumique du nœud »).
 `aile_infinie` prend `AILE_U` (vitesse d'entrée du réseau, 0,1 par défaut) :
 
 | Aile infinie, 128 mailles | U = 0,1 | U = 0,05 | Ladson |
@@ -3798,7 +3930,9 @@ zones ») : 128 mailles par corde de base, couches ×16 et ×32 sur une
 demi-corde d'envergure, 53 M mailles (33,8 M pour le ×32), 1 260 M mises à
 jour par pas de la veine. Le calcul diverge (54 min), comme le ×16 à 17° :
 les couches très fines à forte incidence ne sont pas stables à U = 0,1
-(Mach du réseau au pic d'aspiration, voir ci-dessus). Même divergence à deux
+(Mach du réseau au pic d'aspiration, voir ci-dessus ; cause réelle : le
+terme de paroi mobile à ρ_w = 1, voir « Paroi mobile : masse volumique du
+nœud »). Même divergence à deux
 jeux attendue : la propagation en place donne le même résultat sur ce
 raccord qui coupe la paroi (64 mailles, couche ×16, 4° : Cz 0,4097 /
 0,4108).
@@ -4860,3 +4994,15 @@ Couche de la loi de paroi : un Newton (loi de Spalding) de plus par maille
 0,82–0,87 ms avec ou sans (dans le bruit). Mémoire : aucune. Bilan sur
 boîte : ensemble des nœuds recopiés de la grille du bilan, sur le
 processeur, à chaque relevé (4 octets par nœud recopié).
+
+### Paroi mobile à la masse volumique du nœud (`SOUFFLERIE_RHO_PAROI`)
+
+Une lecture de plus par maille pariétale et par pas (ρ du nœud, déjà en
+mémoire dans `macroBuf`) et une multiplication par lien de paroi ; au
+tirage des fantômes qui refait le pas pariétal parent, une somme de 19
+populations par nœud parent pariétal. Mémoire : aucune. Durée du pas
+inchangée à la mesure près (aile 4°, 64 mailles, `AILE_PROFIL=200`, deux
+passages alternés : collision de la veine 1,152–1,153 ms contre 1,156 ;
+collisions pariétales 0,031–0,041 contre 0,032–0,034 ms). Diagnostic `AILE_MACH` : une
+relecture de la grille la plus profonde par relevé (calcul de diagnostic
+seulement).
