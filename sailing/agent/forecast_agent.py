@@ -63,6 +63,8 @@ DEFAULT_PARAMS = {
     "plan_mode": "single",   # "single": one forecast; "ensemble": expected time over several plausible futures
                              # (the front turns or not, weighted by its probability; the rotation at -1, 0, +1 sd)
     "osc_spread": 1.0,       # "ensemble": the rotation scenarios are at +/- osc_spread standard deviations
+    "side_bias": 0.0,        # > 0: when the boat is about to choose its side of the central island, the learned side
+                             # model (side_model.json) tilts the map: side_bias steps per unit of logit
     "lag_from": "previous",  # remaining time used to set the horizon: "previous" map (can flip from step to step)
                              # or "current" (a map of the present wind, recomputed every step: stable)           # steps between the two fields used to measure the drift
 }
@@ -361,6 +363,35 @@ class ForecastPlanner(BaseAgent):
             return float(T[min(int(p[1]), N - 1), min(int(p[0]), N - 1)])
         return float((vals[0, 0] * (1 - fx) + vals[0, 1] * fx) * (1 - fy) + (vals[1, 0] * (1 - fx) + vals[1, 1] * fx) * fy)
 
+    _side_W = None
+
+    def _side_tilt(self, Tmap, field, t, pos):
+        """Before the boat passes the middle of the corridors, add the learned side preference to the map."""
+        import side_model as sm
+        if not hasattr(self, "_side"):
+            self._side = None
+            self._rows = sm.corridor_rows(self.mask)
+        y0, y1 = self._rows
+        if y1 < y0 or pos[1] >= (y0 + y1) / 2:
+            return Tmap
+        if self._side is None:
+            if pos[1] < y0 - 6:
+                return Tmap
+            if ForecastPlanner._side_W is None:
+                import json, os
+                ForecastPlanner._side_W = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                      "side_model.json")))
+            self._pos = pos
+            x = np.array(sm.side_features(self, field, t, 35.0) + [pos[0] / 64 - 1, t / 20])
+            z = float(np.dot(ForecastPlanner._side_W["weights"], x))   # logit of "the right side is better"
+            self._side = (z, sm.corridor(self.mask, "left"), sm.corridor(self.mask, "right"))
+        z, left, right = self._side
+        b = self.p["side_bias"] * max(min(z, 4.0), -4.0) / 2
+        out = Tmap.copy()
+        out[right] -= b
+        out[left] += b
+        return out
+
     def _ensemble_map(self, field, t, lag, p_turn, T_turn):
         """Expected time to the goal over several plausible futures: the front turns (probability p_turn) or not,
         and the global rotation is at its expected value or one spread lower / higher (weights 1/4, 1/2, 1/4)."""
@@ -423,6 +454,8 @@ class ForecastPlanner(BaseAgent):
         h = p["front_hedge"]
         if self._front_presumed and h < 1.0:   # hedge between "the front turns" and "it does not"
             Tmap = h * Tmap + (1.0 - h) * self._ttg_map(self._forecast_field(field, t, lag, None))
+        if p["side_bias"] > 0:
+            Tmap = self._side_tilt(Tmap, field, t, pos)
         self._map_cache = Tmap
 
         # beam search on the forecast fields of the next steps

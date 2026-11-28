@@ -71,21 +71,49 @@ def label(args):
     return out
 
 
+def from_map(agent, field, src):
+    """Time from the boat's position to every cell (forward Dijkstra, the same edge times as _ttg_map)."""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    from sailing_challenge.physics import target_velocities
+    from forecast_agent import MOVES, N
+    tv = target_velocities(field)[:8]
+    speed = np.maximum(np.hypot(tv[..., 0], tv[..., 1]), agent.p["speed_floor"])
+    idx = np.arange(N * N).reshape(N, N)
+    rows, cols, data = [], [], []
+    ys, xs = np.mgrid[0:N, 0:N]
+    for a, (dx, dy) in enumerate(MOVES):
+        u, v = xs + dx, ys + dy
+        ok = (u >= 0) & (u < N) & (v >= 0) & (v < N) & agent.free
+        ok[ok] &= agent.free[v[ok], u[ok]]
+        rows.append(idx[ys[ok], xs[ok]]); cols.append(idx[v[ok], u[ok]])
+        data.append(math.hypot(dx, dy) / speed[a][ok])
+    G = csr_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))), shape=(N * N, N * N))
+    return dijkstra(G, directed=True, indices=int(src[1]) * N + int(src[0])).reshape(N, N)
+
+
 def side_features(agent, field, t, lag):
     """Features of the side choice, from the agent's own analysis at step t."""
     p_turn, T_turn = agent._front_prob_T(t)
     left, right = corridor(agent.mask, "left"), corridor(agent.mask, "right")
 
-    def best(Tm, c):
-        v = Tm[c & np.isfinite(Tm)]
-        return float(v.min()) if len(v) else 200.0
+    y0, y1 = corridor_rows(agent.mask)
+    mid = np.zeros_like(agent.mask)
+    mid[(y0 + y1) // 2, :] = True          # the middle row of the corridors
+    pos = agent._pos
+
+    def via(F, Tm, c):
+        """Fastest route through one corridor: from the boat to a cell of its middle row, then to the goal."""
+        tot = F + Tm
+        v = tot[c & mid & np.isfinite(tot)]
+        return float(v.min()) if len(v) else 300.0
     d = []
     for T in (T_turn, None):
-        Tm = agent._ttg_map(agent._forecast_field(field, t, lag, T))
-        # time from the start to the goal by each side: from the start to the corridor (now) + from it to the goal
-        d.append((best(Tm, right) - best(Tm, left)) / 10)
-    Tnow = agent._ttg_map(field)
-    d_now = (best(Tnow, right) - best(Tnow, left)) / 10
+        fut = agent._forecast_field(field, t, lag, T)
+        Tm, F = agent._ttg_map(fut), from_map(agent, agent._forecast_field(field, t, lag / 3, T), pos)
+        d.append((via(F, Tm, right) - via(F, Tm, left)) / 10)
+    Tnow, Fnow = agent._ttg_map(field), from_map(agent, field, pos)
+    d_now = (via(Fnow, Tnow, right) - via(Fnow, Tnow, left)) / 10
     ang = math.radians(float(np.degrees(np.arctan2(field[..., 1].mean(), field[..., 0].mean()))))
     lay = agent.mask.sum() / 1000
     return [1.0, d[0] * p_turn + d[1] * (1 - p_turn), d[0], d[1], d_now, p_turn, (2 * p_turn - 1) * math.copysign(1, agent.c0),
@@ -97,6 +125,7 @@ def features_episode(args):
     env = SailingEnv(regime); obs, info = env.reset(seed=seed)
     a = ForecastPlanner({**BEST, "front_mode": "prob"}); a.reset(info["env_info"])
     a._analyse(obs["wind_field"])
+    a._pos = obs["position"]
     return side_features(a, obs["wind_field"], 0, 35.0)
 
 
