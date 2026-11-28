@@ -81,8 +81,11 @@ au-delà de 5 %.
    paroi (loi de paroi ou non), transition imposée. Une ligne dit si la
    couche limite est résolue ou modélisée.
 3. *Maillage et durée* : résolution L (mailles par longueur de
-   référence), grilles imbriquées ×2 à ×8, couches pariétales, précision
-   des nombres, durée en temps convectifs t* = tU/L.
+   référence), grilles imbriquées ×2 à ×8, couches pariétales, contour de
+   la maquette STL (liens de Bouzidi par défaut, les plus justes ; surfels
+   ou surfels + miroir pour comparer avec une paroi volumique à la
+   PowerFLOW, moins justes aujourd'hui), précision des nombres, durée en
+   temps convectifs t* = tU/L.
 
 Sous les réglages, le **coût estimé** : mailles de chaque grille, mémoire du
 GPU, durée de la mise en place et du calcul. Au-delà de 40 M mailles en

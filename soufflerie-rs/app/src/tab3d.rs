@@ -1600,6 +1600,7 @@ impl Tab3D {
         let mut open = self.help;
         egui::Window::new("Soufflerie 3D : raccourcis")
             .open(&mut open)
+            .default_width(560.0)
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
@@ -1621,6 +1622,28 @@ impl Tab3D {
                     ] {
                         ui.label(RichText::new(k).monospace().strong());
                         ui.label(d);
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("Contour de la maquette STL (3 · Maillage et durée)").strong());
+                egui::Grid::new("s3_aide_contour").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
+                    for (k, d) in [
+                        (
+                            "liens",
+                            "défaut, le plus juste : chaque lien coupé par la paroi rebondit à la distance exacte de la surface (Bouzidi) ; seul compatible avec les couches pariétales",
+                        ),
+                        (
+                            "surfels",
+                            "paroi volumique à la PowerFLOW : la surface est découpée en facettes qui échangent masse et quantité de mouvement avec les mailles coupées ; masse conservée exactement, mais perte de pression d'arrêt au bord d'attaque et traînée trop forte (aile 4° : Cx 0,043 contre 0,018) ; pour comparer, pas pour mesurer",
+                        ),
+                        (
+                            "surfels + miroir",
+                            "surfels dont le rebond renvoie chaque particule là où la paroi la réfléchit : un tiers de perte d'arrêt en moins, préparation 2,3 fois plus longue, instable sans modèle de turbulence à grand Reynolds",
+                        ),
+                    ] {
+                        ui.label(RichText::new(k).monospace().strong());
+                        ui.add(egui::Label::new(d).wrap());
                         ui.end_row();
                     }
                 });

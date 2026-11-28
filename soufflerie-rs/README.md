@@ -2663,8 +2663,8 @@ L'onglet suit le déroulement d'un essai, de gauche à droite :
   de la veine**, lissage, arêtes vives), *2 · Écoulement* (Reynolds ou
   échelle physique, paroi, transition ; une ligne dit si la couche limite est
   résolue ou modélisée), *3 · Maillage et durée* (résolution, grilles ×2 à
-  ×8, couches pariétales avec l'épaisseur minimale d'1/8 de corde, précision,
-  durée) et le **coût estimé** : mailles de chaque grille, mémoire du GPU,
+  ×8, couches pariétales avec l'épaisseur minimale d'1/8 de corde,
+  **contour** de la maquette STL, précision, durée) et le **coût estimé** : mailles de chaque grille, mémoire du GPU,
   durée. Les infobulles disent l'effet physique de chaque réglage.
 - **Vue** (au centre) : vue 3D ou coupe à plat (V), vorticité, vitesse ou
   critère Q, plan et position, maquette lisse, avec la grille ou en mailles
@@ -2776,6 +2776,14 @@ référence (`--bande-corde 0.125`) si la case est cochée : les mêmes couches
 creuses et les mêmes optimisations qu'en ligne de commande ; « Détails du
 calcul » donne les mailles de chaque grille et la vitesse sur toutes les
 grilles.
+« Contour » choisit la représentation de la paroi de la maquette STL :
+
+| Contour | Ce qu'il fait | Quand l'utiliser |
+| --- | --- | --- |
+| liens (défaut) | chaque lien du réseau coupé par la surface rebondit à la distance exacte de la paroi (Bouzidi), avec la loi de paroi | toujours pour mesurer : le plus juste (aile 4° : Cz 0,452, Cx 0,018), seul compatible avec les couches pariétales |
+| surfels | paroi volumique à la PowerFLOW (Chen et al. 1998) : la surface est découpée en facettes qui rassemblent et réémettent les populations des mailles coupées | comparer les deux approches : masse conservée exactement, mais perte de pression d'arrêt au bord d'attaque et traînée trop forte (aile 4° : Cz 0,40, Cx 0,043), voir « Perte à l'arrêt et bord de fuite des surfels » |
+| surfels + miroir | surfels dont le rebond renvoie chaque particule là où la paroi la réfléchit (`SOUFFLERIE_SURFELS_MIROIR=1`) | même usage : un tiers de perte d'arrêt en moins (Cx 0,042), préparation 2,3 fois plus longue, instable sans modèle de turbulence à grand Reynolds |
+
 
 En ligne de commande :
 `soufflerie run3d --stl fichier.stl --l 32 --re 5000` étudie une maquette
