@@ -1300,7 +1300,7 @@ fn wgsl_step(fp16: bool, p16: bool, walls: bool, surf: bool, ep: bool) -> String
           q1 = true;
         }}
       }}
-      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
+      let corr = {w6} * rw * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
       if (q1) {{
         v = 0.5 * (fj + pop({i}u, idx) + corr);
       }} else if (q < 0.5 && qo == 0.0) {{
@@ -1669,9 +1669,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   var uw = vec3<f32>(0.0);
   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
   var nuw = -1.0;
+  // Masse volumique de la paroi mobile (terme 6 w_i ρ_w c_i · u_w de
+  // Bouzidi–Ladd) : celle du nœud, au même instant que ses populations
+  // (écrite par la collision qui les a produites). Avec ρ_w = 1, une paroi
+  // qui glisse le long d'un fluide de ρ ≠ 1 lui donne (1 − ρ) u_w de trop par
+  // lien : l'écoulement dépend du niveau absolu de pression, et au pic
+  // d'aspiration (ρ ≈ 0,84) la paroi, qui glisse à presque la vitesse du
+  // nœud, l'accélère au-delà de sa propre vitesse et l'emballe (README,
+  // « Paroi mobile »). `SOUFFLERIE_RHO_PAROI=0` : ρ_w = 1 (ancien calcul).
+  var rw = 1.0;
   if (P.sa != 0u && hasWall) {{
     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
     nuw = utau[arrayLength(&utau) / 16u * 5u + wk];
+    if (RHOW_C != 0u) {{ rw = macroBuf[idx].w; }}
   }}
   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
@@ -2086,7 +2096,7 @@ fn pull_ep(walls: bool, surf: bool) -> String {
           q1 = true;
         }}
       }}
-      let corr = {w6} * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
+      let corr = {w6} * rw * dot(vec3<f32>({ccx}, {ccy}, {ccz}), uwl);
       if (q1) {{
         v = 0.5 * (fj + side[wk * 18u + {im1}u] + corr);
       }} else if (q < 0.5 && qo == 0.0) {{
@@ -3474,6 +3484,12 @@ fn trt_strip(code: &str) -> String {
     }
 }
 
+/// Masse volumique du nœud dans le terme de paroi mobile des liens de paroi
+/// (défaut) ; `SOUFFLERIE_RHO_PAROI=0` : ρ_w = 1 (ancien calcul).
+pub(crate) fn rho_paroi() -> bool {
+    std::env::var("SOUFFLERIE_RHO_PAROI").map_or(true, |v| v != "0")
+}
+
 /// Paroi virtuelle à q = 1 des liens sous loi de paroi (`wall_q1` du
 /// shader), essai `SOUFFLERIE_PAROI_Q1=1` : éteint le mode pair-impair des
 /// parois à mi-maille, mais change aussi les cas qui ne l'ont pas (plaque :
@@ -3497,6 +3513,7 @@ fn specialize(code: &str, c: [u32; 7]) -> String {
     let diag: u32 = std::env::var("SOUFFLERIE_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let code = code.replace("DIAG_C", &format!("{diag}u"));
     let code = code.replace("WALLQ1_C", if wall_q1() { "1u" } else { "0u" });
+    let code = code.replace("RHOW_C", if rho_paroi() { "1u" } else { "0u" });
     let body = code
         .replace("P.lesA", "P.\u{1}A")
         .replace("P.essaiNu", "P.\u{2}Nu")
@@ -7196,6 +7213,43 @@ impl Gpu3D {
                 ([org[0] + p[0] / s, org[1] + p[1] / s, org[2] + p[2] / s], e)
             })
             .collect()
+    }
+
+    /// Diagnostic de la grille la plus profonde (couches creuses comprises) :
+    /// position (mailles de la veine) et (u, ρ) de chaque maille, rangs des
+    /// mailles pariétales avec l'état de leur loi de paroi (u_τ, glissement),
+    /// rapport de raffinement.
+    pub fn deepest_cells(&mut self) -> (Vec<[f64; 3]>, Vec<[f32; 4]>, Vec<(usize, [f32; 4])>, f64) {
+        let (k, org, sc) = match self.refine.as_ref() {
+            Some(r) => {
+                let k = (0..r.levels.len()).max_by_key(|&i| r.depth[i]).unwrap_or(0);
+                (Some(k), r.origin[k], r.scale(k))
+            }
+            None => (None, [0.0; 3], 1.0),
+        };
+        let g: &mut Gpu3D = match k {
+            Some(k) => &mut self.refine.as_mut().unwrap().levels[k],
+            None => self,
+        };
+        let mac = g.macros();
+        let pos = (0..mac.len()).map(|c| {
+            let p = g.cell_xyz(c);
+            [org[0] + p[0] as f64 / sc, org[1] + p[1] as f64 / sc, org[2] + p[2] as f64 / sc]
+        }).collect();
+        let st: Vec<[f32; 4]> = if g.wall_count == 0 || !g.sa {
+            Vec::new()
+        } else {
+            let size = 16 * g.wall_count as u64;
+            let staging = g.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("utau_read"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            g.read(&g._utau, &staging, size).chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+        };
+        let walls = g.wall_cells.iter().enumerate().map(|(i, &c)| (c as usize, st.get(i).copied().unwrap_or([0.0; 4]))).collect();
+        (pos, mac, walls, sc)
     }
 
     /// Position de la maille de rang `c` (origine de la grille si `c` est

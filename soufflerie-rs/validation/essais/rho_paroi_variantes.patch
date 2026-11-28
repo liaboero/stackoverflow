@@ -1,0 +1,308 @@
+Essais écartés (README, « Paroi mobile : masse volumique du nœud »), à appliquer
+sur le code par défaut : `git apply soufflerie-rs/validation/essais/rho_paroi_variantes.patch`.
+
+- SOUFFLERIE_RHO_PAROI : absente, ρ_w = moyenne relaxée de ρ du nœud (taux 0,1,
+  17e flottant par maille pariétale) ; h, ρ relevé à h ; noeud, ρ du nœud ;
+  0, ρ_w = 1. Aile 20° (64 mailles) : moyenne et h divergent, noeud stable.
+- SOUFFLERIE_BORNE_GL (défaut 1 dans le patch) : glissement total borné par
+  u_h − pente · y_n (profil monotone). Stable à 20° avec ρ_w = 1, diverge au
+  ×32 à 17° (relevé à h replié sur le nœud au bord d'attaque).
+
+diff --git a/soufflerie-rs/lbm/src/gpu3d.rs b/soufflerie-rs/lbm/src/gpu3d.rs
+--- a/soufflerie-rs/lbm/src/gpu3d.rs
++++ b/soufflerie-rs/lbm/src/gpu3d.rs
+@@ -434,7 +434,7 @@
+     // Gradient de pression (8388608) : viscosité de la couche pariétale de
+     // la loi de Mellor, κ h √(u_τ² + P h), écrite par la passe de paroi.
+     if ((P.essai & 8388608u) != 0u && (P.essai & 16777216u) == 0u) {
+-      let nw = utau[arrayLength(&utau) / 16u * 5u + k];
++      let nw = utau[arrayLength(&utau) / 17u * 5u + k];
+       if (nw >= 0.0) { out = min(NU_TILDE_MAX, nw); }
+     }
+     if ((P.essai & 1024u) != 0u) { out = min(out, P.essaiNu); }
+@@ -828,6 +828,17 @@
+ /// et la viscosité de la couche pariétale (< 0 : pas de loi de paroi), que
+ /// la collision relit ; le Newton de Spalding n'y fait plus attendre les
+ /// autres fils des groupes de la collision.
++/// Passe de la loi de paroi, borne du glissement total réglée par
++/// `SOUFFLERIE_BORNE_GL` (absente ou ≠ 0 : borne, défaut).
++fn wall3_wgsl() -> String {
++    let w = WALL3_WGSL.replace("RHOW_C", &format!("{}u", rho_paroi()));
++    if std::env::var("SOUFFLERIE_BORNE_GL").is_ok_and(|v| v == "0") {
++        w.replace("const BORNE_GL = true;", "const BORNE_GL = false;")
++    } else {
++        w
++    }
++}
++
+ const WALL3_WGSL: &str = "
+ @group(0) @binding(0) var<uniform> P: Params;
+ @group(0) @binding(1) var<storage, read> macroBuf: array<vec4<f32>>;
+@@ -839,6 +850,8 @@
+ @group(0) @binding(7) var<storage, read> blk: array<u32>;
+ // Rang de chaque maille pariétale (dans l'ordre de leur numéro).
+ @group(0) @binding(8) var<storage, read> wcell: array<u32>;
++// Borne du glissement total par le profil monotone (défaut ; voir plus bas).
++const BORNE_GL = true;
+ SPARSE_FNS
+ LAM_FNS
+ SA_FNS
+@@ -883,13 +896,14 @@
+   var uw = vec3<f32>(0.0);
+   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
+   var nuw = -1.0;
++  var rhw = 1.0;
+   if (P.sa != 0u && hasWall) {
+     let gw0 = wallGeo[wk];
+     // Paroi volumique (surfels) : maille réceptrice sans lien vers la paroi,
+     // hors loi de paroi (maille ordinaire pour la collision et ν̃).
+     if (gw0.w == 0.0) {
+       utau[4u * wk] = 0.0;
+-      utau[arrayLength(&utau) / 16u * 5u + wk] = -1.0;
++      utau[arrayLength(&utau) / 17u * 5u + wk] = -1.0;
+       return;
+     }
+     // Arête vive (distance négative) : pas de loi de paroi, paroi adhérente.
+@@ -904,6 +918,11 @@
+     var ut = ut0;
+     var yw = y0;
+     var th = tv0;
++    // Masse volumique de la paroi mobile (terme 6 w ρ_w c · u_w des liens) :
++    // celle relevée à h (pression constante à travers la couche limite,
++    // ∂p/∂n ≈ 0 ; l'interpolation lisse le damier de maille), repli sur le
++    // nœud.
++    rhw = macroBuf[idx].w;
+     // Gradient de pression cinématique le long du glissement (essai 8388608).
+     var pg = 0.0;
+     {
+@@ -941,6 +960,7 @@
+         gr += m4.w * vec3<f32>(sg.x * wv.y * wv.z, wv.x * sg.y * wv.z, wv.x * wv.y * sg.z);
+       }
+       if (ok && abs(ds - WM_H) < 0.5) {
++        rhw = rh;
+         th = us3 - dot(us3, gw.xyz) * gw.xyz;
+         ut = length(th);
+         yw = WM_H;
+@@ -1096,8 +1116,8 @@
+     // près de la paroi). Diagnostic 2147483648 : glissement relaxé seul
+     // (ancien défaut).
+     let fl = (P.essai & 2147483648u) == 0u;
+-    let ob = arrayLength(&utau) / 16u * 9u + 3u * wk;
+-    let os = arrayLength(&utau) / 16u * 12u + 3u * wk;
++    let ob = arrayLength(&utau) / 17u * 9u + 3u * wk;
++    let os = arrayLength(&utau) / 17u * 12u + 3u * wk;
+     if (fl) { prev = vec3<f32>(utau[os], utau[os + 1u], utau[os + 2u]); }
+     uw = prev + select(0.1, 1.0, (P.essai & 8u) != 0u) * (usv - prev);
+     if (fl) {
+@@ -1107,7 +1127,7 @@
+       utau[os] = uw.x; utau[os + 1u] = uw.y; utau[os + 2u] = uw.z;
+       // Réponse de la loi à la fluctuation : pente u_τ²/(ν + ν_w) instantanée
+       // moins sa moyenne relaxée ḡ (en [15n, 16n)), le long du nœud.
+-      let og = arrayLength(&utau) / 16u * 15u + wk;
++      let og = arrayLength(&utau) / 17u * 15u + wk;
+       let gi = select(0.0, ut2 * ut2 / (P.nu + nuw), nuw >= 0.0);
+       let gb = utau[og] + 0.1 * (gi - utau[og]);
+       utau[og] = gb;
+@@ -1115,6 +1135,21 @@
+         let d = tv0 - un;
+         uw += d - dot(d, gw.xyz) * gw.xyz;
+         if (ut0 >= 1e-12) { uw -= (tv0 / ut0) * (y0 * (gi - gb)); }
++        // Profil monotone, comme pour la moyenne : le glissement total ne
++        // dépasse pas u_h − pente · y_n (la couche pariétale, évaluée à la
++        // hauteur du nœud, ne va pas plus vite que l'écoulement relevé à h).
++        // La fluctuation du nœud n'est une réponse de la loi que si la
++        // couche entière la porte ; sans borne, un nœud qui s'accélère seul
++        // (pic d'aspiration d'un bord d'attaque pendant la mise en vitesse)
++        // entraîne sa paroi, qui l'entraîne à son tour : rétroaction sans
++        // rappel, divergence (aile à 20°, 64 mailles par corde).
++        // `SOUFFLERIE_BORNE_GL=0` : sans borne (essai).
++        if (BORNE_GL && ut0 >= 1e-12 && nuw >= 0.0) {
++          let tt = tv0 / ut0;
++          let cap = max(0.0, ut - dpn);
++          let sl = dot(uw, tt);
++          if (sl > cap) { uw -= tt * (sl - cap); }
++        }
+       }
+     }
+     utau[4u * wk + 1u] = uw.x;
+@@ -1131,12 +1166,22 @@
+       let gl = ut2 * ut2 / (P.nu + nuw);
+       gq = tt * clamp(dot(tv0 - uw, tt) / y0, 0.0, gl);
+     }
+-    let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
++    let o9 = arrayLength(&utau) / 17u * 6u + 3u * wk;
+     utau[o9] = gq.x;
+     utau[o9 + 1u] = gq.y;
+     utau[o9 + 2u] = gq.z;
+   }
+-  utau[arrayLength(&utau) / 16u * 5u + wk] = nuw;
++  utau[arrayLength(&utau) / 17u * 5u + wk] = nuw;
++  // Variante par défaut (RHOW_C = 3) : moyenne relaxée de ρ du nœud, au taux
++  // du glissement moyen ū_s (la paroi glissante porte la couche [0, h]
++  // moyenne ; les fluctuations de ρ du damier de maille n'entraînent pas la
++  // paroi). Tampon nul au départ : ρ du nœud.
++  if (RHOW_C == 3u) {
++    let r0 = utau[arrayLength(&utau) / 17u * 16u + wk];
++    let rn = macroBuf[idx].w;
++    rhw = select(r0 + 0.1 * (rn - r0), rn, r0 <= 0.0);
++  }
++  utau[arrayLength(&utau) / 17u * 16u + wk] = rhw;
+ }
+ ";
+ 
+@@ -1542,7 +1587,7 @@
+ // qui glissent à τ ≈ ½ (README, « Mode pair-impair des parois à
+ // mi-maille ») ; à q = 1, le lien mêle les deux populations du nœud.
+ fn wall_q1(uwl: vec3<f32>, nf: vec3<f32>, c: vec3<f32>, q: f32, wk: u32) -> vec3<f32> {{
+-  let o9 = arrayLength(&utau) / 16u * 6u + 3u * wk;
++  let o9 = arrayLength(&utau) / 17u * 6u + 3u * wk;
+   let g = vec3<f32>(utau[o9], utau[o9 + 1u], utau[o9 + 2u]);
+   let gt = g - dot(g, nf) * nf;
+   return uwl - gt * (max(0.0, dot(c, nf)) * (1.0 - q));
+@@ -1623,24 +1668,24 @@
+   // Viscosité turbulente de la couche pariétale (κ u_τ h), < 0 hors paroi.
+   var nuw = -1.0;
+   // Masse volumique de la paroi mobile (terme 6 w_i ρ_w c_i · u_w de
+-  // Bouzidi–Ladd) : celle du nœud, au même instant que ses populations
+-  // (écrite par la collision qui les a produites). Avec ρ_w = 1, une paroi
+-  // qui glisse le long d'un fluide de ρ ≠ 1 lui donne (1 − ρ) u_w de trop par
+-  // lien : l'écoulement dépend du niveau absolu de pression, et au pic
+-  // d'aspiration (ρ ≈ 0,84) la paroi, qui glisse à presque la vitesse du
+-  // nœud, l'accélère au-delà de sa propre vitesse et l'emballe (README,
+-  // « Paroi mobile »). `SOUFFLERIE_RHO_PAROI=0` : ρ_w = 1 (ancien calcul).
++  // Bouzidi–Ladd) : celle relevée à h par la passe de la loi de paroi. Avec
++  // ρ_w = 1, la paroi qui glisse injecte 1/ρ fois trop de quantité de
++  // mouvement là où la pression est basse (pic d'aspiration : ρ ≈ 0,84,
++  // +19 %) ; glissant à presque la vitesse du nœud, elle l'accélère alors
++  // au-delà de sa propre vitesse et l'emballe. `SOUFFLERIE_RHO_PAROI` :
++  // 0, ρ_w = 1 (ancien calcul) ; noeud, ρ du nœud au pas précédent (essai).
+   var rw = 1.0;
+   if (P.sa != 0u && hasWall) {{
+     uw = vec3<f32>(utau[4u * wk + 1u], utau[4u * wk + 2u], utau[4u * wk + 3u]);
+-    nuw = utau[arrayLength(&utau) / 16u * 5u + wk];
+-    if (RHOW_C != 0u) {{ rw = macroBuf[idx].w; }}
++    nuw = utau[arrayLength(&utau) / 17u * 5u + wk];
++    if (RHOW_C == 1u || RHOW_C == 3u) {{ rw = utau[arrayLength(&utau) / 17u * 16u + wk]; }}
++    if (RHOW_C == 2u) {{ rw = macroBuf[idx].w; }}
+   }}
+   // Décambrage visqueux : vitesse de transpiration de la maille pariétale,
+   // rangée après u_τ et le glissement (4 + 1 valeurs par maille).
+   var vn = 0.0;
+   if (P.sa != 0u && hasWall) {{
+-    vn = utau[arrayLength(&utau) / 16u * 4u + wk];
++    vn = utau[arrayLength(&utau) / 17u * 4u + wk];
+   }}
+ {prefetch}  g[0] = pop(0u, idx);
+ {pull}
+@@ -3428,17 +3473,23 @@
+     }
+ }
+ 
+-/// Masse volumique du nœud dans le terme de paroi mobile des liens de paroi
+-/// (défaut) ; `SOUFFLERIE_RHO_PAROI=0` : ρ_w = 1 (ancien calcul).
+-pub(crate) fn rho_paroi() -> bool {
+-    std::env::var("SOUFFLERIE_RHO_PAROI").map_or(true, |v| v != "0")
+-}
+-
+ /// Paroi virtuelle à q = 1 des liens sous loi de paroi (`wall_q1` du
+ /// shader), essai `SOUFFLERIE_PAROI_Q1=1` : éteint le mode pair-impair des
+ /// parois à mi-maille, mais change aussi les cas qui ne l'ont pas (plaque :
+ /// frottement d'échange +12 % ; README, « Mode pair-impair des parois à
+ /// mi-maille »). Désactivé par défaut.
++/// Masse volumique de la paroi mobile dans les liens de paroi :
++/// 1, relevée à h (défaut) ; `SOUFFLERIE_RHO_PAROI=0` : ρ_w = 1 (ancien
++/// calcul) ; `noeud` : ρ du nœud au pas précédent (essai).
++pub(crate) fn rho_paroi() -> u32 {
++    match std::env::var("SOUFFLERIE_RHO_PAROI").as_deref() {
++        Ok("0") => 0,
++        Ok("h") => 1,
++        Ok("noeud") => 2,
++        _ => 3,
++    }
++}
++
+ pub(crate) fn wall_q1() -> bool {
+     std::env::var("SOUFFLERIE_PAROI_Q1").map_or(false, |v| v != "0")
+ }
+@@ -3457,7 +3508,7 @@
+     let diag: u32 = std::env::var("SOUFFLERIE_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+     let code = code.replace("DIAG_C", &format!("{diag}u"));
+     let code = code.replace("WALLQ1_C", if wall_q1() { "1u" } else { "0u" });
+-    let code = code.replace("RHOW_C", if rho_paroi() { "1u" } else { "0u" });
++    let code = code.replace("RHOW_C", &format!("{}u", rho_paroi()));
+     let body = code
+         .replace("P.lesA", "P.\u{1}A")
+         .replace("P.essaiNu", "P.\u{2}Nu")
+@@ -5491,7 +5542,7 @@
+         // Par maille pariétale : u_τ et vitesse de glissement relaxée, puis
+         // (à la suite, une valeur par maille) la vitesse de transpiration,
+         // puis la viscosité de la couche pariétale (passe `wall3d`).
+-        let utau_buf = mk("utau3d", (64 * wall_count) as u64, st);
++        let utau_buf = mk("utau3d", (68 * wall_count) as u64, st);
+         let nsa = if sa { 4 * ns as u64 * (1 + keps as u64 + vles as u64) } else { 16 };
+         let nut = [mk("nut0", nsa, st), mk("nut1", nsa, st)];
+         let nut0: Vec<f32> = if keps {
+@@ -5659,7 +5710,7 @@
+         let wall_pass = (sa && wall_count > 0).then(|| {
+             let code = format!(
+                 "{PARAMS_WGSL}{}",
+-                WALL3_WGSL
++                wall3_wgsl()
+                     .replace("SPARSE_FNS", SPARSE_FNS)
+                     .replace("LAM_FNS", LAM_FNS)
+                     .replace("SA_FNS", SA_FNS)
+@@ -6120,7 +6171,7 @@
+         for (b, ro) in [(1, true), (2, true), (3, true), (4, false), (5, true), (6, true), (7, true), (8, true)] {
+             entries.push(storage(b, ro));
+         }
+-        let base = WALL3_WGSL.replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS);
++        let base = wall3_wgsl().replace("SPARSE_FNS", SPARSE_FNS).replace("LAM_FNS", LAM_FNS);
+         let code = match mode {
+             None => {
+                 self.tble = None;
+diff --git a/soufflerie-rs/lbm/src/refine3d.rs b/soufflerie-rs/lbm/src/refine3d.rs
+--- a/soufflerie-rs/lbm/src/refine3d.rs
++++ b/soufflerie-rs/lbm/src/refine3d.rs
+@@ -407,8 +407,9 @@
+   var rw = 1.0;
+   if (wm) {
+     uw = vec3<f32>(putau[4u * wk + 1u], putau[4u * wk + 2u], putau[4u * wk + 3u]);
+-    vn = putau[arrayLength(&putau) / 16u * 4u + wk];
+-    if (RHOW_C != 0u) {
++    vn = putau[arrayLength(&putau) / 17u * 4u + wk];
++    if (RHOW_C == 1u || RHOW_C == 3u) { rw = putau[arrayLength(&putau) / 17u * 16u + wk]; }
++    if (RHOW_C == 2u) {
+       rw = 0.0;
+       for (var i = 0u; i < 19u; i++) { rw += LDpf(i, x, y, z); }
+     }
+@@ -424,10 +425,10 @@
+       let ci = vec3<f32>(f32(CX[i]), f32(CY[i]), f32(CZ[i]));
+       var uwl = uw - dot(uw, nf) * nf + vn * nf;
+       // Paroi virtuelle à q = 1 sous loi de paroi (`wall_q1` de gpu3d).
+-      let nuw = putau[arrayLength(&putau) / 16u * 5u + wk];
++      let nuw = putau[arrayLength(&putau) / 17u * 5u + wk];
+       let q1 = WALLQ1_C != 0u && nuw >= 0.0;
+       if (q1) {
+-        let o9 = arrayLength(&putau) / 16u * 6u + 3u * wk;
++        let o9 = arrayLength(&putau) / 17u * 6u + 3u * wk;
+         let g = vec3<f32>(putau[o9], putau[o9 + 1u], putau[o9 + 2u]);
+         uwl -= (g - dot(g, nf) * nf) * (max(0.0, dot(ci, nf)) * (1.0 - q));
+       }
+@@ -467,7 +468,7 @@
+   }
+   // Couche pariétale de la loi de paroi : viscosité ν_w de la collision.
+   if (wm && P.sa == 1u) {
+-    let nuw = putau[arrayLength(&putau) / 16u * 5u + wk];
++    let nuw = putau[arrayLength(&putau) / 17u * 5u + wk];
+     if (nuw >= 0.0) { vt = nuw; }
+   }
+   if (P.sa == 2u) {
+@@ -1010,7 +1011,7 @@
+             format!(
+                 "const EP_PRE = {ep};\nconst WALLQ1_C = {}u;\nconst RHOW_C = {}u;\n{}{}{PRE}",
+                 u32::from(crate::gpu3d::wall_q1()),
+-                u32::from(crate::gpu3d::rho_paroi()),
++                crate::gpu3d::rho_paroi(),
+                 access("pf", 3, 4, fp16, parent.p16, false, "P.pn"),
+                 access_xyz("pf", ep, parent.p16, false, "P.pn", "pcell", "P.tp")
+             ),
