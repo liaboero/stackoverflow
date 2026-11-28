@@ -1518,8 +1518,11 @@ grille la plus fine qui tient sur la carte ; détail dans « Corps d'Ahmed ») :
 
 | Cas | Cx boîte (surface) | Mesure | Écart |
 | --- | --- | --- | --- |
-| Lunette 25° | 0,340 (0,373) | 0,285 | +19 % (+31 %) ; avant et lunette justes, culot ×2,4 |
-| Lunette 35° | 0,613 (0,588) | ≈ 0,26 | ×2,4 : la lunette ne décolle pas |
+| Lunette 25° | 0,323 (0,335) | 0,285 | +13 % (+17 %) ; lunette et soubassement justes, culot ×1,6 à 2 |
+| Lunette 35° | 0,324 (0,347) | ≈ 0,26 | +25 % (+33 %) ; lunette décollée, culot trop aspirant |
+
+(Arêtes vives sans loi de paroi et sol glissant, novembre 2026 ; avant :
+0,340 (0,373) et 0,613 (0,588).)
 
 **Deux causes écartées** (contrôles refaits avec le code actuel) :
 
@@ -3190,12 +3193,14 @@ super-ellipses ajustées sur la géométrie d'origine (fichier ERCOFTAC
 Becker ; Ahmed mesurait à 60 m/s, Re = 4,29·10⁶). Veine : marge 0,4 L
 autour de la maquette, blocage 3,3 %.
 
-**Sol mobile.** La soufflerie n'a que le sol mobile (paroi qui défile à la
-vitesse amont, z = −½, plafond glissant), et seulement sur la grille de
-base : le raffinement local ne le gère pas encore. Les essais ont un
-plancher fixe (planche de sol, couche limite de quelques millimètres sous
-la maquette). Effet attendu : faible sur Cx (quelques pour cent) ; débit
-sous la caisse un peu plus fort sur sol mobile.
+**Sol mobile.** La soufflerie n'a que le sol mobile (z = −½, plafond
+glissant), et seulement sur la grille de base : le raffinement local ne le
+gère pas encore. Depuis novembre 2026, c'est un sol glissant (réflexion
+spéculaire, limite sans frottement d'un tapis qui défile à U∞ ; voir
+« Sol mobile : le soubassement freiné » plus bas) ; l'ancien rebond sur une
+paroi qui défile reste disponible (`SOUFFLERIE_SOL=mobile`). Les essais ont
+un plancher fixe (planche de sol, couche limite de quelques centimètres :
+0,86 U à 28 mm, 400 mm devant le nez).
 
 **Mesures de la traînée.**
 - *Boîte* : bilan de quantité de mouvement sur trois boîtes (±0,1, ±0,2
@@ -3409,9 +3414,90 @@ toit–lunette et lunette–culot (43 segments chacune) ; à L = 136 :
 | 35° | 0,402 | 0,031 | 0,168 | 0,153 | 0,035 | 0,063 / 0,058 | 276 mm |
 
 Reste à 25° comme à 35° : le culot (C_B 0,15 contre 0,09 mesuré) et
-l'avant (C_K 0,03 contre 0,016).
+l'avant (C_K 0,03 contre 0,016) ; voir le paragraphe suivant.
 - *Marche* : sans effet (x_r 5,77 / 6,64 contre 5,76 / 6,79 à n = 32) :
   l'arête à 90° était déjà traitée.
+
+### Sol mobile : le soubassement freiné (novembre 2026)
+
+**Décomposition.** `ahmed` relève désormais, outre C_K, C_S, C_B, le
+soubassement : U à mi-garde (z = 25 mm, y = 0) le long de la caisse, la
+pression totale Cp0 = (p − p∞)/q + |u|²/U∞² et ν̃/ν sur la même ligne, le
+débit sous la caisse (rapporté à U∞ · garde · largeur) et, près du sol, U
+aux quatre premiers rangs de l'entrée au nez. Ahmed 25°, L = 136, ancien
+sol :
+
+| Relevé | Calcul | Mesure (Lienhart) |
+| --- | --- | --- |
+| Jet de sortie du soubassement (x = 38 mm derrière le culot, z = 28 mm) | 31,4 m/s | 42,8 m/s |
+| Débit sous la caisse à x = 450 / 1000 mm | 0,93 / 0,82 | ≈ 1 (jet à 1,07 U) |
+| Cp0 à mi-garde : avant / après x = 350 mm | 0,96 / 0,51 (L = 96) | ≈ 1 (Cp culot −0,13, jet 1,07 U) |
+| ν̃/ν à mi-garde | 1 500 à 3 000 | ≈ 200 (0,07 u_τ δ, δ = 25 mm) |
+| Tourbillon bas du culot (x = 88 mm, z = 88 mm) | −3 m/s | −15 m/s |
+
+Le soubassement perd la moitié de sa pression totale et son débit baisse
+avec la maille (sortie 1 / 28 / 36 m/s à L = 64 / 96 / 136) : perte
+numérique. Les pieds n'y sont pour rien (sans eux, garde gardée à 50 mm,
+L = 96 : même soubassement, C_B 0,146 → 0,153). Les rangs près du sol, de
+l'entrée au nez, la localisent : dès 330 mm après l'entrée (L = 64), le
+premier rang **reflue** (U = −0,08 U∞) à côté d'une paroi qui défile à
+U∞, et ν̃ y monte à 200 puis 4 000 ν. Le rebond sur une paroi qui défile,
+posé à mi-maille (q = ½), à la vitesse du fluide et à τ ≈ ½ (sans
+viscosité turbulente : la distance de Spalart–Allmaras ignorait le sol), est
+exactement le cas du mode pair-impair des parois glissantes à mi-maille
+(« Couche de la loi de paroi ») ; le ν̃ démesuré, sans destruction près du
+sol, l'amortissait en freinant toute la couche du sol. Compter le sol comme
+paroi pour Spalart–Allmaras (distance min(d, z + ½), ν̃ = 0 au sol, couche
+de la loi sur la vitesse relative au sol) enlève cet amortissement : rangs
+en damier (0,62 / −0,37 / −0,08 U), soubassement en retour, Cx 0,52 → 0,58
+(L = 64).
+
+**Correction : sol glissant.** Un tapis qui défile à U∞ n'exerce de
+contrainte qu'en proportion de la vitesse relative : nulle en amont,
+≈ 0,1 à 0,2 U sous la caisse, soit un frottement de l'ordre du centième de
+celui du dessous. Sa limite sans frottement est la réflexion spéculaire,
+déjà employée au plafond : le sol renvoie (c_x, c_y, −c_z) au lieu de
+−c + 6 w c·U. Aucun réglage. Le sol reste une paroi pour la turbulence
+(distance de Spalart–Allmaras, couche de la loi sur la vitesse relative au
+sol, `SOUFFLERIE_SOL_PAROI=0` pour l'ôter ; sans effet mesurable sur les
+efforts, ν̃/ν ≈ 250 sous la caisse au lieu de 1 000).
+`SOUFFLERIE_SOL=mobile` rend l'ancien sol.
+
+Ahmed, L = 136, 16 t* dont 8 de moyenne :
+
+| Cas | Cx surface | Cx boîte | C_K | C_S | C_B | C_R | Pieds | Jet de sortie | Profils lunette / tous |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 25°, ancien sol | 0,391 | 0,403 | 0,032 | 0,158 | 0,149 | 0,053 | 0,035 | 31,4 m/s | 0,032 / 0,054 |
+| 25°, sol glissant | **0,335** | **0,323** | −0,013 | 0,152 | 0,142 | 0,054 | 0,026 | **42,9** m/s | 0,033 / 0,057 |
+| 25°, mesure | 0,285 | | 0,016–0,020 | 0,140 | 0,070–0,089 | 0,055 | | 42,8 m/s | |
+| 35°, ancien sol | 0,402 | | 0,031 | 0,168 | 0,153 | | 0,035 | | 0,063 / 0,058 |
+| 35°, sol glissant | **0,347** | **0,324** | −0,012 | 0,163 | 0,145 | 0,052 | 0,026 | | 0,063 / 0,063 |
+| 35°, mesure | ≈ 0,26 | | 0,016 | | | | | | |
+
+- Le soubassement est juste : débit 1,0 U∞, Cp0 0,96 à 1,04 tout du long,
+  jet de sortie 42,9 m/s (42,8 mesurés). Cx −14 % à 25° comme à 35°, Cx
+  boîte à 1,13 fois la mesure à 25° (1,41 avant).
+- *Avant* : C_K passe de +0,032 à −0,013, en dessous de la mesure (0,016) :
+  sans couche limite du sol, l'écoulement sous le nez est plus rapide
+  (Cp −0,77 sous le congé bas) qu'avec le plancher fixe de l'essai (couche
+  de 50 mm environ). L'écart restant tient à la condition de sol (tapis
+  idéal contre planche de sol), non plus à une perte numérique ; un
+  plancher fixe sous loi de paroi reproduirait l'essai (à faire).
+- *Culot* : à peine changé (0,149 → 0,142). Diagnostic, profils du sillage
+  (25°) : le jet du soubassement est juste, mais le tourbillon bas reste
+  absent (x = 138 mm, z = 88 mm : −0,7 contre −10,9 m/s), la bulle est
+  centrée trop haut (U = −10 m/s à z = 128 mm contre 0) et la descente de
+  l'écoulement de lunette derrière le culot est trop faible (W −1,0 / −5,4
+  contre −10,8 / −15,5 m/s à z = 128 / 168 mm). La source du culot est
+  donc dans le sillage proche (couche cisaillée de l'arête lunette–culot et
+  son mélange), pas dans l'alimentation par le soubassement.
+- Plaque, aile et marche n'ont pas de sol mobile, et le code n'agit
+  qu'avec lui : plaque échange / loi 0,00417 / 0,00404, aile 4° Cz / Cx
+  (bilan) 0,457 / 0,0156, refaits à l'identique ; marche non refaite
+  (parois de la maquette seulement).
+- Essai écarté, gardé en option : sol paroi de Spalart–Allmaras avec le
+  rebond mobile (`SOUFFLERIE_SOL=mobile`, défaut de `SOUFFLERIE_SOL_PAROI`) :
+  mode en damier, soubassement en retour (ci-dessus).
 
 ### Couche de la loi de paroi (défaut depuis novembre 2026)
 
@@ -4860,3 +4946,12 @@ Couche de la loi de paroi : un Newton (loi de Spalding) de plus par maille
 0,82–0,87 ms avec ou sans (dans le bruit). Mémoire : aucune. Bilan sur
 boîte : ensemble des nœuds recopiés de la grille du bilan, sur le
 processeur, à chaque relevé (4 octets par nœud recopié).
+
+### Sol glissant et sol paroi de Spalart–Allmaras (`SOUFFLERIE_SOL`, `SOUFFLERIE_SOL_PAROI`)
+
+Sol glissant : même nombre de lectures que le rebond mobile (une population
+du rang 0 au lieu d'une autre), sans terme de vitesse ; aucun coût.
+Spalart–Allmaras avec le sol : un min et, sous h = 2 mailles du sol, un
+Newton de Spalding de plus par maille (deux rangs de la veine) ; aucune
+mémoire. Ahmed L = 136 : 2 095 s contre 2 026 s pour 16 t*, sur une carte
+partagée avec d'autres calculs (dans le bruit).

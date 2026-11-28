@@ -1,0 +1,20 @@
+Ahmed 25° · L = 136 mailles (h = 7.68 mm) · veine 734×326×180 = 43.1 M mailles ≈ 4.0 Go · blocage 3.3 % · 42816 triangles
+NVIDIA GeForce GTX 1070 (Vulkan) · τ₀ = 0.500015 · liens de paroi 28253
+Arête du toit (réseau) : x = 300.49, z = 43.53 ; culot x = 326.70
+
+== Ahmed 25°, L = 136, Re = 2.780e6, 16 t* (moyenne sur 8 t*, 16 relevés), 2095 s
+Surface (caisse seule) : Cx = 0.3348 · C_K avant -0.0131 · C_S lunette 0.1520 · C_B culot 0.1420 · pression ailleurs 0.0035 · frottement 0.0504 · C_R = Cx − C_K − C_S − C_B = 0.0539 (non relevé 0.59 %)
+p∞ (section amont) : Cp = 0.0408 par rapport à ρ = 1 · Cp au point d'arrêt 1.020
+Pieds (surface) : Cx 0.0261, dont 0.0157 au-dessus de la face basse des boîtes (z = -23 mm)
+Échange de quantité de mouvement (caisse et pieds) : Cx = 0.4056
+Boîte ±0.1 L : Cx = 0.3449 (pieds compris), 0.3292 sans le haut des pieds
+Boîte ±0.2 L : Cx = 0.3477 (pieds compris), 0.3320 sans le haut des pieds
+Boîte ±0.3 L : Cx = 0.3576 (pieds compris), 0.3419 sans le haut des pieds
+Boîte extrapolée à volume nul, sans les pieds : Cx = 0.3228
+Profils U (plan de symétrie) : écart moyen |ΔU|/Ub par station (x depuis le culot, mm) ; ± : points en retour mesurés − calculés
+Écart moyen |ΔU|/Ub : tous 0.057 (917 pts) · au-dessus de la lunette 0.033 · sillage 0.085 → target/ahmed/profils_25_L136.csv
+Bulle de culot (U < 0 à z = 147 mm, y = 0) jusqu'à x = 180 mm derrière le culot
+Soubassement, U (m/s) à z = 25 mm, y = 0 (x depuis l'avant) : x=-100:29.1 x=50:45.7 x=150:53.9 x=350:47.3 x=550:44.8 x=800:44.7 x=1000:45.8 x=1061:44.2
+Soubassement, Cp / Cp0 / ν̃/ν à z = 25 mm, y = 0 : x=-100:0.48/1.01/6 x=50:-0.33/1.01/45 x=150:-0.77/1.04/252 x=350:-0.38/1.02/261 x=550:-0.24/1.02/251 x=800:-0.26/0.99/252 x=1000:-0.34/0.97/252 x=1061:-0.26/0.96/239
+Sol amont, U/U∞ aux rangs 0–3 (x depuis le nez) : x=-1433mm:[1.00 1.00 1.00 1.00] ν̃/ν 1 ; x=-1095mm:[1.00 1.00 1.00 0.99] ν̃/ν 2 ; x=-735mm:[0.98 0.98 0.98 0.98] ν̃/ν 6 ; x=-366mm:[0.91 0.92 0.91 0.91] ν̃/ν 26 ; x=-144mm:[0.75 0.78 0.76 0.76] ν̃/ν 61 ;
+Soubassement, débit / (U∞ · garde · largeur) : x=150:1.217 x=450:1.017 x=800:0.945 x=1000:0.990

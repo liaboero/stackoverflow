@@ -112,7 +112,7 @@ fn main() {
         ref_length: Some(ahmed::LONGUEUR),
         ref_area: Some(ahmed::LARGEUR * ahmed::HAUTEUR),
         margin: marge,
-        ground: Some(-depth - 0.25 * h),
+        ground: Some(if pieds { -depth - 0.25 * h } else { ahmed::GARDE - 0.25 * h }),
         ..Default::default()
     };
     let (body, info) = Body3D::from_mesh(&tris, l, &setup).unwrap_or_else(|e| panic!("maquette : {e}"));
@@ -155,7 +155,7 @@ fn main() {
     // le plan de symétrie, z depuis le dessous de la caisse.
     let bb = body.bounds;
     let ymid = 0.5 * (bb.y0 + bb.y1);
-    let z_caisse = bb.z0 + (ahmed::GARDE + depth) / h;
+    let z_caisse = if pieds { bb.z0 + (ahmed::GARDE + depth) / h } else { bb.z0 };
     let to_mm = |p: [f64; 3]| [(p[0] - bb.x0) * h, (p[1] - ymid) * h, (p[2] - z_caisse) * h];
     let xs = ahmed::LONGUEUR - ahmed::LUNETTE * phi.to_radians().cos();
     println!(
@@ -429,6 +429,65 @@ fn main() {
         x += 0.5 * h;
     }
     println!("Bulle de culot (U < 0 à z = {zb:.0} mm, y = 0) jusqu'à x = {lrec:.0} mm derrière le culot");
+    // Soubassement : vitesse au milieu de la garde (z = 25 mm au-dessus du
+    // plancher, y = 0) et débit sous la caisse (|y| < ½ largeur, entre le
+    // plancher et le dessous), rapporté à U∞ · garde · largeur.
+    {
+        let mut ligne = String::new();
+        for xm in [-100.0, 50.0, 150.0, 350.0, 550.0, 800.0, 1000.0, 1044.0 + 17.0] {
+            if let Some(m) = interp([bb.x0 + xm / h, ymid, -0.5 + 25.0 / h]) {
+                ligne += &format!(" x={xm:.0}:{:.1}", ub * m[0] / u as f64);
+            }
+        }
+        println!("Soubassement, U (m/s) à z = 25 mm, y = 0 (x depuis l'avant) :{ligne}");
+        // Pression totale Cp0 = (p − p∞)/q + |u|²/U² et ν̃/ν (instantané),
+        // même ligne : la perte de charge sous la caisse.
+        let pinf = pref_acc / nsnap.max(1) as f64;
+        let qd = 0.5 * (u as f64).powi(2);
+        let nut = sim.nu_tilde();
+        let mut ligne = String::new();
+        for xm in [-100.0, 50.0, 150.0, 350.0, 550.0, 800.0, 1000.0, 1044.0 + 17.0] {
+            let p = [bb.x0 + xm / h, ymid, -0.5 + 25.0 / h];
+            if let Some(m) = interp(p) {
+                let cp = ((m[3] - 1.0) / 3.0 - pinf) / qd;
+                let v2 = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]) / (u as f64).powi(2);
+                let i = p[0].round() as usize + d[0] * (p[1].round() as usize + d[1] * p[2].round() as usize);
+                ligne += &format!(" x={xm:.0}:{:.2}/{:.2}/{:.0}", cp, cp + v2, nut[i] as f64 / nu);
+            }
+        }
+        println!("Soubassement, Cp / Cp0 / ν̃/ν à z = 25 mm, y = 0 :{ligne}");
+        // Près du sol, de l'entrée au nez (y = 0) : U/U∞ aux rangs z = 0..3
+        // et ν̃/ν au rang 0.
+        let mut ligne = String::new();
+        for f in [0.02, 0.25, 0.5, 0.75, 0.9] {
+            let xi = (f * bb.x0).round() as usize;
+            let yi = ymid.round() as usize;
+            let us: Vec<String> = (0..4).map(|zi| mean(xi, yi, zi).map_or("-".into(), |m| format!("{:.2}", m[0] / u as f64))).collect();
+            ligne += &format!(" x={:.0}mm:[{}] ν̃/ν {:.0} ;", (xi as f64 - bb.x0) * h, us.join(" "), nut[xi + d[0] * (yi + d[1] * 0)] as f64 / nu);
+        }
+        println!("Sol amont, U/U∞ aux rangs 0–3 (x depuis le nez) :{ligne}");
+        let mut ligne = String::new();
+        for xm in [150.0, 450.0, 800.0, 1000.0] {
+            let xi = (bb.x0 + xm / h).round() as usize;
+            let (mut qs, mut aire) = (0.0f64, 0.0f64);
+            let ny = (0.5 * ahmed::LARGEUR / h).floor() as i64;
+            for dy in -ny..=ny {
+                let yi = (ymid + dy as f64).round() as usize;
+                for zi in 0..d[2] {
+                    let zmm = (zi as f64 + 0.5) * h;
+                    if zmm > ahmed::GARDE {
+                        break;
+                    }
+                    if let Some(m) = mean(xi, yi, zi) {
+                        qs += m[0] / u as f64;
+                    }
+                    aire += 1.0;
+                }
+            }
+            ligne += &format!(" x={xm:.0}:{:.3}", qs / aire.max(1.0));
+        }
+        println!("Soubassement, débit / (U∞ · garde · largeur) :{ligne}");
+    }
     if sim.vles {
         // VLES : réduction de ν_t (filtre de maille) là où le k-ε RANS est
         // actif (ν_t > 10 ν), en avant et en arrière du culot.
