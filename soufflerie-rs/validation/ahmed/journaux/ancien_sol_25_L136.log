@@ -1,0 +1,18 @@
+Ahmed 25° · L = 136 mailles (h = 7.68 mm) · veine 734×326×180 = 43.1 M mailles ≈ 4.0 Go · blocage 3.3 % · 42816 triangles
+NVIDIA GeForce GTX 1070 (Vulkan) · τ₀ = 0.500015 · liens de paroi 28253
+Arête du toit (réseau) : x = 300.49, z = 43.53 ; culot x = 326.70
+
+== Ahmed 25°, L = 136, Re = 2.780e6, 16 t* (moyenne sur 8 t*, 16 relevés), 2026 s
+Surface (caisse seule) : Cx = 0.3906 · C_K avant 0.0316 · C_S lunette 0.1576 · C_B culot 0.1489 · pression ailleurs 0.0037 · frottement 0.0489 · C_R = Cx − C_K − C_S − C_B = 0.0526 (non relevé 0.59 %)
+p∞ (section amont) : Cp = 0.0314 par rapport à ρ = 1 · Cp au point d'arrêt 1.072
+Pieds (surface) : Cx 0.0351, dont 0.0168 au-dessus de la face basse des boîtes (z = -23 mm)
+Échange de quantité de mouvement (caisse et pieds) : Cx = 0.4775
+Boîte ±0.1 L : Cx = 0.4271 (pieds compris), 0.4103 sans le haut des pieds
+Boîte ±0.2 L : Cx = 0.4551 (pieds compris), 0.4383 sans le haut des pieds
+Boîte ±0.3 L : Cx = 0.4595 (pieds compris), 0.4428 sans le haut des pieds
+Boîte extrapolée à volume nul, sans les pieds : Cx = 0.4034
+Profils U (plan de symétrie) : écart moyen |ΔU|/Ub par station (x depuis le culot, mm) ; ± : points en retour mesurés − calculés
+Écart moyen |ΔU|/Ub : tous 0.054 (917 pts) · au-dessus de la lunette 0.032 · sillage 0.080 → target/ahmed/profils_25_L136.csv
+Bulle de culot (U < 0 à z = 147 mm, y = 0) jusqu'à x = 165 mm derrière le culot
+Soubassement, U (m/s) à z = 25 mm, y = 0 (x depuis l'avant) : x=-100:27.8 x=50:43.3 x=150:51.2 x=350:41.4 x=550:36.3 x=800:36.6 x=1000:36.0 x=1061:33.6
+Soubassement, débit / (U∞ · garde · largeur) : x=150:1.134 x=450:0.929 x=800:0.800 x=1000:0.824

@@ -79,6 +79,13 @@ pub fn couche_loi() -> bool {
     std::env::var("SOUFFLERIE_COUCHE_LOI").map_or(true, |v| v != "0")
 }
 
+/// Sol mobile compté comme paroi par Spalart–Allmaras (défaut ;
+/// SOUFFLERIE_SOL_PAROI=0 : ancien calcul, distance à la seule maquette) :
+/// distance d = min(d_maquette, z + ½) et ν̃ = 0 sur le plancher.
+pub fn sol_paroi() -> bool {
+    std::env::var("SOUFFLERIE_SOL_PAROI").map_or(true, |v| v != "0")
+}
+
 pub(crate) fn esoteric() -> bool {
     std::env::var("SOUFFLERIE_EP").map_or(true, |v| v != "0")
 }
@@ -375,6 +382,8 @@ const CV1_3 = 357.911;
 const NU_TILDE_MAX = 0.15;
 // Couche de la loi de paroi (`couche_loi`) : sous h, ν̃ = κ u_τ y.
 const COUCHE_LOI = false;
+// Sol mobile compté comme paroi de Spalart–Allmaras (`sol_paroi`).
+const SOL_PAROI = false;
 fn spalding_ut(ut: f32, y: f32) -> f32 {
   if (!(ut > 1e-12)) { return 0.0; }
   let e_kb = 0.12873490;
@@ -460,7 +469,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let vxp = nutIn[ixp];
     let vym = nutIn[iym];
     let vyp = nutIn[iyp];
-    let vzm = nutIn[izm];
+    var vzm = nutIn[izm];
+    // Sol mobile : paroi adhérente qui défile, ν̃ = 0 sur sa face (z = −½).
+    let sol = SOL_PAROI && ground;
+    if (sol && z == 0) { vzm = -v; }
     let vzp = nutIn[izp];
     let u = macroBuf[idx].xyz;
     var adv = select(u.x * (vxp - v), u.x * (v - vxm), u.x > 0.0);
@@ -488,7 +500,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
       (uzp.x - uzm.x) - (uxp.z - uxm.z),
       (uxp.y - uxm.y) - (uyp.x - uym.x));
     let omega = length(w);
-    let d = max(0.5, dist[idx]);
+    // Distance à la paroi la plus proche, sol mobile compris : une paroi qui
+    // défile bloque les tourbillons comme une paroi fixe (destruction de ν̃).
+    // La loi de paroi et sa couche ne concernent que la maquette (`dist`).
+    var dw = dist[idx];
+    if (sol) { dw = min(dw, f32(z) + 0.5); }
+    let d = max(0.5, dw);
     let kd2 = KAPPA * KAPPA * d * d;
     let chi = v / nu;
     let c3 = chi * chi * chi;
@@ -525,6 +542,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         let ut = length(u - dot(u, n) * n);
         out = min(NU_TILDE_MAX, KAPPA * spalding_ut(ut, dd) * dd);
       }
+    }
+    // Couche de la loi de paroi du sol mobile : sous h, ν̃ = κ u_τ y, u_τ de
+    // la loi de Spalding sur la vitesse tangentielle relative au sol (qui
+    // défile à la vitesse amont). Sans elle, la couche adhérente du sol est
+    // laminaire à τ ≈ ½ et instable : le premier rang refluait à côté d'une
+    // paroi qui défile à U∞.
+    let yf = f32(z) + 0.5;
+    if (sol && yf < WM_H && yf < dist[idx]) {
+      let ur = u.xy - vec2<f32>(P.uIn, 0.0);
+      out = min(NU_TILDE_MAX, KAPPA * spalding_ut(length(ur), yf) * yf);
     }
     if ((P.essai & 2048u) != 0u) { out = min(out, P.essaiNu); }
   }
@@ -1140,6 +1167,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ";
 
+/// Sol glissant (défaut ; SOUFFLERIE_SOL=mobile : rebond sur une paroi qui
+/// défile à la vitesse amont). Le rebond mobile, posé à mi-maille (q = ½),
+/// à la vitesse du fluide et à τ ≈ ½, porte le mode pair-impair des parois
+/// glissantes à mi-maille (voir « Couche de la loi de paroi ») : sans
+/// viscosité turbulente, le premier rang refluait à 300 mm de l'entrée.
+/// Un tapis qui défile à U∞ n'exerce de contrainte qu'en proportion de la
+/// vitesse relative (≈ 0,1 à 0,2 U sous une caisse, frottement de l'ordre du
+/// centième de celui du dessous) : la réflexion spéculaire (comme au
+/// plafond) en est la limite sans frottement.
+pub fn sol_glissant() -> bool {
+    std::env::var("SOUFFLERIE_SOL").map_or(true, |v| v != "mobile")
+}
+
 /// Sol (bit 2 de `rows`) : population venant de sous le plancher (z = −½),
 /// renvoyée par une paroi qui défile à la vitesse amont ; venant d'au-dessus
 /// du plafond, réfléchie (paroi glissante).
@@ -1148,7 +1188,14 @@ fn ground_code(i: usize) -> String {
     if cz == 0 {
         return String::new();
     }
-    if cz > 0 {
+    if cz > 0 && sol_glissant() {
+        let m = C3.iter().position(|d| d[0] == cx && d[1] == cy && d[2] == -cz).unwrap();
+        format!(
+            " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
+      v = pop({m}u, idx);
+    }}"
+        )
+    } else if cz > 0 {
         let j = opp3(i);
         format!(
             " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
@@ -1953,7 +2000,16 @@ fn pull_ep(walls: bool, surf: bool) -> String {
             format!("pop(select({}u, {i}u, OD), nb{})", i - 1, (i - 2) / 2)
         };
         let mut chain = String::new();
-        if cz > 0 {
+        if cz > 0 && sol_glissant() {
+            let m = C3.iter().position(|d| d[0] == C3[i][0] && d[1] == C3[i][1] && d[2] == -cz).unwrap();
+            let _ = write!(
+                chain,
+                " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
+      v = side[GRO + (u32(x) + P.nx * u32(y)) * 5u + {}u];
+    }}",
+                pos(&EP_GROUND, m)
+            );
+        } else if cz > 0 {
             let _ = write!(
                 chain,
                 " else if ((P.rows & 2u) != 0u && z - 1 < 0) {{
@@ -5630,6 +5686,7 @@ impl Gpu3D {
         } else {
             let sa = SA3_WGSL.replace("SPARSE_FNS", SPARSE_FNS);
             let sa = if couche_loi() { sa.replace("const COUCHE_LOI = false;", "const COUCHE_LOI = true;") } else { sa };
+            let sa = if sol_paroi() { sa.replace("const SOL_PAROI = false;", "const SOL_PAROI = true;") } else { sa };
             pipe("sa3d", &sa_layout, format!("{PARAMS_WGSL}{}", bricked(sa, bricks)), true)
         };
         // Rang des mailles pariétales (collision des mailles pariétales, loi de paroi).
