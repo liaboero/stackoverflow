@@ -59,6 +59,10 @@ DEFAULT_PARAMS = {
     "gust_lag": 2,
     "gust_max_tau": 1e9,     # the gust forecast stops at this horizon (a gust moves: far ahead, it is applied to
                              # cells the boat passes much earlier)
+    "front_mode": "rule",    # "rule": threshold on the lateral twist; "prob": learned probability (front_model.json)
+    "plan_mode": "single",   # "single": one forecast; "ensemble": expected time over several plausible futures
+                             # (the front turns or not, weighted by its probability; the rotation at -1, 0, +1 sd)
+    "osc_spread": 1.0,       # "ensemble": the rotation scenarios are at +/- osc_spread standard deviations
     "lag_from": "previous",  # remaining time used to set the horizon: "previous" map (can flip from step to step)
                              # or "current" (a map of the present wind, recomputed every step: stable)           # steps between the two fields used to measure the drift
 }
@@ -122,6 +126,7 @@ class ForecastPlanner(BaseAgent):
             c_lo = self._lateral_coef(ang[lo], self.lat[lo], self.free[lo])
             c_hi = self._lateral_coef(ang[hi], self.lat[hi], self.free[hi])
             same = c_lo * c_hi > 0
+            self.c_lo, self.c_hi = c_lo, c_hi
             self.c0 = 0.5 * (c_lo + c_hi)
             self.turning_prior = bool(same and min(abs(c_lo), abs(c_hi)) > self.p["front_threshold"])
         self.logspeed.append(np.log(np.maximum(np.hypot(field[..., 0], field[..., 1]), 1e-3)).astype(float))
@@ -197,7 +202,9 @@ class ForecastPlanner(BaseAgent):
         wt = np.exp(logw - logw.max())
         wt /= wt.sum()
         change = A * (np.sin(w * (t + tau) + phi) - np.sin(w * t + phi))
-        return float((wt * change).sum())
+        mean = float((wt * change).sum())
+        self._g_sd = float(np.sqrt(max((wt * (change - mean) ** 2).sum(), 0.0)))
+        return mean
 
     def _front_T(self, t):
         """Duration of the turn of the front (estimated), or None when there seems to be no turning front."""
@@ -216,6 +223,33 @@ class ForecastPlanner(BaseAgent):
             self._front_presumed = True
             return float(self.p["front_prior_T"])
         return None
+
+    _front_W = None
+
+    def _p_turn(self, t):
+        """Learned probability that the front is a turning one (logistic regression of front_model.py)."""
+        if ForecastPlanner._front_W is None:
+            import json, os
+            ForecastPlanner._front_W = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                   "front_model.json")))
+        from front_model import features
+        W = ForecastPlanner._front_W
+        w = np.asarray(W["weights"][min(t, W["T_MAX"])])
+        z = float(np.dot(w, features(self, t)))
+        return 1.0 / (1.0 + math.exp(-max(min(z, 40.0), -40.0)))
+
+    def _front_prob_T(self, t):
+        """(probability of a turning front, duration of its turn if it turns)."""
+        pt = self._p_turn(t)
+        s = np.asarray(self.s_hist)
+        c0 = self.c0
+        T = float(self.p["front_prior_T"])
+        if abs(c0) > 1e-6 and t > 0 and s[-1] * c0 < 0 and abs(s[-1]) > max(6.0, 0.15 * abs(c0)):
+            r = min(max(1.0 + s[-1] / c0, -1.0), 1.0)
+            T = float(t) if r <= -0.999 else float(min(max(math.pi * t / max(math.acos(r), 1e-3), t), 60.0))
+        elif t >= T:
+            T = float(t) + 10.0   # the presumed turn should already be over: it has not started, push it back
+        return pt, T
 
     def _forecast_s(self, t, tau, T):
         if T is None or tau <= 0:
@@ -258,8 +292,8 @@ class ForecastPlanner(BaseAgent):
         Lf = _shift(L, ux, uy) * math.exp(-tau / max(p["gust_decay"], 1e-3))
         return np.exp(p["gust_weight"] * (Lf - L))
 
-    def _forecast_field(self, field, t, tau, T):
-        dg = self._forecast_g(t, tau)
+    def _forecast_field(self, field, t, tau, T, dg_offset=0.0):
+        dg = self._forecast_g(t, tau) + dg_offset
         ds = self._forecast_s(t, tau, T)
         ratio = self._gust_ratio(tau)
         if ratio is not None:
@@ -327,6 +361,21 @@ class ForecastPlanner(BaseAgent):
             return float(T[min(int(p[1]), N - 1), min(int(p[0]), N - 1)])
         return float((vals[0, 0] * (1 - fx) + vals[0, 1] * fx) * (1 - fy) + (vals[1, 0] * (1 - fx) + vals[1, 1] * fx) * fy)
 
+    def _ensemble_map(self, field, t, lag, p_turn, T_turn):
+        """Expected time to the goal over several plausible futures: the front turns (probability p_turn) or not,
+        and the global rotation is at its expected value or one spread lower / higher (weights 1/4, 1/2, 1/4)."""
+        fronts = [(w, T) for w, T in ((p_turn, T_turn), (1.0 - p_turn, None)) if w > 0.03]
+        tot = sum(w for w, _ in fronts)
+        self._forecast_g(t, lag)   # sets self._g_sd (Bayesian mode)
+        sd = getattr(self, "_g_sd", 0.0) * self.p["osc_weight"] * self.p["osc_spread"]
+        oscs = [(1.0, 0.0)] if sd < 1.0 else [(0.25, -sd), (0.5, 0.0), (0.25, sd)]
+        out = 0.0
+        for wf, T in fronts:
+            for wo, off in oscs:
+                # the agent's angles are counter-clockwise; dg_offset is in the same convention as _forecast_g
+                out = out + (wf / tot) * wo * self._ttg_map(self._forecast_field(field, t, lag, T, dg_offset=off))
+        return out
+
     def _timed_field(self, field, t, T0, remaining, T_front):
         """A field where every cell holds the forecast wind at the time the boat would reach it: now + (expected
         remaining time - time-to-goal from that cell), from the previous map T0."""
@@ -347,7 +396,12 @@ class ForecastPlanner(BaseAgent):
         t = int(obs["step"])
         self._analyse(field)
         self._front_presumed = False
-        T_front = self._front_T(t)
+        if p["front_mode"] == "prob":
+            p_turn, T_turn = self._front_prob_T(t)
+            T_front = T_turn if p_turn >= 0.5 else None
+        else:
+            T_front = self._front_T(t)
+            p_turn, T_turn = (1.0 if T_front is not None else 0.0), T_front
         pos = np.asarray(obs["position"], dtype=float)
         vel = np.asarray(obs["velocity"], dtype=float)
 
@@ -360,7 +414,9 @@ class ForecastPlanner(BaseAgent):
         if not np.isfinite(remaining):
             remaining = 60.0
         lag = min(p["lag_frac"] * remaining, p["lag_max"])
-        if p["map_mode"] == "timed":
+        if p["plan_mode"] == "ensemble":
+            Tmap = self._ensemble_map(field, t, lag, p_turn, T_turn)
+        elif p["map_mode"] == "timed":
             Tmap = self._ttg_map(self._timed_field(field, t, T0, remaining, T_front))
         else:
             Tmap = self._ttg_map(self._forecast_field(field, t, lag, T_front))

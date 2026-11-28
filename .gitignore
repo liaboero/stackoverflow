@@ -26,3 +26,5 @@ sailing/agent/params_robust.json
 sailing/agent/train_robust_*
 sailing/agent/params_robust_gen*.json
 sailing/agent/params_gustcap*.json
+sailing/agent/params_s*.json
+sailing/agent/side_labels.jsonl
