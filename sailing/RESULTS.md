@@ -147,3 +147,47 @@ now in `best_params.json` (B without the cap: `best_params_B_nocap.json`). With 
 A second flaw was found: the forecast horizon of the map flips from step to step (28, 40, 28 steps...), because it
 is set from the remaining time read on the previous map. Making it stable (a map of the present wind every step) is
 worse on scenario 5 (81.8 steps). It is left off (`lag_from`).
+
+## False routes on the training episodes, and what they say about the learning (`agent/false_routes.py`)
+
+Reference: the same planner, given the true future wind ("all true"). Results per episode in
+`agent/false_routes.json`.
+
+| | Training episodes (64) | Unseen episodes (48) |
+|---|---|---|
+| Mean loss vs "all true" | **-0.04 steps** | **+2.84 steps** |
+| Episodes losing > 5 steps | 9 (14%) | 10 (21%) |
+| Share of the lost time from those | 63% | 84% |
+| Other side of the central island than "all true" | 13 | 15 |
+
+The largest false routes on the training episodes, and the variant that fixes each one:
+
+| Episode | Model | All true | Cause found |
+|---|---|---|---|
+| train 1105 (no front) | 69.0 | 45.1 | the agent believes in a turning front that does not exist: front forecast off → 45.2 |
+| train 1000 (no front) | 77.7 | 61.7 | oscillation forecast: true oscillation → 61.7 (oscillation forecast off: 95.5) |
+| train 1001 (no front) | 93.3 | 79.3 | mixed: oscillation forecast off → 65.5, true gusts → 71.1 |
+| random 10005 (no front) | 74.4 | 66.6 | gusts: true gusts → 68.1 |
+| train 1112 (turning front) | 73.0 | 65.8 | gusts (true gusts → 64.7) or front (front forecast off → 67.8) |
+
+Conclusions:
+
+1. **A false route is a wrong side.** The boat goes around the central island on the wrong side. The choice is made
+   early, is binary, and cannot be undone. A few episodes carry most of the lost time.
+2. **The causes vary:** a false turning front (the agent sees one in a base wind pattern), an oscillation forecast
+   that is off, a gust forecast. No single parameter fixes them all. Moving one parameter flips some side choices one
+   way and others the other way (the gust cap: 16 races better, 10 worse). That is why the tuning reached a plateau.
+3. **The training over-fits these coin flips.** On its own training episodes, the model is as good as the planner
+   with the true wind (-0.04 steps). It even beats it by more than 5 steps on 7 episodes (115 steps in total), where
+   its forecast errors happen to help. On unseen episodes the same gap is +2.84 steps. The parameters have learned
+   which way to flip the training episodes' coins, not how to forecast better. With 32-64 episodes, the mean score
+   is driven by about ten binary decisions: far too few to learn from.
+4. **The planner itself also makes false routes.** With the true future wind, it takes 107 steps on train 1003, where
+   the model takes 63.6. Its single-horizon map applies the wind of one future time to the whole route. The flaw
+   found on the gusts (scenario 5) is general.
+
+What this means for the learning: more episodes per decision (hundreds), and a signal closer to the decision
+itself (was the side right?) rather than only the final score. Above all, structural changes rather than tuning:
+choose the side with the uncertainty of the forecast in mind (expected time over several plausible futures, or wait
+before committing), detect the front with a probability rather than a threshold, and replace the single-horizon
+map.
