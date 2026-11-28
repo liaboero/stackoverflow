@@ -223,7 +223,25 @@ pub struct SurfelSetup {
     /// `PROBE_H` au-dessus du surfel Σ β u (vide : pas de relevé possible).
     pub probe_start: Vec<u32>,
     pub probe: Vec<(u32, f32, f32)>,
+    /// Rebond miroir (`mirror_on`) : cibles de la paire p du surfel s,
+    /// `mt_start[9 s + p] .. mt_start[9 s + p + 1]` (une par maille
+    /// réceptrice de son parallélépipède, rang t global) ; sources de la
+    /// cible t, `msub[msub_start[t] .. msub_start[t + 1]]`, (maille y, M/w_x) :
+    /// la densité rebondie reçue par x est Σ (M/w_x) f*_entrante(y). Les
+    /// entrées `recv` d'indice k ≥ 9 n (n surfels) désignent la cible k − 9 n.
+    /// Vides sans l'option.
+    pub mt_start: Vec<u32>,
+    pub msub_start: Vec<u32>,
+    pub msub: Vec<(u32, f32)>,
     pub stats: Stats,
+}
+
+/// Rebond miroir des surfels (`SOUFFLERIE_SURFELS_MIROIR=1`) : la population
+/// rassemblée dans chaque voxel ressort là où le rebond géométrique l'envoie
+/// (`surfel::mirror_overlaps`), au lieu d'être répartie uniformément sur le
+/// parallélépipède. La perturbation de la loi de paroi reste uniforme.
+pub fn mirror_on() -> bool {
+    std::env::var("SOUFFLERIE_SURFELS_MIROIR").is_ok_and(|v| v == "1")
 }
 
 /// Hauteur du relevé de la loi de paroi au-dessus du surfel (mailles), celle
@@ -504,15 +522,54 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         }
         rest_force.push(fr);
     }
-    // Entrées de dispersion par (maille, direction sortante) : (case 9 k + p, w).
+    // Entrées de dispersion par (maille, direction sortante) : (case 9 k + p, w),
+    // ou, rebond miroir, (9 n + t, w) pour la cible t.
+    let mirror = mirror_on();
+    let nk = keep.len();
     let mut scat: HashMap<usize, Vec<(usize, u32, f64)>> = HashMap::new();
+    let (mut mt_start, mut msub_start, mut msub) = (Vec::new(), Vec::new(), Vec::new());
+    let mirrors: Vec<Vec<Vec<([i32; 3], [i32; 3], f64)>>> = if mirror {
+        keep.par_iter().map(|&s| (0..9).map(|p| ls.mirror(s, p)).collect()).collect()
+    } else {
+        Vec::new()
+    };
+    if mirror {
+        mt_start.push(0u32);
+        msub_start.push(0u32);
+    }
     for (k, &s) in keep.iter().enumerate() {
         for p in 0..9 {
-            let Some((o, _)) = dirs(s, p) else { continue };
+            let Some((o, i)) = dirs(s, p) else {
+                if mirror {
+                    mt_start.push((msub_start.len() - 1) as u32);
+                }
+                continue;
+            };
             for &(c, w) in &pairs[k][p] {
-                if !is_ghost(c) {
+                if is_ghost(c) {
+                    continue;
+                }
+                if mirror {
+                    let t = msub_start.len() - 1;
+                    for &(vy, vx, m) in &mirrors[k][p] {
+                        if cell_of(vx) != Some(c) {
+                            continue;
+                        }
+                        let Some(cy) = cell_of(vy) else { continue };
+                        if vol[cy] == 0.0 {
+                            continue;
+                        }
+                        let g = gscale.get(&(cy, i)).copied().unwrap_or(1.0);
+                        msub.push((cy as u32, (m * g / w) as f32));
+                    }
+                    msub_start.push(msub.len() as u32);
+                    scat.entry(c).or_default().push((o, (9 * nk + t) as u32, w));
+                } else {
                     scat.entry(c).or_default().push((o, (9 * k + p) as u32, w));
                 }
+            }
+            if mirror {
+                mt_start.push((msub_start.len() - 1) as u32);
             }
         }
     }
@@ -549,9 +606,18 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         .collect();
     // Somme des poids de dispersion gardés par (surfel, paire).
     let mut scat_sum = vec![0.0f64; 9 * keep.len()];
+    // Cible t → paire 9 k + p (rebond miroir).
+    let mut t_pair = Vec::new();
+    for kp in 0..mt_start.len().saturating_sub(1) {
+        for _ in mt_start[kp]..mt_start[kp + 1] {
+            t_pair.push(kp);
+        }
+    }
     for v in scat.values() {
         for &(_, k, w) in v {
-            scat_sum[k as usize] += w;
+            let k = k as usize;
+            let kp = if k >= 9 * nk { t_pair[k - 9 * nk] } else { k };
+            scat_sum[kp] += w;
         }
     }
     let scat_inv: Vec<f64> = scat_sum.iter().map(|&s| if s > 0.0 { 1.0 / s } else { 0.0 }).collect();
@@ -692,6 +758,9 @@ pub fn prepare(tris: &[Tri], dims: [usize; 3], wrap: [bool; 3], ghost: bool) -> 
         scat_inv,
         probe_start,
         probe,
+        mt_start,
+        msub_start,
+        msub,
         stats,
     }
 }
@@ -701,6 +770,16 @@ impl SurfelSetup {
     /// u_τ : celle qui reçoit la plus grande part de ses parallélépipèdes
     /// parmi celles où `law` est vrai (loi de paroi), sinon parmi toutes ;
     /// u32::MAX si aucune.
+    /// Surfel d'une entrée de `recv` (case 9 s + p, ou cible miroir 9 n + t).
+    pub fn slot_surfel(&self, slot: usize) -> usize {
+        let ns = self.area.len();
+        if slot < 9 * ns {
+            return slot / 9;
+        }
+        let t = (slot - 9 * ns) as u32;
+        // Dernière paire dont le début des cibles est ≤ t.
+        self.mt_start.partition_point(|&v| v <= t).saturating_sub(1) / 9
+    }
     pub fn home_cells(&self, law: &[bool]) -> Vec<u32> {
         let ns = self.area.len();
         let mut best = vec![(u32::MAX, -1.0f64, false); ns];
@@ -708,7 +787,7 @@ impl SurfelSetup {
             for k in 0..18 {
                 let (e0, e1) = (self.recv_start[18 * r + k] as usize, self.recv_start[18 * r + k + 1] as usize);
                 for &(slot, w) in &self.recv[e0..e1] {
-                    let s = slot as usize / 9;
+                    let s = self.slot_surfel(slot as usize);
                     let (b, bw, bl) = best[s];
                     let l = law[r];
                     // Une maille de la loi de paroi l'emporte toujours.
@@ -727,6 +806,7 @@ impl SurfelSetup {
             + 4 * (self.gath_start.len() + 2 * self.gath.len())
             + self.area.len() * (8 * 16 + 16 + 12 * 4)
             + 4 * (self.probe_start.len() + 3 * self.probe.len())
+            + 4 * (self.mt_start.len() + 2 * self.msub_start.len() + 2 * self.msub.len())
     }
 }
 

@@ -344,6 +344,14 @@ impl LevelSurfels {
     }
     /// Voxels touchés par les parallélépipèdes du surfel `s`, avec leur
     /// volume fluide (0 : voxel entièrement solide).
+    /// Dispersion « miroir » du surfel `s`, paire `p` (`mirror_overlaps`) :
+    /// (voxel rassemblé y, voxel d'arrivée x, volume).
+    pub fn mirror(&self, s: usize, p: usize) -> Vec<([i32; 3], [i32; 3], f64)> {
+        let f = &self.surfels[s];
+        let (c1, c2) = (cvec(2 * p + 1), cvec(2 * p + 2));
+        let c = if dot(c1, f.normal) > 0.0 { c1 } else { c2 };
+        mirror_overlaps(self.poly(s), f.normal, c, self.weights(s, 2 * p + 1))
+    }
     pub fn touched(&self, s: usize) -> Vec<([i32; 3], f64)> {
         let mut v: Vec<[i32; 3]> = (0..9).flat_map(|p| self.weights(s, 2 * p + 1).iter().map(|o| o.voxel)).collect();
         v.sort();
@@ -456,22 +464,7 @@ fn sweep_overlaps(poly: &[P], n: P, c: P) -> Vec<Overlap> {
     if cn <= 0.0 {
         return Vec::new();
     }
-    let g = scale(poly.iter().fold([0.0; 3], |s, &p| add(s, p)), 1.0 / poly.len() as f64);
-    // Demi-espaces m·x ≤ d (m unitaire).
-    let mut planes: Vec<(P, f64)> = vec![(scale(n, -1.0), -dot(n, poly[0])), (n, dot(n, poly[0]) + cn)];
-    for k in 0..poly.len() {
-        let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
-        let m = cross(sub(b, a), c);
-        let l = norm(m);
-        if l <= 1e-14 * (1.0 + norm(sub(b, a))) {
-            continue;
-        }
-        let mut m = scale(m, 1.0 / l);
-        if dot(m, sub(g, a)) > 0.0 {
-            m = scale(m, -1.0);
-        }
-        planes.push((m, dot(m, a)));
-    }
+    let planes = sweep_planes(poly, n, c);
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for &p in poly {
@@ -526,6 +519,112 @@ fn sweep_overlaps(poly: &[P], n: P, c: P) -> Vec<Overlap> {
     }
     out
 }
+
+/// Demi-espaces m·x ≤ d (m unitaire) du parallélépipède
+/// {x + t c : x ∈ polygone, t ∈ [0, 1]} (c·n > 0).
+fn sweep_planes(poly: &[P], n: P, c: P) -> Vec<(P, f64)> {
+    let cn = dot(c, n);
+    let g = scale(poly.iter().fold([0.0; 3], |s, &p| add(s, p)), 1.0 / poly.len() as f64);
+    let mut planes: Vec<(P, f64)> = vec![(scale(n, -1.0), -dot(n, poly[0])), (n, dot(n, poly[0]) + cn)];
+    for k in 0..poly.len() {
+        let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
+        let m = cross(sub(b, a), c);
+        let l = norm(m);
+        if l <= 1e-14 * (1.0 + norm(sub(b, a))) {
+            continue;
+        }
+        let mut m = scale(m, 1.0 / l);
+        if dot(m, sub(g, a)) > 0.0 {
+            m = scale(m, -1.0);
+        }
+        planes.push((m, dot(m, a)));
+    }
+    planes
+}
+
+/// Rebond à sa place (dispersion « miroir ») : une particule entrante
+/// (direction −c) partie de x à la hauteur η = n·(x − x₀) au-dessus du
+/// surfel le frappe au temps η/h (h = c·n) et revient en sens inverse : au
+/// pas suivant elle est en φ(x) = x + (1 − 2η/h) c, à la hauteur h − η.
+/// φ est une involution affine du parallélépipède. Rend, pour chaque couple
+/// de voxels (y, x) de ses parts, le volume des points de la part de y que
+/// φ envoie dans x : la population rassemblée dans y ressort dans x avec ce
+/// poids, au lieu d'être répartie uniformément sur tout le parallélépipède
+/// (mélange sur une maille à chaque pas : diffusion numérique d'ordre 1).
+/// Pour chaque y, la somme sur x redonne sa part ; pour chaque x aussi
+/// (φ conserve le volume).
+/// Comme `clip`, sans rien faire si le plan laisse tout le polyèdre du bon
+/// côté (un plan confondu avec une face la dédoublerait), et vide s'il le
+/// laisse tout dehors.
+fn clip_safe(faces: Poly3, n: P, d: f64) -> Poly3 {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for f in &faces {
+        for &p in f {
+            let v = dot(n, p) - d;
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if hi <= 1e-10 {
+        faces
+    } else if lo >= -1e-10 {
+        Vec::new()
+    } else {
+        clip(faces, n, d)
+    }
+}
+
+pub fn mirror_overlaps(poly: &[P], n: P, c: P, parts: &[Overlap]) -> Vec<([i32; 3], [i32; 3], f64)> {
+    let h = dot(c, n);
+    if h <= 0.0 || parts.is_empty() {
+        return Vec::new();
+    }
+    let planes = sweep_planes(poly, n, c);
+    let d0 = dot(n, poly[0]);
+    // φ(x)_a = g_a·x + k_a, g_a = e_a − (2 c_a / h) n, k_a = c_a (1 + 2 d₀ / h).
+    let g: [P; 3] = [0, 1, 2].map(|a| {
+        let mut e = [0.0; 3];
+        e[a] = 1.0;
+        sub(e, scale(n, 2.0 * c[a] / h))
+    });
+    let k: [f64; 3] = [0, 1, 2].map(|a| c[a] * (1.0 + 2.0 * d0 / h));
+    let mut out = Vec::new();
+    for py in parts {
+        let ctr = py.voxel.map(|v| v as f64);
+        let mut fy = unit_box(ctr);
+        for &(m, d) in &planes {
+            fy = clip_safe(fy, m, d);
+            if fy.len() < 4 {
+                break;
+            }
+        }
+        if fy.len() < 4 {
+            continue;
+        }
+        for px in parts {
+            let mut f = fy.clone();
+            for a in 0..3 {
+                let l = norm(g[a]);
+                let (m, xa) = (scale(g[a], 1.0 / l), px.voxel[a] as f64);
+                // g_a·x + k_a ≤ x_a + ½ et ≥ x_a − ½.
+                f = clip_safe(f, m, (xa + 0.5 - k[a]) / l);
+                if f.len() < 4 {
+                    break;
+                }
+                f = clip_safe(f, scale(m, -1.0), -(xa - 0.5 - k[a]) / l);
+                if f.len() < 4 {
+                    break;
+                }
+            }
+            let v = if f.len() < 4 { 0.0 } else { volume(&f) };
+            if v > 1e-13 {
+                out.push((py.voxel, px.voxel, v));
+            }
+        }
+    }
+    out
+}
+
 
 /// Surfels du maillage `tris` (coordonnées de la veine, normales sortantes)
 /// à chaque niveau de `levels` (le premier est en général `Level::base()`).
@@ -709,6 +808,32 @@ impl LevelSurfels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rebond miroir : paroi plane z = z_w, voxel coupé k0 de volume fluide
+    /// V = ½ (paroi au nœud) ; direction normale : la moitié basse de k0 reçoit
+    /// la moitié haute du parallélépipède (voxel k0 + 1) et inversement ;
+    /// direction oblique : sommes par y et par x égales aux parts.
+    #[test]
+    fn miroir_paroi_plane() {
+        for &zw in &[0.0, 0.2, -0.35] {
+            let poly = vec![[-0.5, -0.5, zw], [0.5, -0.5, zw], [0.5, 0.5, zw], [-0.5, 0.5, zw]];
+            let n = [0.0, 0.0, 1.0];
+            for c in [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, -1.0, 1.0]] {
+                let parts = sweep_overlaps(&poly, n, c);
+                let m = mirror_overlaps(&poly, n, c, &parts);
+                for o in &parts {
+                    let sy: f64 = m.iter().filter(|e| e.0 == o.voxel).map(|e| e.2).sum();
+                    let sx: f64 = m.iter().filter(|e| e.1 == o.voxel).map(|e| e.2).sum();
+                    assert!((sy - o.vol).abs() < 1e-10 && (sx - o.vol).abs() < 1e-10, "{zw} {c:?} {o:?} {sy} {sx}");
+                }
+                if zw == 0.0 && c == [0.0, 0.0, 1.0] {
+                    // y = k0 + 1 (z = 1) → x = k0 (z = 0) : volume ½.
+                    let v: f64 = m.iter().filter(|e| e.0[2] == 1 && e.1[2] == 0).map(|e| e.2).sum();
+                    assert!((v - 0.5).abs() < 1e-10, "{m:?}");
+                }
+            }
+        }
+    }
 
     fn tri_area(t: &Tri) -> f64 {
         0.5 * norm(cross(sub(t[1], t[0]), sub(t[2], t[0])))
