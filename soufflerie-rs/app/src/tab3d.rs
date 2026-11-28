@@ -214,6 +214,7 @@ impl Tab3D {
             refine: 0,
             bands: 0,
             band_chord: true,
+            surfels: 0,
             wall: 0,
             xtr: 0.0,
             // Le calcul attend « Lancer » : le GPU est souvent partagé.
@@ -1098,7 +1099,7 @@ impl Tab3D {
         });
         // Couches pariétales : grilles deux fois plus fines chacune, limitées
         // à une couche autour de la paroi (stockage creux), sur une maquette STL.
-        let can_band = mesh && s.refine >= 1;
+        let can_band = mesh && s.refine >= 1 && s.surfels == 0;
         ui.add_enabled_ui(can_band, |ui| {
             ui.label("Couches pariétales").on_hover_text(
                 "Couches minces autour de la paroi, chacune deux fois plus fine : la résolution d'une grille entière près de la surface pour une fraction des mailles",
@@ -1122,7 +1123,9 @@ impl Tab3D {
         });
         if !can_band {
             ui.label(
-                RichText::new(if mesh {
+                RichText::new(if mesh && s.surfels > 0 {
+                    "Couches pariétales : pas avec les surfels."
+                } else if mesh {
                     "Couches pariétales : choisir d'abord une grille ×2 au moins."
                 } else {
                     "Couches pariétales : maquettes STL seulement."
@@ -1130,6 +1133,26 @@ impl Tab3D {
                 .small()
                 .weak(),
             );
+        }
+        // Représentation de la paroi : liens de Bouzidi (défaut, les plus
+        // justes) ou surfels (paroi volumique, README « Perte à l'arrêt et
+        // bord de fuite des surfels »), maquette STL seulement.
+        ui.add_enabled_ui(mesh, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Contour");
+                ui.selectable_value(&mut s.surfels, 0, "liens").on_hover_text(
+                    "Liens de Bouzidi (défaut) : les plus justes (aile 4° : Cx 0,018, perte d'arrêt 0,011 q)",
+                );
+                ui.selectable_value(&mut s.surfels, 1, "surfels").on_hover_text(
+                    "Paroi volumique par surfels (Chen et al. 1998) : masse exacte, mais perte d'arrêt au bord d'attaque (aile 4° : Cx 0,043, perte 0,049 q) ; sans couches pariétales",
+                );
+                ui.selectable_value(&mut s.surfels, 2, "surfels + miroir").on_hover_text(
+                    "Surfels avec rebond miroir : un tiers de perte d'arrêt en moins, préparation 2,3 fois plus longue, instable sans modèle de turbulence à grand Reynolds",
+                );
+            });
+        });
+        if s.surfels > 0 {
+            s.bands = 0;
         }
         ui.horizontal(|ui| {
             ui.label("Précision");

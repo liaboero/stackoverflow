@@ -96,6 +96,9 @@ pub struct Settings {
     /// Épaisseur minimale des couches : 1/8 de la longueur de référence
     /// (`--bande-corde 0.125`).
     pub band_chord: bool,
+    /// Représentation de la paroi (maquette STL) : 0 liens de Bouzidi
+    /// (défaut), 1 surfels (paroi volumique), 2 surfels avec rebond miroir.
+    pub surfels: u8,
     /// Paroi : 0 auto (loi de paroi dès Re = 5·10⁴), 1 loi de paroi, 2 sans.
     pub wall: u8,
     /// Transition imposée (fraction de la corde locale ; 0 : turbulent).
@@ -382,8 +385,9 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                         alpha_deg: st.alpha,
                         ..st.setup.clone()
                     };
-                    Body3D::from_mesh(&f.tris, st.l, &setup).map(|(b, i)| {
+                    Body3D::from_mesh(&f.tris, st.l, &setup).map(|(mut b, i)| {
                         mesh_info = Some(i);
+                        b.surfels = st.surfels > 0;
                         b
                     })
                 }
@@ -396,7 +400,7 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
             // boîte), comme `run3d --bande n|auto [--bande-corde 0.125]`.
             let mut note = None;
             let bands_of = |b: &Body3D, note: &mut Option<String>| -> Vec<f64> {
-                if b.mesh.is_none() || st.refine == 0 || st.bands == 0 {
+                if b.mesh.is_none() || st.refine == 0 || st.bands == 0 || b.surfels {
                     return Vec::new();
                 }
                 let n = match st.bands {
@@ -418,6 +422,13 @@ pub fn worker(shared: Arc<Mutex<Shared>>, repaint: impl Fn() + Send + 'static) {
                 };
                 band_thickness(n, st.l, st.refine, st.band_chord)
             };
+            // Rebond miroir des surfels : lu par `surfel3d::mirror_on` à la
+            // préparation de la paroi.
+            if st.surfels == 2 {
+                std::env::set_var("SOUFFLERIE_SURFELS_MIROIR", "1");
+            } else {
+                std::env::remove_var("SOUFFLERIE_SURFELS_MIROIR");
+            }
             match b.and_then(|b| {
                 let bands = bands_of(&b, &mut note);
                 Gpu3D::with_refinement_edges(&b, nu, U, st.fp16, sa, st.refine, false, false, &bands).map(|g| (g, b))
@@ -755,6 +766,7 @@ mod tests {
             refine: 0,
             bands: 0,
             band_chord: true,
+            surfels: 0,
             wall: 0,
             xtr: 0.0,
             running: false,
